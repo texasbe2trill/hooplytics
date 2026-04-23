@@ -15,6 +15,7 @@ Type a player's name. Get a real-time analytics report.
 
 - [⚡ TL;DR — just give me a prediction](#-tldr--just-give-me-a-prediction)
 - [⛹️ What you get](#️-what-you-get)
+- [🎞️ Gallery](#️-gallery)
 - [🚀 Install & first run](#-install--first-run)
 - [🎛️ The whole interface is one dictionary](#️-the-whole-interface-is-one-dictionary)
 - [🎯 Three recipes for asking your own questions](#-three-recipes-for-asking-your-own-questions)
@@ -77,7 +78,49 @@ That's it. The `'call'` field is the answer; everything else is the receipts. **
 
 ---
 
-## 🚀 Install & first run
+## �️ Gallery
+
+> Screenshots taken on the default LeBron / KD / Wemby roster (2025-26 season).
+
+### §1.1 — Interactive roster builder
+
+![Roster builder widget](docs/assets/roster-builder.png)
+
+*Live-search dropdown with ipywidgets — works in VS Code, JupyterLab, and Google Colab.*
+
+### §3.2 — 10-game rolling fantasy score
+
+![Rolling form chart](docs/assets/rolling-form-chart.png)
+
+*Wemby's line floats above the pack; KD's is a near-flatline (low CV). Built with Plotly — hover any point for game details.*
+
+### §3.3 — Player profile radar
+
+![Player profile radar](docs/assets/player-radar.png)
+
+*Min-max normalized across the cohort so the chart shows relative strength, not raw counts.*
+
+### §4.2 — Predicted vs. actual (held-out test set)
+
+![Predicted vs actual scatter grid](docs/assets/predicted-vs-actual.png)
+
+*8-panel Plotly scatter grid — one per model. Tight diagonal cloud on the deterministic stats, horizontal banding on the noisy ones (steals + blocks, turnovers). Hover any dot for date + matchup.*
+
+### §4.3 — Random-forest feature importances
+
+![RF feature importances](docs/assets/feature-importance.png)
+
+*Points dominates the fantasy-score model (as expected); minutes and points proxy offensive involvement for assists.*
+
+### §5 — Fantasy More/Less decisions
+
+![Fantasy decisions table](docs/assets/fantasy-decisions.png)
+
+*Per-player, per-stat More/Less call. Green = model beats the line by >10%; red = take the under.*
+
+---
+
+## �🚀 Install & first run
 
 ```bash
 git clone https://github.com/texasbe2trill/hooplytics.git
@@ -211,7 +254,14 @@ hooplytics/
 ├── requirements.txt
 ├── .gitignore
 ├── docs/                # rendered HTML of the notebook (e.g. for GitHub Pages)
-│   └── index.html
+│   ├── index.html
+│   └── assets/          # README gallery screenshots
+│       ├── roster-builder.png
+│       ├── rolling-form-chart.png
+│       ├── player-radar.png
+│       ├── predicted-vs-actual.png
+│       ├── feature-importance.png
+│       └── fantasy-decisions.png
 └── data/cache/          # Parquet game-log cache, one file per player (gitignored)
 ```
 
