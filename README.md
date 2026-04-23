@@ -2,6 +2,8 @@
 
 > *Box scores in. Hot takes out.*
 
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+
 **Hooplytics** turns NBA game logs into stats, visualizations, and machine-learning-powered More/Less calls. It's the Python port of [hooplyticsR](https://github.com/texasbe2trill/hooplyticsR) — same spirit, but reborn as an interactive Jupyter notebook with modern ML, slicker plots, and a one-knob configuration.
 
 Type a player's name. Get a real-time analytics report.
@@ -149,9 +151,10 @@ A pure script would lose the narrative. A dashboard would lose the source-of-tru
 hooplytics/
 ├── hooplytics.ipynb     # the whole report
 ├── README.md            # you are here
+├── LICENSE
 ├── requirements.txt
 ├── .gitignore
-└── data/cache/          # Parquet game-log cache, one file per player
+└── data/cache/          # Parquet game-log cache, one file per player (gitignored)
 ```
 
 ---
@@ -159,3 +162,11 @@ hooplytics/
 ## ⚖️ Disclaimer
 
 Hooplytics is for analytical exploration and entertainment. The "MORE ✅ / LESS ❌" calls are not investment advice. Bet responsibly — or better yet, don't bet at all and just enjoy the math.
+
+Game log data is fetched at runtime from the NBA Stats API and is **not redistributed** with this project. See the [NBA Terms of Use](https://www.nba.com/termsofuse).
+
+---
+
+## 📄 License
+
+MIT © 2026 [Chris Campbell](https://github.com/texasbe2trill). See [LICENSE](LICENSE) for details.
