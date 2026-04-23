@@ -43,7 +43,7 @@ jupyter lab hooplytics.ipynb
 Then in the notebook:
 
 1. **Hit `Run All`** (or `Restart and Run All`).
-2. **At the §1.1 prompts, just press Enter** at the season-range and first player prompts — that accepts the default 2023→2025 season range and the default LeBron / KD / Wemby roster. First run downloads game logs (~30s); every run after that is instant from the on-disk cache.
+2. **The §1.1 roster builder launches automatically.** The default LeBron / KD / Wemby roster (2023→2025) is pre-loaded — just click **✅ Done** to lock it in, or skip past the widget if you want to go straight to a prediction. First run downloads game logs (~30s); every run after that is instant from the on-disk cache.
 3. **Scroll to §6.3** and edit one line:
    ```python
    custom_prop(player="Victor Wembanyama", model_name="points", line=24.5)
@@ -63,7 +63,7 @@ That's it. The `'call'` field is the answer; everything else is the receipts. **
 
 | Section | What it does |
 |---|---|
-| **§1.1 Roster builder** | Interactive prompts with **player-name autocomplete** (powered by `nba_api`) and a season-range picker. Press Enter to accept defaults. |
+| **§1.1 Roster builder** | Interactive **widget** with a live-search player dropdown (powered by `nba_api`) and a season-range picker. The default roster is pre-loaded — click **✅ Done** to accept, or customize first. |
 | **§2 Tale of the tape** | Per-player μ / σ / fantasy score. Color-graded tables. |
 | **§2.1 Consistency leaderboard** | Coefficient of variation — *who can you actually trust on a Tuesday?* |
 | **§3 Distributional vibes** | Faceted histograms with KDE overlays, side-by-side violin grid for every core stat. |
