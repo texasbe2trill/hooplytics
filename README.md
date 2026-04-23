@@ -2,7 +2,7 @@
 
 > *Box scores in. Hot takes out.*
 
-**Hooplytics** turns NBA game logs into stats, visualizations, and machine-learning-powered More/Less calls. It's the Python port of [hooplyticsR](https://github.com/chris-campbell/hooplyticsR) — same spirit, but reborn as an interactive Jupyter notebook with modern ML, slicker plots, and a one-knob configuration.
+**Hooplytics** turns NBA game logs into stats, visualizations, and machine-learning-powered More/Less calls. It's the Python port of [hooplyticsR](https://github.com/texasbe2trill/hooplyticsR) — same spirit, but reborn as an interactive Jupyter notebook with modern ML, slicker plots, and a one-knob configuration.
 
 Type a player's name. Get a real-time analytics report.
 
@@ -28,7 +28,7 @@ Type a player's name. Get a real-time analytics report.
 ## 🚀 Quickstart
 
 ```bash
-git clone https://github.com/chris-campbell/hooplytics.git
+git clone https://github.com/texasbe2trill/hooplytics.git
 cd hooplytics
 
 python3.14 -m venv .venv
