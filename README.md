@@ -44,7 +44,7 @@ jupyter lab hooplytics.ipynb
 Then in the notebook:
 
 1. **Hit `Run All`** (or `Restart and Run All`).
-2. **The §1.1 roster builder launches automatically.** The default LeBron / KD / Wemby roster (2023→2025) is pre-loaded — just click **✅ Done** to lock it in, or skip past the widget if you want to go straight to a prediction. First run downloads game logs (~30s); every run after that is instant from the on-disk cache.
+2. **The §1.1 roster builder launches automatically.** The default LeBron / KD / Wemby roster (2023→2026) is pre-loaded — just click **✅ Done** to lock it in, or skip past the widget if you want to go straight to a prediction. First run downloads game logs (~30s); every run after that is instant from the on-disk cache.
 3. **Scroll to §6.3** and edit one line:
    ```python
    custom_prop(player="Victor Wembanyama", model_name="points", line=24.5)
@@ -149,13 +149,13 @@ ROSTER = {
     "Kevin Durant":      {"seasons": CURRENT, "proj": {"points": 26.0, "fantasy_score": 42.0}},
     "Victor Wembanyama": {"seasons": CURRENT, "proj": {"points": 25.0, "fantasy_score": 53.0}},
     # Add a row, that's it 👇
-    "Anthony Edwards":   {"seasons": nba_seasons(2023, 2025), "proj": {"points": 27.0}},
+    "Anthony Edwards":   {"seasons": nba_seasons(2023, 2026), "proj": {"points": 27.0}},
 }
 PLAYERS = list(ROSTER)
 SEASONS = sorted({s for entry in ROSTER.values() for s in entry["seasons"]})
 ```
 
-`seasons` accepts a list of NBA-style strings (`"2025-26"`); `nba_seasons(2023, 2025)` is a helper for ranges. `proj` is optional — if you skip it, the player's season average becomes the baseline. **5-game averages auto-derive from the data**, so you never maintain them by hand.
+`seasons` accepts a list of NBA-style strings (`"2025-26"`); `nba_seasons(2023, 2026)` is a helper for ranges (`start` = first season tip-off year, `end` = last season's ending year). `proj` is optional — if you skip it, the player's season average becomes the baseline. **5-game averages auto-derive from the data**, so you never maintain them by hand.
 
 > ⚠️ The **storyline prose** in §2, §2.1, §3.2, §4.1, §4.2, and §4.3 is written for the default LeBron / KD / Wemby trio. The *tables and charts* always reflect your roster, but the prose won't update — each affected cell flags this inline.
 
