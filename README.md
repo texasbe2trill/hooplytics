@@ -19,6 +19,7 @@ Type a player's name. Get a real-time analytics report.
 - [🚀 Install & first run](#-install--first-run)
 - [🎛️ The whole interface is one dictionary](#️-the-whole-interface-is-one-dictionary)
 - [🎯 Three recipes for asking your own questions](#-three-recipes-for-asking-your-own-questions)
+- [💰 Validate against live sportsbook lines](#-validate-against-live-sportsbook-lines)
 - [📊 The models under the hood](#-the-models-under-the-hood)
 - [🧠 Why a notebook (and not a script)?](#-why-a-notebook-and-not-a-script)
 - [🛠️ Requirements](#️-requirements)
@@ -58,6 +59,18 @@ That's it. The `'call'` field is the answer; everything else is the receipts. **
 
 > Want a player who isn't on your roster? `custom_prop` (§6.3) and `project_next_game` (§6.2) **fetch unknown players automatically** — pass any active NBA name and it'll pull the game logs for you.
 
+### 🎯 Level it up — validate against real sportsbooks (optional, ~60 seconds)
+
+Skip this if you just want a quick prediction. **Add it for a sharper read** — instead of a line you guessed, §5.1 pulls the **consensus median across DraftKings, FanDuel, BetMGM, Caesars, etc.** and runs every offered prop on your roster through the same decision engine, sorted by `|edge|`.
+
+1. **Grab a free key** at [the-odds-api.com](https://the-odds-api.com/) — no credit card, 500 requests/month (one notebook run uses ~5–15).
+2. **Drop it in `.env`** (gitignored):
+   ```bash
+   cp .env.example .env
+   echo "ODDS_API_KEY=your-key-here" >> .env   # or just edit .env in your editor
+   ```
+3. **Re-run §5.1.** Done. Without a key, the cell prints a friendly skip message and the rest of the notebook keeps running — no errors, no broken state.
+
 ---
 
 ## ⛹️ What you get
@@ -74,6 +87,7 @@ That's it. The `'call'` field is the answer; everything else is the receipts. **
 | **§4.2 Predicted-vs-actual scatter** | Eyeball calibration per stat. **Hover any dot to see the exact game (date + matchup) it came from.** |
 | **§4.3 Random-forest importances** | What did the model *actually* learn? |
 | **§5 More/Less engine** | Blends model predictions with your posted lines + auto-derived 5-game form into per-stat decisions. |
+| **§5.1 Live sportsbook validation** *(optional)* | Pulls **consensus lines from real books** (DraftKings, FanDuel, BetMGM…) via [The Odds API](https://the-odds-api.com/) and runs them through the same engine. Skip if you don't want an API key — cell auto-detects and no-ops. |
 | **§6 Try it yourself** | Three runnable recipes for hypothetical scenarios, next-game projections, and custom prop bets. |
 
 ---
@@ -117,6 +131,12 @@ That's it. The `'call'` field is the answer; everything else is the receipts. **
 ![Fantasy decisions table](docs/assets/fantasy-decisions.png)
 
 *Per-player, per-stat More/Less call. Green = model beats the line by >10%; red = take the under.*
+
+### §5.1 — Live sportsbook lines vs. model
+
+![Live sportsbook validation table](docs/assets/sportsbook-validation.png)
+
+*Real consensus lines from DraftKings, FanDuel, BetMGM and friends (median across all books) run through the same decision engine, sorted by `|edge|`. The `books` column shows how many sportsbooks contributed to each line — higher = sharper consensus. Requires a free [Odds API](https://the-odds-api.com/) key (set `ODDS_API_KEY` in `.env`).*
 
 ---
 
@@ -205,6 +225,48 @@ The engine inflates the threshold by a 10% confidence margin so it only fires on
 
 ---
 
+## 💰 Validate against live sportsbook lines
+
+§5.1 in the notebook is an **optional** cell that pulls live consensus lines from real sportsbooks ([DraftKings, FanDuel, BetMGM, etc.](https://the-odds-api.com/sports-odds-data/sports-apis.html)) via [The Odds API](https://the-odds-api.com/) and feeds every available prop into the same decision engine that powers §5. The output is a single table sorted by `|edge|`, so the strongest model–market disagreements float to the top.
+
+### Get a free API key (30 seconds)
+
+1. Go to **[the-odds-api.com](https://the-odds-api.com/#get-access)** and click **Get API Key**.
+2. Enter an email — no credit card, no phone number.
+3. The key arrives in your inbox immediately.
+
+The **free tier gives 500 requests/month**, which is plenty: one notebook run uses ~5–15 requests (1 to list events + 1 per upcoming NBA game).
+
+### Use the key
+
+The notebook reads `ODDS_API_KEY` **from your environment** — never hard-code it in the cell body, since `.ipynb` files are JSON and any committed key lives forever in git history. Two safe ways:
+
+**Option A — `.env` file (recommended).** A `.env.example` is included; copy it and fill in your key:
+
+```bash
+cp .env.example .env
+# then edit .env and paste your key after ODDS_API_KEY=
+```
+
+`.env` is already in `.gitignore`, so it can't be committed by accident.
+
+**Option B — shell export.** One-off, doesn't touch the repo:
+
+```bash
+export ODDS_API_KEY=your-key-here
+jupyter lab hooplytics.ipynb
+```
+
+Then re-run §5.1. **Without a key, the cell prints a friendly skip message and the rest of the notebook runs normally** — no errors, no broken state.
+
+> 🔐 If you ever paste a key directly into the notebook by mistake, [revoke it](https://the-odds-api.com/account/) and request a new one. Don't try to scrub it from git history — assume the moment a key hits a public repo, it's compromised.
+
+### Which markets are pulled
+
+Out of the box: `points`, `rebounds`, `assists`, and `3PM`. To add more (e.g. `player_threes_alternate`, `player_blocks`, `player_steals`), edit the `ODDS_MARKETS` dict at the top of the cell. The market keys live in The Odds API's [NBA player props docs](https://the-odds-api.com/sports-odds-data/betting-markets.html#player-props-api).
+
+---
+
 ## 📊 The models under the hood
 
 | Target          | Model            | Predictors                                          |
@@ -253,6 +315,7 @@ hooplytics/
 ├── LICENSE
 ├── requirements.txt
 ├── .gitignore
+├── .env.example         # copy to .env (gitignored) and add your ODDS_API_KEY
 ├── docs/                # rendered HTML of the notebook (e.g. for GitHub Pages)
 │   ├── index.html
 │   └── assets/          # README gallery screenshots
@@ -261,7 +324,8 @@ hooplytics/
 │       ├── player-radar.png
 │       ├── predicted-vs-actual.png
 │       ├── feature-importance.png
-│       └── fantasy-decisions.png
+│       ├── fantasy-decisions.png
+│       └── sportsbook-validation.png
 └── data/cache/          # Parquet game-log cache, one file per player (gitignored)
 ```
 

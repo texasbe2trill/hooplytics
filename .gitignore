@@ -4,3 +4,10 @@ __pycache__/
 data/cache/
 *.pyc
 .DS_Store
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.secret
+secrets.*
