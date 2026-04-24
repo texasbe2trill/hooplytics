@@ -45,29 +45,38 @@ jupyter lab hooplytics.ipynb
 Then in the notebook:
 
 1. **Hit `Run All`** (or `Restart and Run All`).
-2. **The §1.1 roster builder launches automatically.** The default LeBron / KD / Wemby roster (2023→2026) is pre-loaded — just click **✅ Done** to lock it in, or skip past the widget if you want to go straight to a prediction. First run downloads game logs (~30s); every run after that is instant from the on-disk cache.
-3. **Scroll to §6.3** and edit one line:
+2. **The §1.1 roster builder launches automatically.** A 6-player default roster (LeBron, KD, Wembanyama, SGA, Chet Holmgren, Ausar Thompson — 2024→2026) is pre-loaded. If `ODDS_API_KEY` is set, today's live sportsbook lines auto-fill the projection fields. Click **✅ Done** to lock in, or edit first. First run downloads game logs (~30s); every run after is instant from the on-disk cache.
+3. **Scroll to §6.3** and run the example cell. If `ODDS_API_KEY` is set, `line` is fetched automatically:
    ```python
-   custom_prop(player="Victor Wembanyama", model_name="points", line=24.5)
+   custom_prop(player="Victor Wembanyama", model_name="points")
+   # ℹ️ Live line: Victor Wembanyama points = 23.5 — live (17 books)
    ```
    Output:
    ```python
-   {'model prediction': 38.13, '5-game avg': 34.6, 'edge': +10.07, 'call': 'MORE ✅'}
+   {'line source': 'live (17 books)', 'model prediction': 35.33, 'posted line': 23.5, '5-game avg': 34.6, 'adj. threshold': 27.07, 'edge': 8.26, 'call': 'MORE ✅'}
    ```
+   No key? Just pass `line=<number>` manually.
 
 That's it. The `'call'` field is the answer; everything else is the receipts. **`MORE ✅` / `LESS ❌` only fires when the model beats the line by more than a 10% confidence margin** — small edges are reported as `LESS ❌` on purpose.
 
 > Want a player who isn't on your roster? `custom_prop` (§6.3) and `project_next_game` (§6.2) **fetch unknown players automatically** — pass any active NBA name and it'll pull the game logs for you.
 
-### 🎯 Level it up — validate against real sportsbooks (optional, ~60 seconds)
+### 🎯 Level it up — live sportsbook lines everywhere (optional, ~60 seconds)
 
-Skip this if you just want a quick prediction. **Add it for a sharper read** — instead of a line you guessed, §5.1 pulls the **consensus median across DraftKings, FanDuel, BetMGM, Caesars, etc.** and runs every offered prop on your roster through the same decision engine, sorted by `|edge|`.
+Skip this if you just want a quick prediction. **Add it for a much sharper read** — every part of the notebook that shows a More/Less decision will use real posted consensus lines (DraftKings, FanDuel, BetMGM, Caesars…) instead of the defaults you typed:
+
+| Where | Without key | With key |
+|---|---|---|
+| **§1.1 widget projections** | Static defaults (e.g. Wemby points = 25.0) | Auto-filled with today's live lines on load |
+| **§5 More/Less tables** | Widget projections, no margin | Live lines with 10% confidence margin |
+| **§5.1 sorted edge table** | Skipped | Full table sorted by `\|edge\|` |
+| **§6.3 `custom_prop`** | Requires `line=<number>` | `line` optional — fetched automatically |
 
 1. **Grab a free key** at [the-odds-api.com](https://the-odds-api.com/) — no credit card, 500 requests/month (one notebook run uses ~5–15).
 2. **Store it securely** — pick whichever fits your setup:
    - **Google Colab:** 🔑 Secrets tab → **New secret** → Name: `ODDS_API_KEY` → toggle **Notebook access** on. Done — no files needed.
    - **Local:** `cp .env.example .env`, then paste your key after `ODDS_API_KEY=` in the new file (gitignored).
-3. **Re-run §5.1.** Done. Without a key, the cell prints a friendly skip message and the rest of the notebook keeps running — no errors, no broken state.
+3. **Re-run from §1.1.** Done. Without a key, everything still runs — just with default projections and no margin.
 
 ---
 
@@ -75,36 +84,34 @@ Skip this if you just want a quick prediction. **Add it for a sharper read** —
 
 | Section | What it does |
 |---|---|
-| **§1.1 Roster builder** | Interactive **widget** with a live-search player dropdown (powered by `nba_api`) and a season-range picker. The default roster is pre-loaded — click **✅ Done** to accept, or customize first. |
+| **§1.1 Roster builder** | Interactive **widget** with a live-search player dropdown and a season-range picker. Default seasons are **2024→2026**. When `ODDS_API_KEY` is set, today's live sportsbook lines **auto-fill the projection fields** on load — no manual entry needed. |
 | **§2 Tale of the tape** | Per-player μ / σ / fantasy score. Color-graded tables. |
 | **§2.1 Consistency leaderboard** | Coefficient of variation — *who can you actually trust on a Tuesday?* |
 | **§3 Distributional vibes** | Faceted histograms with KDE overlays, side-by-side violin grid for every core stat. |
-| **§3.2 Rolling form chart** | Interactive 10-game rolling fantasy line. Hover, isolate, compare. |
+| **§3.2 Rolling form chart** | Interactive 10-game rolling fantasy line. Hover, isolate, compare. Season breaks render as visible gaps (no straight-line bridges across the offseason). |
 | **§3.3 Player profile radar** | Min-max normalized polar chart — at-a-glance archetypes. |
 | **§4 8 ML models** | scikit-learn `Pipeline`s tuned via `GridSearchCV`, evaluated on a 20% held-out split with RMSE / MAE / R². |
 | **§4.2 Predicted-vs-actual scatter** | Eyeball calibration per stat. **Hover any dot to see the exact game (date + matchup) it came from.** |
 | **§4.3 Random-forest importances** | What did the model *actually* learn? |
-| **§5 More/Less engine** | Blends model predictions with your posted lines + auto-derived 5-game form into per-stat decisions. |
-| **§5.1 Live sportsbook validation** *(optional)* | Pulls **consensus lines from real books** (DraftKings, FanDuel, BetMGM…) via [The Odds API](https://the-odds-api.com/) and runs them through the same engine. Skip if you don't want an API key — cell auto-detects and no-ops. |
+| **§5 More/Less engine** | Blends model predictions with posted lines + auto-derived 5-game form into per-stat decisions. Lines come from live sportsbooks (with 10% vig margin) when `ODDS_API_KEY` is set; falls back to widget projections (no margin) when not. A `source` column shows which was used. |
+| **§5.1 Live sportsbook lines** *(optional)* | Re-uses the lines fetched in §5 to show **every player-prop sorted by `\|edge\|`** — strongest model–market disagreements at the top. Skip if you don't have an API key — auto-detects and no-ops. |
 | **§6 Try it yourself** | Three runnable recipes for hypothetical scenarios, next-game projections, and custom prop bets. |
 
 ---
 
 ## 🎞️ Gallery
 
-> Screenshots taken on the default LeBron / KD / Wemby roster (2025-26 season).
-
 ### §1.1 — Interactive roster builder
 
 ![Roster builder widget](docs/assets/roster-builder.png)
 
-*Live-search dropdown with ipywidgets — works in VS Code, JupyterLab, and Google Colab.*
+*Live-search dropdown with ipywidgets — works in VS Code, JupyterLab, and Google Colab. When `ODDS_API_KEY` is set, a status banner confirms how many projection fields were pre-filled from today's live sportsbook lines.*
 
 ### §3.2 — 10-game rolling fantasy score
 
 ![Rolling form chart](docs/assets/rolling-form-chart.png)
 
-*Wemby's line floats above the pack; KD's is a near-flatline (low CV). Built with Plotly — hover any point for game details.*
+*Wemby's line floats above the pack; KD's is a near-flatline (low CV). Built with Plotly — hover any point for game details. Offseason gaps render as visible line breaks rather than straight bridges.*
 
 ### §3.3 — Player profile radar
 
@@ -122,19 +129,19 @@ Skip this if you just want a quick prediction. **Add it for a sharper read** —
 
 ![RF feature importances](docs/assets/feature-importance.png)
 
-*Points dominates the fantasy-score model (as expected); minutes and points proxy offensive involvement for assists.*
+*Points dominates the fantasy-score model (as expected); rebounds is the next-biggest contributor because of Wemby's volume. Note: only `fantasy_score` uses a Random Forest — the other targets use kNN or Ridge.*
 
 ### §5 — Fantasy More/Less decisions
 
 ![Fantasy decisions table](docs/assets/fantasy-decisions.png)
 
-*Per-player, per-stat More/Less call. Green = model beats the line by >10%; red = take the under.*
+*Per-player, per-stat More/Less call. The `source` column shows `live` (Odds API with 10% vig margin), `widget` (your §1.1 entry, no margin), or `season avg` (fallback, no margin). Green = model beats the adjusted threshold; red = take the under.*
 
 ### §5.1 — Live sportsbook lines vs. model
 
 ![Live sportsbook validation table](docs/assets/sportsbook-validation.png)
 
-*Real consensus lines from DraftKings, FanDuel, BetMGM and friends (median across all books) run through the same decision engine, sorted by `|edge|`. The `books` column shows how many sportsbooks contributed to each line — higher = sharper consensus. Requires a free [Odds API](https://the-odds-api.com/) key (set `ODDS_API_KEY` in `.env`).*
+*Every player-prop available for today's games, sorted by `|edge|` so the strongest model–market disagreements float to the top. The `books` column shows how many sportsbooks contributed to each consensus line — higher = sharper. Requires a free [Odds API](https://the-odds-api.com/) key.*
 
 ---
 
@@ -163,11 +170,14 @@ Run all cells (`⏵ Run All` / `Restart and Run All`). The first run pulls game 
 
 ```python
 ROSTER = {
-    "LeBron James":      {"seasons": CURRENT, "proj": {"points": 21.5, "fantasy_score": 41.5, "pra": 34.0}},
-    "Kevin Durant":      {"seasons": CURRENT, "proj": {"points": 26.0, "fantasy_score": 42.0}},
-    "Victor Wembanyama": {"seasons": CURRENT, "proj": {"points": 25.0, "fantasy_score": 53.0}},
+    "LeBron James":            {"seasons": CURRENT, "proj": {"points": 21.5, "fantasy_score": 41.5, "pra": 34.0}},
+    "Kevin Durant":            {"seasons": CURRENT, "proj": {"points": 26.0, "fantasy_score": 42.0}},
+    "Victor Wembanyama":       {"seasons": CURRENT, "proj": {"points": 25.0, "fantasy_score": 53.0}},
+    "Shai Gilgeous-Alexander": {"seasons": CURRENT, "proj": {"points": 31.0, "fantasy_score": 50.0}},
+    "Chet Holmgren":           {"seasons": CURRENT, "proj": {"points": 18.0, "fantasy_score": 38.0}},
+    "Ausar Thompson":          {"seasons": CURRENT, "proj": {"points": 14.5, "fantasy_score": 34.0}},
     # Add a row, that's it 👇
-    "Anthony Edwards":   {"seasons": nba_seasons(2023, 2026), "proj": {"points": 27.0}},
+    "Anthony Edwards":         {"seasons": nba_seasons(2024, 2026), "proj": {"points": 27.0}},
 }
 PLAYERS = list(ROSTER)
 SEASONS = sorted({s for entry in ROSTER.values() for s in entry["seasons"]})
@@ -175,7 +185,7 @@ SEASONS = sorted({s for entry in ROSTER.values() for s in entry["seasons"]})
 
 `seasons` accepts a list of NBA-style strings (`"2025-26"`); `nba_seasons(2023, 2026)` is a helper for ranges (`start` = first season tip-off year, `end` = last season's ending year). `proj` is optional — if you skip it, the player's season average becomes the baseline. **5-game averages auto-derive from the data**, so you never maintain them by hand.
 
-> ⚠️ The **storyline prose** in §2, §2.1, §3.2, §4.1, §4.2, and §4.3 is written for the default LeBron / KD / Wemby trio. The *tables and charts* always reflect your roster, but the prose won't update — each affected cell flags this inline.
+> ⚠️ The **storyline prose** in §2, §2.1, §3.2, §4.1, and §4.3 was written for an earlier 3-player roster (LeBron / KD / Wemby). Tables and charts always reflect your live roster, but the prose is illustrative — each affected cell flags this inline.
 
 ---
 
@@ -210,13 +220,14 @@ Uses a rolling median (robust to outliers) of the player's actual recent box sco
 > *"Wemby's points line tonight is 24.5. Take the over?"*
 
 ```python
-custom_prop(
-    player="Victor Wembanyama",
-    model_name="points",
-    line=24.5,
-    last_n=5,   # window for both the prediction features AND the recent average
-)
-# → {'model prediction': 38.13, '5-game avg': 34.6, 'edge': +10.07, 'call': 'MORE ✅'}
+# Option A — let the engine fetch the live line automatically (requires ODDS_API_KEY)
+custom_prop(player="Victor Wembanyama", model_name="points", last_n=5)
+# ℹ️  Live line: Victor Wembanyama points = 23.5 — live (17 books)
+# → {'line source': 'live (17 books)', 'model prediction': 35.33, 'posted line': 23.5, '5-game avg': 34.6, 'adj. threshold': 27.07, 'edge': 8.26, 'call': 'MORE ✅'}
+
+# Option B — supply the line manually (no API key needed)
+custom_prop(player="Victor Wembanyama", model_name="points", line=24.5, last_n=5)
+# → {'line source': 'manual', 'model prediction': 35.33, 'posted line': 24.5, '5-game avg': 34.6, 'adj. threshold': 28.26, 'edge': 7.07, 'call': 'MORE ✅'}
 ```
 
 The engine inflates the threshold by a 10% confidence margin so it only fires on conviction.
@@ -225,7 +236,15 @@ The engine inflates the threshold by a 10% confidence margin so it only fires on
 
 ## 💰 Validate against live sportsbook lines
 
-§5.1 in the notebook is an **optional** cell that pulls live consensus lines from real sportsbooks ([DraftKings, FanDuel, BetMGM, etc.](https://the-odds-api.com/sports-odds-data/sports-apis.html)) via [The Odds API](https://the-odds-api.com/) and feeds every available prop into the same decision engine that powers §5. The output is a single table sorted by `|edge|`, so the strongest model–market disagreements float to the top.
+Setting `ODDS_API_KEY` unlocks three things at once — you don't need to do anything extra per section:
+
+| When triggered | What happens |
+|---|---|
+| **§1.1 cell runs** | Widget projection fields are pre-filled with today's consensus lines for `points`, `rebounds`, `assists`, and `threepm` wherever available. A banner confirms how many were filled. |
+| **§5 cell runs** | `fantasy_decisions()` uses live lines (with 10% vig margin) instead of widget defaults. |
+| **§6.3 `custom_prop` with no `line=`** | Live line fetched on demand for any player with a game today. |
+
+§5.1 re-uses the lines already fetched in §5 (no extra API calls) to render a full sorted-by-`|edge|` view across all props and players.
 
 ### Get a free API key (30 seconds)
 
@@ -263,13 +282,13 @@ export ODDS_API_KEY=your-key-here
 jupyter lab hooplytics.ipynb
 ```
 
-Then re-run §5.1. **Without a key, the cell prints a friendly skip message and the rest of the notebook runs normally** — no errors, no broken state.
+Then re-run from §1.1. **Without a key, everything still runs** — widget defaults, no margin, no errors.
 
 > 🔐 If you ever paste a key directly into the notebook by mistake, [revoke it](https://the-odds-api.com/account/) and request a new one. Don't try to scrub it from git history — assume the moment a key hits a public repo, it's compromised.
 
 ### Which markets are pulled
 
-Out of the box: `points`, `rebounds`, `assists`, and `3PM`. To add more (e.g. `player_threes_alternate`, `player_blocks`, `player_steals`), edit the `ODDS_MARKETS` dict at the top of the cell. The market keys live in The Odds API's [NBA player props docs](https://the-odds-api.com/sports-odds-data/betting-markets.html#player-props-api).
+Out of the box: `points`, `rebounds`, `assists`, and `3PM`. To add more (e.g. `player_blocks`, `player_steals`), edit the `ODDS_MARKETS` dict in the **imports cell** (cell 4, just below the key setup). The market keys live in The Odds API's [NBA player props docs](https://the-odds-api.com/sports-odds-data/betting-markets.html#player-props-api).
 
 ---
 
@@ -279,12 +298,18 @@ Out of the box: `points`, `rebounds`, `assists`, and `3PM`. To add more (e.g. `p
 |-----------------|------------------|-----------------------------------------------------|
 | `pts`           | kNN (tuned)      | `fgm, fg3m, ftm, min, fg_pct, ft_pct`               |
 | `reb`           | kNN (tuned)      | `oreb, dreb, min`                                   |
-| `ast`           | RandomForest     | `min, pts, plus_minus, fga`                         |
+| `ast`           | Ridge (tuned)    | `ast_l5, ast_l10, ast_l30, ast_per36_l30, min_l10, usg_proxy_l30` |
 | `pra`           | kNN (tuned)      | `pts, reb, ast, min, plus_minus`                    |
 | `fg3m`          | kNN (tuned)      | `fg3a, min, fg3_pct`                                |
-| `stl_blk`       | kNN (tuned)      | `min, plus_minus`                                   |
-| `tov`           | kNN (tuned)      | `min, fga, ast`                                     |
+| `stl_blk`       | Ridge (tuned)    | `stl_l10, blk_l10, stl_l30, blk_l30, stl_per36_l30, blk_per36_l30, min_l30` |
+| `tov`           | Ridge (tuned)    | `tov_l5, tov_l10, tov_l30, tov_per36_l30, min_l10, usg_proxy_l30, ast_l10, fga_l10` |
 | `fantasy_score` | RandomForest     | `pts, reb, ast, stl, blk, tov, min, plus_minus`     |
+
+> **Pregame-safe rolling features** — the `_l5` / `_l10` / `_l30` suffixes are per-player rolling means over the **prior 5 / 10 / 30 games** (computed via `groupby('player').shift(1).rolling(N).mean()`, so the current game is never in its own feature row — no leakage). `_per36_l30` normalizes a stat to a per-36-minute rate, and `usg_proxy_l30 = (FGA + 0.44·FTA + TOV) / MIN` rolled over 30 games. The noisy "context" targets (`ast`, `stl_blk`, `tov`) get these rolling features because their game-to-game variance is dominated by player role / usage rather than same-game proxies — same-game features capped them at R² ≤ 0.20.
+>
+> **Why Ridge for the noisy targets?** kNN and Random Forest overfit when the rolling-window features are highly collinear (they encode overlapping recent history). Ridge's L2 penalty turns that collinearity into a feature: it learns a stable linear blend across the windows so the prediction tracks both short-term form (`_l5`) and the player's longer-run baseline (`_l30`).
+>
+> **A note on `stl_blk` and `tov` — the noise floor is real.** Per-game steals+blocks and turnovers are dominated by Poisson-like within-player noise. We verified this with an *oracle* sanity check: even predicting these targets from the player's **same-game** minutes, FGA, FGM, plus_minus, etc. (features no honest pregame model could ever see) caps Random Forest at R² ≈ **0.12–0.13** on the 6-player default roster. In other words, the per-game grain has so little explainable signal that *no* feature set or model can clear R² ≥ 0.40 — the variance simply isn't there to explain. Current results: `stl_blk` R² ≈ 0.16, `tov` R² ≈ 0.09 (both up from R² ≤ 0.10 / R² ≈ −0.24 before the rolling-features rework). For comparison, `assists` — which has real between-player signal — cleanly hit **R² ≈ 0.47** with the same machinery. **Treat the `stl_blk` and `tov` predictions as weak priors, not point estimates**, and rely on the More/Less engine's confidence margin (§5) when betting these stats.
 
 - **Pipelines** wrap `StandardScaler` + estimator so scaling is fit on training folds only (no leakage). The RF pipelines use `StandardScaler(with_mean=False)` since trees don't need centering.
 - **kNN** tuned over `n_neighbors ∈ [3, 21]` (`weights="distance"`) via `GridSearchCV` with **5-fold repeated CV** (2 repeats), mirroring the original R `caret` setup.
