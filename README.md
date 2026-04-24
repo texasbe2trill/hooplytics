@@ -64,11 +64,9 @@ That's it. The `'call'` field is the answer; everything else is the receipts. **
 Skip this if you just want a quick prediction. **Add it for a sharper read** — instead of a line you guessed, §5.1 pulls the **consensus median across DraftKings, FanDuel, BetMGM, Caesars, etc.** and runs every offered prop on your roster through the same decision engine, sorted by `|edge|`.
 
 1. **Grab a free key** at [the-odds-api.com](https://the-odds-api.com/) — no credit card, 500 requests/month (one notebook run uses ~5–15).
-2. **Drop it in `.env`** (gitignored):
-   ```bash
-   cp .env.example .env
-   echo "ODDS_API_KEY=your-key-here" >> .env   # or just edit .env in your editor
-   ```
+2. **Store it securely** — pick whichever fits your setup:
+   - **Google Colab:** 🔑 Secrets tab → **New secret** → Name: `ODDS_API_KEY` → toggle **Notebook access** on. Done — no files needed.
+   - **Local:** `cp .env.example .env`, then paste your key after `ODDS_API_KEY=` in the new file (gitignored).
 3. **Re-run §5.1.** Done. Without a key, the cell prints a friendly skip message and the rest of the notebook keeps running — no errors, no broken state.
 
 ---
@@ -239,9 +237,17 @@ The **free tier gives 500 requests/month**, which is plenty: one notebook run us
 
 ### Use the key
 
-The notebook reads `ODDS_API_KEY` **from your environment** — never hard-code it in the cell body, since `.ipynb` files are JSON and any committed key lives forever in git history. Two safe ways:
+The notebook reads `ODDS_API_KEY` from the **first** source it finds below — never hard-code it in the cell body, since `.ipynb` files are JSON and any committed key lives forever in git history.
 
-**Option A — `.env` file (recommended).** A `.env.example` is included; copy it and fill in your key:
+**Option A — Google Colab Secrets *(Colab only)*.** No files to manage:
+
+1. In Colab, click the **🔑 Secrets** icon in the left sidebar.
+2. Click **New secret** → Name: `ODDS_API_KEY`, Value: your key.
+3. Toggle **Notebook access** on.
+
+The cell calls `google.colab.userdata.get('ODDS_API_KEY')` automatically and loads the value into the environment — nothing else to do.
+
+**Option B — `.env` file *(recommended locally)*.** A `.env.example` is included; copy it and fill in your key:
 
 ```bash
 cp .env.example .env
@@ -250,7 +256,7 @@ cp .env.example .env
 
 `.env` is already in `.gitignore`, so it can't be committed by accident.
 
-**Option B — shell export.** One-off, doesn't touch the repo:
+**Option C — shell export.** One-off, doesn't touch the repo:
 
 ```bash
 export ODDS_API_KEY=your-key-here
