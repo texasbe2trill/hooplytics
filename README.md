@@ -73,12 +73,12 @@ That's it. The `'call'` field is the answer; everything else is the receipts. **
 | **§4 8 ML models** | scikit-learn `Pipeline`s tuned via `GridSearchCV`, evaluated on a 20% held-out split with RMSE / MAE / R². |
 | **§4.2 Predicted-vs-actual scatter** | Eyeball calibration per stat. **Hover any dot to see the exact game (date + matchup) it came from.** |
 | **§4.3 Random-forest importances** | What did the model *actually* learn? |
-| **§5 More/Less engine** | Blends model predictions with sportsbook lines + auto-derived 5-game form into per-stat decisions. |
+| **§5 More/Less engine** | Blends model predictions with your posted lines + auto-derived 5-game form into per-stat decisions. |
 | **§6 Try it yourself** | Three runnable recipes for hypothetical scenarios, next-game projections, and custom prop bets. |
 
 ---
 
-## �️ Gallery
+## 🎞️ Gallery
 
 > Screenshots taken on the default LeBron / KD / Wemby roster (2025-26 season).
 
@@ -120,7 +120,7 @@ That's it. The `'call'` field is the answer; everything else is the receipts. **
 
 ---
 
-## �🚀 Install & first run
+## 🚀 Install & first run
 
 ```bash
 git clone https://github.com/texasbe2trill/hooplytics.git
@@ -187,7 +187,7 @@ project_next_game("Victor Wembanyama", last_n=10)
 
 Uses a rolling median (robust to outliers) of the player's actual recent box scores to feed every model. **Players not in your `ROSTER` are fetched automatically.**
 
-### 3. Run a sportsbook line through the decision engine
+### 3. Run a posted line through the decision engine
 
 > *"Wemby's points line tonight is 24.5. Take the over?"*
 
@@ -223,7 +223,7 @@ The engine inflates the threshold by a 10% confidence margin so it only fires on
 - **Random Forest** tunes `n_estimators ∈ {200, 400}`, `max_depth ∈ {None, 10, 20}`, and `min_samples_leaf ∈ {1, 3}`.
 - **80/20 train/test split**, seed `123` everywhere, scoring = `neg_root_mean_squared_error`.
 
-**Fantasy scoring (loosely DraftKings-flavored, no double-double bonuses):** `pts·1 + reb·1.2 + ast·1.5 + stl·3 + blk·3 − tov·1`.
+**Fantasy scoring (no double-double bonuses):** `pts·1 + reb·1.2 + ast·1.5 + stl·3 + blk·3 − tov·1`.
 
 ---
 
