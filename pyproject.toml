@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hooplytics"
 version = "0.1.0"
-description = "NBA player projections + More/Less decision engine — CLI and Streamlit UI."
+description = "NBA player analytics workbench — projections, live line context, and model diagnostics via Streamlit, CLI, and Jupyter."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "texasbe2trill" }]
-keywords = ["nba", "basketball", "analytics", "ml", "betting", "fantasy"]
+keywords = ["nba", "basketball", "analytics", "ml", "sports", "fantasy", "streamlit"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",

@@ -413,13 +413,13 @@ Adds Jupyter, ipywidgets, and notebook-only visualization helpers.
 </td>
 <td width="33%" valign="top">
 
-#### From requirements.txt
+#### Web / Streamlit only
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Pinned versions for reproducible environments.
+Minimal install for Streamlit Cloud or web-only deploys. Does not include notebook deps.
 
 </td>
 </tr>
