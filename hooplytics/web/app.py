@@ -227,7 +227,7 @@ def _render_sidebar() -> tuple[str, str]:
         # API key
         st.markdown('<p class="hl-section">Live odds</p>', unsafe_allow_html=True)
         st.caption(
-            "Bring your own Odds API key for this session. The Streamlit app does "
+            "Bring your own key from The Odds API for this session. The Streamlit app does "
             "not load a deployment key into the UI, and your pasted key is not "
             "written to the repository."
         )
@@ -239,12 +239,12 @@ def _render_sidebar() -> tuple[str, str]:
                 st.session_state.session_odds_api_key
             )
         st.text_input(
-            "Odds API key",
+            "The Odds API key",
             type="password",
             key="session_odds_api_key_input",
             on_change=_sync_session_odds_api_key,
             label_visibility="collapsed",
-            placeholder="Paste your Odds API key for this session",
+            placeholder="Paste your key from The Odds API",
         )
         api_key = st.session_state.session_odds_api_key.strip()
         cols = st.columns(3)
@@ -279,7 +279,7 @@ def page_home(roster: dict, api_key: str) -> None:
         f'<span class="hl-status-dot"></span>LIVE LINES · UPDATED {last_refresh}'
         if api_key else
         f'<span class="hl-status-dot" style="background:#f5b041;box-shadow:0 0 0 3px rgba(245,176,65,0.18)"></span>'
-        f'OFFLINE · ADD ODDS API KEY FOR LIVE LINES'
+        f'OFFLINE · ADD THE ODDS API KEY FOR LIVE LINES'
     )
     st.markdown(
         f'<div class="hl-brand-row">'
