@@ -13,7 +13,7 @@ import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import GridSearchCV, RepeatedKFold, train_test_split
+from sklearn.model_selection import GridSearchCV, KFold, train_test_split
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -53,15 +53,15 @@ def build_estimator(kind: str) -> tuple[Pipeline, dict]:
             ("scale", StandardScaler()),
             ("model", KNeighborsRegressor(weights="distance")),
         ])
-        return pipe, {"model__n_neighbors": list(range(3, 22))}
+        return pipe, {"model__n_neighbors": [3, 5, 7, 10, 15, 20]}
     if kind == "rf":
         pipe = Pipeline([
             ("scale", StandardScaler(with_mean=False)),
             ("model", RandomForestRegressor(random_state=123, n_jobs=-1)),
         ])
         return pipe, {
-            "model__n_estimators": [200, 400],
-            "model__max_depth": [None, 10, 20],
+            "model__n_estimators": [100, 200],
+            "model__max_depth": [None, 10],
             "model__min_samples_leaf": [1, 3],
         }
     if kind == "ridge":
@@ -69,7 +69,7 @@ def build_estimator(kind: str) -> tuple[Pipeline, dict]:
             ("scale", StandardScaler()),
             ("model", Ridge(random_state=123)),
         ])
-        return pipe, {"model__alpha": [0.01, 0.1, 1.0, 10.0, 100.0, 1000.0]}
+        return pipe, {"model__alpha": [0.1, 1.0, 10.0, 100.0]}
     raise ValueError(f"Unknown estimator kind '{kind}'")
 
 
@@ -97,7 +97,7 @@ def train_models(
         modeling_df, test_size=test_size, random_state=random_state
     )
 
-    cv = RepeatedKFold(n_splits=5, n_repeats=2, random_state=random_state)
+    cv = KFold(n_splits=3, shuffle=True, random_state=random_state)
     estimators: dict[str, Pipeline] = {}
     cv_rmse: dict[str, float] = {}
     best_params: dict[str, dict] = {}
