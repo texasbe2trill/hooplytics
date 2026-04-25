@@ -48,7 +48,7 @@ inject_css()
 
 
 # Caching ─────────────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 24, max_entries=1)
 def _all_active_players() -> list[str]:
     """Return sorted list of all active NBA player names (cached for the session)."""
     try:
@@ -63,13 +63,13 @@ def _store() -> PlayerStore:
     return PlayerStore()
 
 
-@st.cache_data(show_spinner="Fetching season game logs…", ttl=60 * 60 * 6)
+@st.cache_data(show_spinner="Fetching season game logs…", ttl=60 * 60 * 6, max_entries=3)
 def _player_data(roster_key: str) -> pd.DataFrame:
     roster = json.loads(roster_key)
     return _store().load_player_data(roster)
 
 
-@st.cache_resource(show_spinner="Training models…")
+@st.cache_resource(show_spinner="Training models…", max_entries=1)
 def _bundle(roster_key: str) -> ModelBundle:
     return ensure_models(_player_data(roster_key))
 
@@ -81,12 +81,12 @@ def _live_lines(api_key: str, players_key: str, _bust: int = 0) -> pd.DataFrame:
     return fetch_live_player_lines(api_key, json.loads(players_key))
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 6, max_entries=3)
 def _modeling_frame(roster_key: str) -> pd.DataFrame:
     return _store().modeling_frame(_player_data(roster_key))
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 6, max_entries=30)
 def _player_games(roster_key: str, player: str) -> pd.DataFrame:
     df = _player_data(roster_key)
     return df[df["player"] == player].sort_values("game_date").reset_index(drop=True)
