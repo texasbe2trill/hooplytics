@@ -2,7 +2,12 @@
 __pycache__/
 .ipynb_checkpoints/
 data/cache/
+.hooplytics_cache/
 *.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
 .DS_Store
 
 # Secrets — never commit

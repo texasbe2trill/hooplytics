@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hooplytics"
+version = "0.1.0"
+description = "NBA player projections + More/Less decision engine — CLI and Streamlit UI."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "texasbe2trill" }]
+keywords = ["nba", "basketball", "analytics", "ml", "betting", "fantasy"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+dependencies = [
+    "nba_api>=1.4.1",
+    "pandas>=2.2",
+    "numpy>=2.1",
+    "scikit-learn>=1.5",
+    "joblib>=1.3",
+    "pyarrow>=17.0",
+    "requests>=2.32",
+    "plotly>=5.24",
+    "typer>=0.12",
+    "rich>=13.7",
+    "rapidfuzz>=3.9",
+]
+
+[project.optional-dependencies]
+web = [
+    "streamlit>=1.36",
+]
+notebook = [
+    "matplotlib>=3.9",
+    "seaborn>=0.13",
+    "ipykernel>=6.29",
+    "jupyterlab>=4.2",
+    "ipywidgets>=8.1",
+    "tqdm>=4.66",
+]
+test = [
+    "pytest>=8.0",
+]
+all = [
+    "hooplytics[web,notebook,test]",
+]
+
+[project.scripts]
+hooplytics = "hooplytics.cli:main"
+hooplytics-web = "hooplytics.web.launcher:main"
+
+[project.urls]
+Homepage = "https://github.com/texasbe2trill/hooplytics"
+Issues = "https://github.com/texasbe2trill/hooplytics/issues"
+
+[tool.setuptools.packages.find]
+include = ["hooplytics*"]
+exclude = ["tests*", "data*", "docs*"]
+
+[tool.setuptools.package-data]
+hooplytics = ["web/*.py"]

@@ -33,12 +33,37 @@ Type a player's name. Get a real-time analytics report.
 
 > *"I don't care about the math, I just want to know if I should take Wemby's points over tonight."*
 
-Three commands, one cell, done:
+**Three ways to use Hooplytics — pick the surface that fits.**
+
+### 🖥️ Option A — Streamlit web UI (most visual)
 
 ```bash
 git clone https://github.com/texasbe2trill/hooplytics.git
-cd hooplytics && python3.14 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+cd hooplytics && python3.11 -m venv .venv && source .venv/bin/activate
+pip install -e .
+hooplytics-web
+```
+
+A browser tab opens with five pages: **Player projection**, **Live edge board** (sorted by `|edge|`), **Compare players**, **Scenario lab**, and **Diagnostics**. A persistent **bet slip** lives in the sidebar. Set `ODDS_API_KEY` in `.env` to enable live lines.
+
+### ⌨️ Option B — Typer CLI (fastest, scriptable)
+
+```bash
+pip install -e .
+hooplytics project "Victor Wembanyama"
+hooplytics prop "Shai Gilgeous-Alexander" points --line 31.5
+hooplytics decisions "LeBron James"
+hooplytics lines           # today's live edge board, sorted by |edge|
+hooplytics roster add "Anthony Edwards"
+hooplytics --help
+```
+
+Every command supports `--json` for piping. Fuzzy player matching means `hooplytics project lebron` resolves to LeBron James automatically.
+
+### 📓 Option C — Jupyter notebook (deepest exploration)
+
+```bash
+pip install -e .[notebook]
 jupyter lab hooplytics.ipynb
 ```
 
