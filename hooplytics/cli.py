@@ -39,10 +39,10 @@ from .constants import MODEL_SPECS
 app = typer.Typer(
     add_completion=False,
     rich_markup_mode="rich",
-    help="🏀 Hooplytics — NBA player projections and More/Less calls.",
+    help="🏀 Hooplytics — NBA player analytics and live line context.",
     no_args_is_help=True,
 )
-roster_app = typer.Typer(help="Manage your persisted roster.", no_args_is_help=True)
+roster_app = typer.Typer(help="Manage your tracked roster.", no_args_is_help=True)
 app.add_typer(roster_app, name="roster")
 
 console = Console()
@@ -64,7 +64,11 @@ def _load_roster() -> dict[str, list[str]]:
 
     today = date.today()
     start = today.year - (1 if today.month >= 10 else 2)
-    seasons = nba_seasons(start, today.year + 1)
+    # end is the exclusive start-year upper bound for nba_seasons:
+    # in Oct+ we are in a new season (e.g. Oct 2026 → include 2026-27)
+    # otherwise the current season's start year is today.year - 1
+    end = today.year + 1 if today.month >= 10 else today.year
+    seasons = nba_seasons(start, end)
     return {p: seasons for p in DEFAULT_ROSTER}
 
 
@@ -122,7 +126,7 @@ def _df_to_table(df, *, title: str | None = None) -> Table:
 @app.command()
 def project(
     player: str = typer.Argument(..., help="Player name (fuzzy match OK)."),
-    last_n: int = typer.Option(10, "--last-n", "-n", help="Rolling window for the median feature row."),
+    last_n: int = typer.Option(10, "--last-n", "-n", help="Rolling window size for the feature row."),
     seasons: Optional[list[str]] = typer.Option(None, "--season", help="Seasons (e.g. 2024-25). Repeatable."),
     json_out: bool = typer.Option(False, "--json", help="Emit JSON instead of a table."),
 ) -> None:
@@ -144,13 +148,13 @@ def project(
 @app.command()
 def prop(
     player: str = typer.Argument(..., help="Player name."),
-    stat: str = typer.Argument(..., help=f"Model name. One of: {', '.join(MODEL_SPECS)}"),
-    line: Optional[float] = typer.Option(None, "--line", "-l", help="Posted line. Auto-fetched if ODDS_API_KEY is set."),
+    stat: str = typer.Argument(..., help=f"Stat model. One of: {', '.join(MODEL_SPECS)}"),
+    line: Optional[float] = typer.Option(None, "--line", "-l", help="Line threshold. Auto-fetched from The Odds API if ODDS_API_KEY is set."),
     last_n: int = typer.Option(5, "--last-n", "-n"),
-    margin: float = typer.Option(0.10, "--margin", help="Confidence margin against book vig (live lines only)."),
+    margin: float = typer.Option(0.10, "--margin", help="Edge margin required to signal above/below (live lines only)."),
     json_out: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Run a single prop bet through the More/Less engine."""
+    """Compare a player projection against a posted line for a single stat."""
     if stat not in MODEL_SPECS:
         err_console.print(f"[red]Unknown stat '{stat}'. Choices: {', '.join(MODEL_SPECS)}[/red]")
         raise typer.Exit(1)
@@ -179,10 +183,10 @@ def prop(
 def decisions(
     player: str = typer.Argument(..., help="Player name."),
     last_n: int = typer.Option(5, "--last-n", "-n"),
-    live: bool = typer.Option(True, "--live/--no-live", help="Pull live Odds API lines."),
+    live: bool = typer.Option(True, "--live/--no-live", help="Fetch live Odds API lines for comparison."),
     json_out: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Full 8-stat decision table for a player."""
+    """8-stat projection summary with model-vs-line gap analysis."""
     store, bundle, roster = _bootstrap()
     name = _resolve_player(store, player)
     api_key = load_api_key() if live else ""
@@ -231,10 +235,10 @@ def scenario(
 
 @app.command()
 def lines(
-    refresh: bool = typer.Option(False, "--refresh", help="Bypass disk cache."),
+    refresh: bool = typer.Option(False, "--refresh", help="Bypass disk cache and re-fetch from The Odds API."),
     json_out: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Today's live lines for the cached roster, sorted by |edge|."""
+    """Live line board for the tracked roster, sorted by projection gap."""
     api_key = load_api_key()
     if not api_key:
         err_console.print("[red]✗ ODDS_API_KEY not set in env or .env[/red]")
@@ -291,9 +295,9 @@ def train(
 # ── Roster sub-commands ─────────────────────────────────────────────────────
 @roster_app.command("list")
 def roster_list() -> None:
-    """Show the persisted roster."""
+    """Show the tracked roster."""
     r = _load_roster()
-    table = Table(title=f"Roster — {ROSTER_PATH}")
+    table = Table(title="Tracked roster")
     table.add_column("Player", style="bold")
     table.add_column("Seasons")
     for name, seasons in r.items():
@@ -306,12 +310,16 @@ def roster_add(
     player: str = typer.Argument(...),
     seasons: Optional[list[str]] = typer.Option(None, "--season"),
 ) -> None:
-    """Add a player to your roster (auto-fetches game logs)."""
+    """Add a player to the tracked roster."""
     store = PlayerStore()
     name = _resolve_player(store, player)
     r = _load_roster()
     if seasons is None:
-        seasons = next(iter(r.values()), nba_seasons(2024, 2026))
+        from datetime import date
+        today = date.today()
+        start = today.year - (1 if today.month >= 10 else 2)
+        _end = today.year + 1 if today.month >= 10 else today.year
+        seasons = next(iter(r.values()), nba_seasons(start, _end))
     r[name] = list(seasons)
     _save_roster(r)
     console.print(f"[green]✓ added {name}[/green] ({', '.join(seasons)})")
@@ -319,7 +327,7 @@ def roster_add(
 
 @roster_app.command("remove")
 def roster_remove(player: str = typer.Argument(...)) -> None:
-    """Remove a player from your roster."""
+    """Remove a player from the tracked roster."""
     r = _load_roster()
     if player in r:
         r.pop(player)

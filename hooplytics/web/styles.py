@@ -707,6 +707,136 @@ header[data-testid="stHeader"] {{ background: transparent; }}
   margin: 1.4rem 0 0.4rem 0;
 }}
 .hl-disclaimer-card strong {{ color: var(--hl-ink-muted); font-weight: 600; }}
+
+/* ── Player Line Lab ────────────────────────────────────────────────────── */
+.hl-lab-hero {{
+  position: relative;
+  background:
+    radial-gradient(circle at 12% 0%, rgba(255,122,24,0.18), transparent 55%),
+    radial-gradient(circle at 92% 110%, rgba(61,220,151,0.12), transparent 60%),
+    linear-gradient(160deg, rgba(255,255,255,0.04), rgba(255,255,255,0.01));
+  border: 1px solid var(--hl-hairline);
+  border-radius: 18px;
+  padding: 1.6rem 1.8rem;
+  margin: 0.4rem 0 1.2rem 0;
+  overflow: hidden;
+}}
+.hl-lab-hero h1 {{
+  font-size: 1.65rem; font-weight: 700; margin: 0 0 0.35rem 0;
+  letter-spacing: -0.01em;
+}}
+.hl-lab-hero p {{ color: var(--hl-ink-muted); margin: 0; font-size: 0.93rem; max-width: 760px; line-height: 1.55; }}
+
+.hl-lab-controls {{
+  background: rgba(255,255,255,0.018);
+  border: 1px solid var(--hl-hairline);
+  border-radius: 14px;
+  padding: 1.0rem 1.15rem 0.6rem;
+  margin-bottom: 1.0rem;
+}}
+.hl-lab-controls .hl-controls-eyebrow {{
+  font-size: 0.7rem; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--hl-orange); font-weight: 700; margin: 0 0 0.5rem 0;
+}}
+
+.hl-player-snapshot {{
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.7rem;
+  margin: 0.6rem 0 1.0rem 0;
+}}
+.hl-snap-card {{
+  background: rgba(255,255,255,0.022);
+  border: 1px solid var(--hl-hairline);
+  border-radius: 12px;
+  padding: 0.85rem 0.95rem;
+  transition: border-color 160ms ease, transform 160ms ease;
+}}
+.hl-snap-card:hover {{ border-color: rgba(255,122,24,0.35); transform: translateY(-1px); }}
+.hl-snap-label {{
+  font-size: 0.66rem; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--hl-ink-quiet); font-weight: 700; margin-bottom: 0.3rem;
+}}
+.hl-snap-value {{
+  font-size: 1.35rem; font-weight: 700; color: var(--hl-ink);
+  font-variant-numeric: tabular-nums; line-height: 1.1;
+}}
+.hl-snap-caption {{ font-size: 0.74rem; color: var(--hl-ink-muted); margin-top: 0.2rem; }}
+.hl-snap-trend-up    {{ color: var(--hl-pos); }}
+.hl-snap-trend-down  {{ color: var(--hl-neg); }}
+.hl-snap-trend-flat  {{ color: var(--hl-ink-muted); }}
+
+.hl-line-context-card,
+.hl-outcome-card,
+.hl-sensitivity-card,
+.hl-methodology-card {{
+  background: rgba(255,255,255,0.022);
+  border: 1px solid var(--hl-hairline);
+  border-radius: 14px;
+  padding: 1.0rem 1.2rem;
+  margin: 0.4rem 0 1.0rem 0;
+}}
+.hl-line-context-card .label,
+.hl-outcome-card .label {{
+  font-size: 0.66rem; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--hl-ink-quiet); font-weight: 700;
+}}
+.hl-line-context-card .value,
+.hl-outcome-card .value {{
+  font-size: 1.25rem; font-weight: 700; color: var(--hl-ink);
+  font-variant-numeric: tabular-nums;
+}}
+
+.hl-threshold-chip {{
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  padding: 0.2rem 0.55rem; border-radius: 999px;
+  background: rgba(255,122,24,0.14);
+  color: var(--hl-orange); font-weight: 700;
+  font-size: 0.72rem; letter-spacing: 0.06em;
+  border: 1px solid rgba(255,122,24,0.3);
+}}
+.hl-threshold-chip.above {{ background: rgba(61,220,151,0.14); color: var(--hl-pos); border-color: rgba(61,220,151,0.32); }}
+.hl-threshold-chip.below {{ background: rgba(255,107,107,0.14); color: var(--hl-neg); border-color: rgba(255,107,107,0.32); }}
+
+.hl-signal-summary {{
+  background: linear-gradient(155deg, rgba(255,122,24,0.10), rgba(255,255,255,0.012));
+  border: 1px solid rgba(255,122,24,0.28);
+  border-radius: 14px;
+  padding: 1.05rem 1.25rem;
+  margin: 0.4rem 0 0.9rem 0;
+}}
+.hl-signal-summary .eyebrow {{
+  font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--hl-orange); font-weight: 700; margin: 0 0 0.35rem 0;
+}}
+.hl-signal-summary p {{ margin: 0; color: var(--hl-ink); font-size: 0.95rem; line-height: 1.6; }}
+
+.hl-analyst-note {{
+  background: rgba(255,255,255,0.022);
+  border-left: 3px solid var(--hl-orange);
+  border-radius: 0 12px 12px 0;
+  padding: 0.95rem 1.15rem;
+  margin: 0.6rem 0 1.0rem 0;
+}}
+.hl-analyst-note .eyebrow {{
+  font-size: 0.66rem; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--hl-ink-quiet); font-weight: 700; margin: 0 0 0.3rem 0;
+}}
+.hl-analyst-note p {{ margin: 0; color: var(--hl-ink); font-size: 0.92rem; line-height: 1.6; }}
+
+.hl-warning-soft {{
+  background: rgba(245,176,65,0.08);
+  border: 1px solid rgba(245,176,65,0.32);
+  color: #f5b041;
+  border-radius: 12px;
+  padding: 0.7rem 1.0rem;
+  font-size: 0.85rem;
+  margin: 0.5rem 0;
+}}
+.hl-methodology-card p {{
+  margin: 0; color: var(--hl-ink-muted); font-size: 0.83rem; line-height: 1.6;
+}}
+
 </style>
 """
 

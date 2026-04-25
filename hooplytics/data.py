@@ -153,21 +153,26 @@ class PlayerStore:
         needed = [s for s in seasons if cached.empty or s not in cached["season"].unique()]
         frames: list[pd.DataFrame] = [cached] if not cached.empty else []
         for season in needed:
-            gl = pd.DataFrame()
-            for attempt in range(3):
-                try:
-                    gl = playergamelog.PlayerGameLog(
-                        player_id=pid, season=season, timeout=30
-                    ).get_data_frames()[0]
-                    break
-                except Exception:  # noqa: BLE001 — transient network errors
-                    if attempt == 2:
-                        raise
-                    time.sleep(2 ** attempt)
-            if not gl.empty:
-                gl = gl.assign(player=name, season=season)
-                frames.append(gl)
-            time.sleep(self.pause)
+            season_frames: list[pd.DataFrame] = []
+            for season_type in ("Regular Season", "Playoffs"):
+                gl = pd.DataFrame()
+                for attempt in range(3):
+                    try:
+                        gl = playergamelog.PlayerGameLog(
+                            player_id=pid, season=season,
+                            season_type_all_star=season_type, timeout=30
+                        ).get_data_frames()[0]
+                        break
+                    except Exception:  # noqa: BLE001 — transient network errors
+                        if attempt == 2:
+                            break
+                        time.sleep(2 ** attempt)
+                if not gl.empty:
+                    gl = gl.assign(player=name, season=season, season_type=season_type)
+                    season_frames.append(gl)
+                time.sleep(self.pause)
+            if season_frames:
+                frames.extend(season_frames)
 
         if not frames:
             return pd.DataFrame()

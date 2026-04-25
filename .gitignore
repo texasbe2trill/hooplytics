@@ -14,5 +14,7 @@ dist/
 .env
 .env.*
 !.env.example
+.streamlit/secrets.toml
+.streamlit/secrets.toml.*
 *.secret
 secrets.*

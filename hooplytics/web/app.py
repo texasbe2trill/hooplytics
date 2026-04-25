@@ -9,10 +9,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from hooplytics.constants import DEFAULT_ROSTER, MODEL_SPECS
+from hooplytics.constants import DEFAULT_ROSTER, MODEL_SPECS, MODEL_TO_COL
 from hooplytics.data import PlayerStore, nba_seasons
 from hooplytics.models import ModelBundle, ensure_models
-from hooplytics.odds import fetch_live_player_lines, load_api_key
+from hooplytics.odds import fetch_live_player_lines
 from hooplytics.predict import (
     fantasy_decisions,
     predict_scenario,
@@ -48,6 +48,16 @@ inject_css()
 
 
 # Caching ─────────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def _all_active_players() -> list[str]:
+    """Return sorted list of all active NBA player names (cached for the session)."""
+    try:
+        from nba_api.stats.static import players as nba_players  # type: ignore
+        return sorted(p["full_name"] for p in nba_players.get_players() if p.get("is_active"))
+    except Exception:
+        return []
+
+
 @st.cache_resource(show_spinner=False)
 def _store() -> PlayerStore:
     return PlayerStore()
@@ -95,6 +105,16 @@ def _init_state() -> None:
         st.session_state.roster = {p: list(seasons) for p in DEFAULT_ROSTER}
     if "live_bust" not in st.session_state:
         st.session_state.live_bust = 0
+    if "session_odds_api_key" not in st.session_state:
+        st.session_state.session_odds_api_key = ""
+    if "session_odds_api_key_input" not in st.session_state:
+        st.session_state.session_odds_api_key_input = st.session_state.session_odds_api_key
+
+
+def _sync_session_odds_api_key() -> None:
+    st.session_state.session_odds_api_key = (
+        st.session_state.session_odds_api_key_input.strip()
+    )
 
 
 def _roster_key() -> str:
@@ -182,12 +202,18 @@ def _render_sidebar() -> tuple[str, str]:
                 roster.pop(player)
                 st.rerun()
 
-        new_player = st.text_input("Add player", placeholder="e.g. LeBron James",
-                                   label_visibility="collapsed")
+        all_names = _all_active_players()
+        new_player = st.selectbox(
+            "Add player",
+            options=[""] + all_names,
+            index=0,
+            label_visibility="collapsed",
+            placeholder="Search for a player…",
+        )
         seasons_csv = st.text_input("Seasons", value="2024-25,2025-26",
                                     label_visibility="collapsed",
                                     help="Comma-separated NBA seasons")
-        if st.button("Add", width="stretch") and new_player.strip():
+        if st.button("Add", width="stretch") and new_player and new_player.strip():
             seasons = [s.strip() for s in seasons_csv.split(",") if s.strip()]
             try:
                 resolved = PlayerStore.resolve_player_name(new_player) or new_player
@@ -200,17 +226,36 @@ def _render_sidebar() -> tuple[str, str]:
 
         # API key
         st.markdown('<p class="hl-section">Live odds</p>', unsafe_allow_html=True)
-        env_key = load_api_key() or ""
-        api_key = st.text_input(
-            "Odds API key", value=env_key, type="password",
-            label_visibility="collapsed",
-            placeholder="paste ODDS_API_KEY",
+        st.caption(
+            "Bring your own Odds API key for this session. The Streamlit app does "
+            "not load a deployment key into the UI, and your pasted key is not "
+            "written to the repository."
         )
-        cols = st.columns(2)
+        if (
+            st.session_state.session_odds_api_key_input
+            != st.session_state.session_odds_api_key
+        ):
+            st.session_state.session_odds_api_key_input = (
+                st.session_state.session_odds_api_key
+            )
+        st.text_input(
+            "Odds API key",
+            type="password",
+            key="session_odds_api_key_input",
+            on_change=_sync_session_odds_api_key,
+            label_visibility="collapsed",
+            placeholder="Paste your Odds API key for this session",
+        )
+        api_key = st.session_state.session_odds_api_key.strip()
+        cols = st.columns(3)
         if cols[0].button("Refresh", width="stretch"):
             st.session_state.live_bust += 1
             st.rerun()
-        cols[1].markdown(
+        if cols[1].button("Clear key", width="stretch"):
+            st.session_state.session_odds_api_key = ""
+            st.session_state.session_odds_api_key_input = ""
+            st.rerun()
+        cols[2].markdown(
             pill("LIVE", "live") if api_key else pill("OFFLINE", "warn"),
             unsafe_allow_html=True,
         )
@@ -222,6 +267,9 @@ def _render_sidebar() -> tuple[str, str]:
 
 
 def page_home(roster: dict, api_key: str) -> None:
+    if not roster:
+        empty_state("No players in roster", "Add at least one player using the sidebar to get started.")
+        return
     bundle = _bundle(_roster_key())
     modeling_df = _modeling_frame(_roster_key())
 
@@ -459,14 +507,13 @@ def page_projection(roster: dict, api_key: str) -> None:
         "Project a player's next game across every model, with recent form, "
         "distribution, and skill-profile context.",
     )
-    bundle = _bundle(_roster_key())
-    modeling_df = _modeling_frame(_roster_key())
-    store = _store()
-
     if not roster:
         empty_state("No players in roster",
                     "Add a player from the sidebar to start projecting games.")
         return
+    bundle = _bundle(_roster_key())
+    modeling_df = _modeling_frame(_roster_key())
+    store = _store()
 
     cols = st.columns([2, 1, 1])
     player = cols[0].selectbox("Player", list(roster))
@@ -1197,80 +1244,522 @@ def _classify_scenario_features(features: list[str]) -> list[tuple[str, list[str
     return grouped
 
 
+# ── Player Line Lab helpers ─────────────────────────────────────────────────
+_LAB_DISCLAIMER = (
+    "Hooplytics is for statistical analysis and entertainment. Lines are used as "
+    "context for comparing player performance, model projections, and historical "
+    "outcomes. This is not financial or betting advice."
+)
+
+
+def _get_player_games(modeling_df: pd.DataFrame, player: str) -> pd.DataFrame:
+    if modeling_df is None or modeling_df.empty or "player" not in modeling_df.columns:
+        return pd.DataFrame()
+    df = modeling_df[modeling_df["player"] == player].copy()
+    if "game_date" in df.columns:
+        df = df.sort_values("game_date").reset_index(drop=True)
+    return df
+
+
+def _calc_recent_averages(games: pd.DataFrame, col: str) -> dict[str, float]:
+    out = {"season": float("nan"), "last5": float("nan"),
+           "last10": float("nan"), "last15": float("nan"),
+           "std": float("nan"), "min_avg": float("nan")}
+    if games is None or games.empty or col not in games.columns:
+        return out
+    s = pd.to_numeric(games[col], errors="coerce").dropna()
+    if s.empty:
+        return out
+    out["season"] = float(s.mean())
+    out["std"]    = float(s.std()) if len(s) > 1 else 0.0
+    if len(s) >= 1:  out["last5"]  = float(s.tail(5).mean())
+    if len(s) >= 1:  out["last10"] = float(s.tail(10).mean())
+    if len(s) >= 1:  out["last15"] = float(s.tail(15).mean())
+    if "min" in games.columns:
+        m = pd.to_numeric(games["min"], errors="coerce").dropna()
+        if not m.empty:
+            out["min_avg"] = float(m.tail(10).mean())
+    return out
+
+
+def _classify_recent_trend(last5: float, last10: float, season: float) -> tuple[str, str]:
+    """Return (label, css_class)."""
+    if any(pd.isna(x) for x in (last5, last10, season)):
+        return ("Insufficient data", "hl-snap-trend-flat")
+    diff = last5 - season
+    rel  = (diff / season) if season else 0.0
+    if rel > 0.06 and last5 >= last10:
+        return ("Heating up", "hl-snap-trend-up")
+    if rel < -0.06 and last5 <= last10:
+        return ("Cooling off", "hl-snap-trend-down")
+    return ("Stable", "hl-snap-trend-flat")
+
+
+def _calc_line_outcomes(games: pd.DataFrame, col: str, line: float) -> dict[str, float]:
+    out = {
+        "n": 0, "above": 0, "below": 0, "push": 0,
+        "above_rate": float("nan"), "below_rate": float("nan"),
+        "avg_margin": float("nan"), "med_margin": float("nan"),
+        "best": float("nan"), "worst": float("nan"), "std": float("nan"),
+    }
+    if games is None or games.empty or col not in games.columns:
+        return out
+    vals = pd.to_numeric(games[col], errors="coerce").dropna()
+    if vals.empty:
+        return out
+    line = float(line)
+    margins = vals - line
+    out["n"]          = int(len(vals))
+    out["above"]      = int((vals > line).sum())
+    out["below"]      = int((vals < line).sum())
+    out["push"]       = int((vals == line).sum())
+    out["above_rate"] = float(out["above"] / out["n"]) if out["n"] else float("nan")
+    out["below_rate"] = float(out["below"] / out["n"]) if out["n"] else float("nan")
+    out["avg_margin"] = float(margins.mean())
+    out["med_margin"] = float(margins.median())
+    out["best"]       = float(vals.max())
+    out["worst"]      = float(vals.min())
+    out["std"]        = float(vals.std()) if len(vals) > 1 else 0.0
+    return out
+
+
+def _model_projection_for(player: str, model_name: str, *, bundle, modeling_df) -> float:
+    try:
+        proj = project_next_game(player, bundle=bundle, store=_store(),
+                                 last_n=10, modeling_df=modeling_df)
+    except Exception:
+        return float("nan")
+    if proj is None or proj.empty or "model" not in proj.columns:
+        return float("nan")
+    row = proj[proj["model"] == model_name]
+    if row.empty:
+        return float("nan")
+    return float(row["prediction"].iloc[0])
+
+
+def _line_for(live_df: pd.DataFrame, player: str, model_name: str) -> tuple[float | None, dict]:
+    """Return (consensus line, context dict with books, matchup)."""
+    if live_df is None or live_df.empty:
+        return (None, {})
+    rows = live_df[(live_df["player"] == player) & (live_df["model"] == model_name)]
+    if rows.empty:
+        return (None, {})
+    r = rows.iloc[0]
+    return (float(r["line"]), {
+        "books": int(r.get("books", 0) or 0),
+        "matchup": str(r.get("matchup", "") or ""),
+    })
+
+
+def _snap_card(label: str, value: str, caption: str = "", trend_class: str = "") -> str:
+    cap = f'<div class="hl-snap-caption {trend_class}">{caption}</div>' if caption else ""
+    return (f'<div class="hl-snap-card">'
+            f'<div class="hl-snap-label">{label}</div>'
+            f'<div class="hl-snap-value">{value}</div>{cap}</div>')
+
+
+def _outcome_card(label: str, value: str) -> str:
+    return (f'<div class="hl-outcome-card">'
+            f'<div class="label">{label}</div>'
+            f'<div class="value">{value}</div></div>')
+
+
+def _fmt(v, digits: int = 1, suffix: str = "") -> str:
+    try:
+        if v is None or pd.isna(v):
+            return "—"
+        return f"{float(v):.{digits}f}{suffix}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _fmt_pct(v) -> str:
+    try:
+        if v is None or pd.isna(v):
+            return "—"
+        return f"{float(v) * 100:.0f}%"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _generate_player_line_lab_summary(
+    *, player: str, metric: str, line: float, projection: float,
+    averages: dict, outcomes: dict, trend_label: str,
+) -> str:
+    last10 = averages.get("last10", float("nan"))
+    season = averages.get("season", float("nan"))
+    above_rate = outcomes.get("above_rate", float("nan"))
+    n = outcomes.get("n", 0)
+
+    def above_or_below(val: float) -> str | None:
+        if pd.isna(val):
+            return None
+        if val > line + 0.01: return "above"
+        if val < line - 0.01: return "below"
+        return "at"
+
+    proj_pos = above_or_below(projection)
+    l10_pos  = above_or_below(last10)
+
+    parts: list[str] = []
+    if proj_pos == "above" and l10_pos == "above":
+        parts.append("The data leans above the current line.")
+    elif proj_pos == "below" and l10_pos == "below":
+        parts.append("The data leans below the current line.")
+    elif proj_pos and l10_pos and proj_pos != l10_pos:
+        parts.append("The evidence is mixed — model projection and recent form disagree.")
+    else:
+        parts.append("The signal is directionally neutral around the current threshold.")
+
+    if not pd.isna(projection):
+        gap = projection - line
+        sign = "+" if gap >= 0 else ""
+        parts.append(f"Model projects {projection:.1f} ({sign}{gap:.1f} vs the {line:.1f} line).")
+    if not pd.isna(last10) and not pd.isna(season):
+        parts.append(f"Last-10 average is {last10:.1f} compared with a season mean of {season:.1f}.")
+    if n and not pd.isna(above_rate):
+        parts.append(f"Historically, {player} has finished above this threshold in "
+                     f"{int(round(above_rate * 100))}% of {n} available games.")
+    if trend_label and trend_label != "Stable":
+        parts.append(f"Recent trend is **{trend_label.lower()}**, which adds context to the read.")
+    parts.append("This is a directional analytics view — not a recommendation.")
+    return " ".join(parts)
+
+
 def page_scenario(roster: dict, api_key: str) -> None:
-    page_hero(
-        "Scenario lab",
-        "Hypothetical box-score inputs in, model projections out — see how every "
-        "model responds to a change in usage, efficiency, or pace.",
+    """Player Line Lab — analytics workbench around a player + metric + line."""
+    st.markdown(
+        '<div class="hl-lab-hero">'
+        '<h1>Player Line Lab</h1>'
+        '<p>Compare player form, model projections, and current line context in one '
+        'analytical workspace. Pick a player and metric, then explore how the current '
+        'threshold sits against historical performance and projected output.</p>'
+        '</div>',
+        unsafe_allow_html=True,
     )
+    if not roster:
+        empty_state("No players in roster",
+                    "Add a player from the sidebar to launch the Player Line Lab.")
+        return
+
     bundle = _bundle(_roster_key())
     modeling_df = _modeling_frame(_roster_key())
 
-    insight_card(
-        "How this works",
-        "Sliders below are grouped by analytical category. Use a player's recent "
-        "median as a baseline, then adjust any inputs to explore counterfactuals. "
-        "Each model produces an independent projection from the same scenario.",
-        icon="i",
+    # Pretty model labels (display only)
+    pretty = {
+        "points": "Points", "rebounds": "Rebounds", "assists": "Assists",
+        "pra": "PRA (pts+reb+ast)", "threepm": "3-pointers made",
+        "stl_blk": "Stl + Blk", "turnovers": "Turnovers",
+        "fantasy_score": "Fantasy score",
+    }
+    model_names = list(MODEL_SPECS.keys())
+
+    # ── Section 1: Lab Controls ────────────────────────────────────────────
+    st.markdown('<div class="hl-lab-controls">'
+                '<p class="hl-controls-eyebrow">Lab controls</p>',
+                unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns([1.4, 1.4, 1, 1])
+    player = c1.selectbox("Player", list(roster), key="lab_player")
+    metric_label = c2.selectbox(
+        "Metric", [pretty.get(m, m) for m in model_names], key="lab_metric")
+    model_name = model_names[[pretty.get(m, m) for m in model_names].index(metric_label)]
+    metric_col = MODEL_TO_COL.get(model_name, model_name)
+
+    window_label = c3.selectbox("Recent form window",
+                                ["Last 5", "Last 10", "Last 15", "Full season"],
+                                index=1, key="lab_window")
+    tolerance = c4.select_slider("Similar-line tolerance",
+                                 options=[0.5, 1.0, 1.5, 2.0, 3.0],
+                                 value=1.0, key="lab_tol")
+
+    # Live line context
+    live_df = _live_lines(api_key, json.dumps(list(roster)),
+                          st.session_state.live_bust) if api_key else pd.DataFrame()
+    live_line, line_ctx = _line_for(live_df, player, model_name)
+
+    c5, c6, c7 = st.columns([1, 1, 1])
+    use_manual = c5.checkbox("Override line manually",
+                             value=(live_line is None), key="lab_manual_toggle")
+    default_line = float(live_line) if live_line is not None else 0.0
+    manual_line = c6.number_input(
+        "Manual line", value=round(default_line, 1), step=0.5,
+        key="lab_manual_line", disabled=not use_manual,
     )
-
-    cols = st.columns([2, 1])
-    base_player = cols[0].selectbox(
-        "Preset baseline",
-        ["(zeros)"] + list(roster),
-        help="Fill the inputs with this player's recent (last-10) median.",
+    line_value = float(manual_line) if use_manual else float(live_line) if live_line is not None else float(manual_line)
+    c7.markdown(
+        f'<div style="padding-top:1.7rem;color:var(--hl-ink-muted);font-size:0.82rem">'
+        f'Active line: <span class="hl-threshold-chip">{line_value:.1f}</span></div>',
+        unsafe_allow_html=True,
     )
-    if cols[1].button("Reset all inputs", width="stretch"):
-        for k in list(st.session_state):
-            if k.startswith("scn_"):
-                del st.session_state[k]
-        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    if base_player != "(zeros)":
-        rows = modeling_df[modeling_df["player"] == base_player].tail(10)
-        defaults = rows.median(numeric_only=True).to_dict() if not rows.empty else {}
-    else:
-        defaults = {}
-
-    feature_set: set[str] = set()
-    for spec in MODEL_SPECS.values():
-        feature_set.update(spec["features"])
-    features = sorted(feature_set)
-    grouped = _classify_scenario_features(features)
-
-    scenario: dict[str, float] = {}
-    for label, group_feats in grouped:
-        with st.expander(label, expanded=(label == "Scoring")):
-            grid_cols = st.columns(3)
-            for i, feat in enumerate(group_feats):
-                col = grid_cols[i % 3]
-                default = float(defaults.get(feat, 0.0))
-                scenario[feat] = col.number_input(
-                    feat, value=round(default, 2), step=0.5, key=f"scn_{feat}",
-                )
-
-    df = predict_scenario(scenario, bundle)
-    if df.empty:
-        empty_state("No matching models",
-                    "No models matched the supplied features — check the inputs above.")
+    games = _get_player_games(modeling_df, player)
+    if games.empty or metric_col not in games.columns:
+        empty_state(
+            f"No data for {player} · {metric_label}",
+            "This metric has no historical games available for the selected player. "
+            "Try a different player or metric, or add seasons in the sidebar.",
+        )
         return
 
-    if {"model", "prediction"}.issubset(df.columns):
-        tiles = [
-            mini_kpi(str(r["model"]), f"{float(r['prediction']):.1f}")
-            for _, r in df.iterrows()
-        ]
+    # ── Section 2: Player Snapshot ─────────────────────────────────────────
+    section("Player snapshot",
+            "Recent form, season baseline, and trend direction for the active player.")
+    averages = _calc_recent_averages(games, metric_col)
+    trend_label, trend_class = _classify_recent_trend(
+        averages["last5"], averages["last10"], averages["season"])
+    last_date = ""
+    if "game_date" in games.columns:
+        try:
+            last_date = pd.to_datetime(games["game_date"].iloc[-1]).strftime("%b %d, %Y")
+        except Exception:
+            last_date = ""
+
+    snap_cards = [
+        _snap_card("Player", player, f"{len(games)} games · last {last_date}" if last_date else f"{len(games)} games"),
+        _snap_card(f"{metric_label} · season avg", _fmt(averages["season"])),
+        _snap_card("Last 5 avg", _fmt(averages["last5"])),
+        _snap_card("Last 10 avg", _fmt(averages["last10"])),
+        _snap_card("Volatility (σ)", _fmt(averages["std"])),
+        _snap_card("Recent trend", trend_label, "", trend_class),
+    ]
+    if not pd.isna(averages["min_avg"]):
+        snap_cards.append(_snap_card("Minutes (L10)", _fmt(averages["min_avg"])))
+    st.markdown(f'<div class="hl-player-snapshot">{"".join(snap_cards)}</div>',
+                unsafe_allow_html=True)
+
+    # Snapshot prose
+    if not pd.isna(averages["last10"]) and not pd.isna(averages["season"]):
+        diff = averages["last10"] - averages["season"]
+        direction = "above" if diff >= 0 else "below"
         st.markdown(
-            f'<div class="hl-card">'
-            f'<p class="hl-card-title">Scenario projections</p>'
-            f'<div class="hl-kpi-grid">{"".join(tiles)}</div>'
+            f'<div class="hl-analyst-note">'
+            f'<p class="eyebrow">Snapshot</p>'
+            f'<p>Over the selected window, <strong>{player}</strong> is averaging '
+            f'<strong>{averages["last10"]:.1f}</strong> {metric_label.lower()} across the last 10 games '
+            f'compared with a season average of <strong>{averages["season"]:.1f}</strong>. '
+            f'Recent form is trending <strong>{direction} baseline</strong>, '
+            f'with game-to-game volatility of σ={averages["std"]:.1f}.</p>'
             f'</div>',
             unsafe_allow_html=True,
         )
-        st.plotly_chart(charts.scenario_output_bar(df), width="stretch")
 
-    with st.expander("Full prediction table", expanded=False):
-        st.dataframe(df, width="stretch", hide_index=True)
+    # ── Section 3: Line Context ────────────────────────────────────────────
+    section("Line context",
+            "Current line summary from The Odds API. Used as analytical context only.")
+    if live_line is None:
+        st.markdown(
+            '<div class="hl-warning-soft">No live line context is available for this '
+            'player and metric. Use the manual line control to run a historical line study.</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        ctx_cols = st.columns(4)
+        ctx_cols[0].markdown(_outcome_card("Consensus line", _fmt(live_line)),
+                             unsafe_allow_html=True)
+        ctx_cols[1].markdown(_outcome_card("Books contributing",
+                                           str(line_ctx.get("books", "—"))),
+                             unsafe_allow_html=True)
+        ctx_cols[2].markdown(_outcome_card("Matchup",
+                                           line_ctx.get("matchup", "—") or "—"),
+                             unsafe_allow_html=True)
+        ctx_cols[3].markdown(_outcome_card("Active threshold", _fmt(line_value)),
+                             unsafe_allow_html=True)
+        # Single-bar book chart (consensus only — Hooplytics aggregates pre-storage)
+        st.plotly_chart(
+            charts.book_line_comparison_chart(
+                pd.DataFrame({"book": ["Consensus"], "line": [live_line]}),
+                player=player, metric=metric_label,
+            ),
+            width="stretch",
+        )
+
+    # ── Section 4: Projection vs Line ──────────────────────────────────────
+    section("Projection vs line",
+            "Where the model projection and recent averages sit against the active threshold.")
+    projection = _model_projection_for(player, model_name,
+                                        bundle=bundle, modeling_df=modeling_df)
+    historical_outcomes = _calc_line_outcomes(games, metric_col, line_value)
+    gap = projection - line_value if not pd.isna(projection) else float("nan")
+
+    pcols = st.columns(6)
+    pcols[0].markdown(_outcome_card("Active line", _fmt(line_value)),       unsafe_allow_html=True)
+    pcols[1].markdown(_outcome_card("Model projection", _fmt(projection)),  unsafe_allow_html=True)
+    gap_str = (f'+{gap:.1f}' if not pd.isna(gap) and gap >= 0
+               else (f'{gap:.1f}' if not pd.isna(gap) else "—"))
+    pcols[2].markdown(_outcome_card("Projection gap", gap_str),             unsafe_allow_html=True)
+    pcols[3].markdown(_outcome_card("Last 5 avg", _fmt(averages["last5"])), unsafe_allow_html=True)
+    pcols[4].markdown(_outcome_card("Season avg", _fmt(averages["season"])),unsafe_allow_html=True)
+    pcols[5].markdown(_outcome_card("Above-line rate (hist.)",
+                                    _fmt_pct(historical_outcomes["above_rate"])),
+                      unsafe_allow_html=True)
+
+    bullet_values = {
+        "line":       line_value,
+        "projection": projection,
+        "last5":      averages["last5"],
+        "last10":     averages["last10"],
+        "season":     averages["season"],
+    }
+    st.plotly_chart(charts.projection_vs_line_bullet_chart(bullet_values),
+                    width="stretch")
+
+    # ── Section 5: Historical Outcome Study ────────────────────────────────
+    section("Historical outcome study",
+            "How the player has actually performed against this threshold across available games.")
+    o = historical_outcomes
+    ocols = st.columns(6)
+    ocols[0].markdown(_outcome_card("Games", str(o["n"])),                unsafe_allow_html=True)
+    ocols[1].markdown(_outcome_card("Above line", str(o["above"])),       unsafe_allow_html=True)
+    ocols[2].markdown(_outcome_card("Below line", str(o["below"])),       unsafe_allow_html=True)
+    ocols[3].markdown(_outcome_card("Above-line rate", _fmt_pct(o["above_rate"])), unsafe_allow_html=True)
+    ocols[4].markdown(_outcome_card("Avg margin",  _fmt(o["avg_margin"])),unsafe_allow_html=True)
+    ocols[5].markdown(_outcome_card("Median margin", _fmt(o["med_margin"])),unsafe_allow_html=True)
+
+    if o["n"] > 0:
+        margin_word = "above" if o["avg_margin"] >= 0 else "below"
+        st.markdown(
+            f'<div class="hl-analyst-note">'
+            f'<p class="eyebrow">Outcome read</p>'
+            f'<p>In <strong>{o["n"]}</strong> historical games, this player finished '
+            f'above <strong>{line_value:.1f}</strong> {metric_label.lower()} '
+            f'<strong>{o["above"]}</strong> times, below it <strong>{o["below"]}</strong> '
+            f'times, and exactly on it <strong>{o["push"]}</strong>. The average margin against '
+            f'the line was <strong>{o["avg_margin"]:+.1f}</strong>, suggesting the threshold sits '
+            f'<strong>{margin_word}</strong> the player\'s typical output across this sample.</p>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    h1, h2 = st.columns(2)
+    h1.plotly_chart(
+        charts.historical_outcome_distribution_chart(games, metric_col, line_value),
+        width="stretch")
+    h2.plotly_chart(
+        charts.game_by_game_margin_chart(games, metric_col, line_value, n=20),
+        width="stretch")
+    st.plotly_chart(
+        charts.above_below_timeline_chart(games, metric_col, line_value, n=20),
+        width="stretch")
+
+    # ── Section 6: Similar-Line Analysis ───────────────────────────────────
+    section("Similar-line analysis",
+            "Outcomes near the current threshold, weighted by your selected tolerance band.")
+    st.markdown(
+        '<div class="hl-methodology-card">'
+        '<p>Historical market lines are not stored locally, so this view compares the '
+        'current line against historical player outcomes inside a ±tolerance band, rather '
+        'than past book prices.</p></div>',
+        unsafe_allow_html=True,
+    )
+    vals = pd.to_numeric(games[metric_col], errors="coerce").dropna()
+    in_band = vals[(vals >= line_value - tolerance) & (vals <= line_value + tolerance)]
+    near_above = float((vals >= line_value).mean()) if len(vals) else float("nan")
+
+    sims = st.columns(4)
+    sims[0].markdown(_outcome_card("Tolerance", f"±{tolerance:.1f}"),                unsafe_allow_html=True)
+    sims[1].markdown(_outcome_card("Games in band", str(int(len(in_band)))),         unsafe_allow_html=True)
+    sims[2].markdown(_outcome_card("Above-line rate (full)", _fmt_pct(near_above)),  unsafe_allow_html=True)
+    sims[3].markdown(_outcome_card("Volatility (band σ)",
+                                   _fmt(float(in_band.std()) if len(in_band) > 1 else float("nan"))),
+                     unsafe_allow_html=True)
+
+    st.plotly_chart(
+        charts.similar_threshold_outcome_chart(games, metric_col, line_value, tolerance),
+        width="stretch",
+    )
+
+    # ── Section 7: Sensitivity Lab ─────────────────────────────────────────
+    section("Sensitivity lab",
+            "How fragile or stable the historical signal is as the threshold moves.")
+    deltas = [-2.5, -1.5, -0.5, 0.0, 0.5, 1.5, 2.5]
+    sens_rows = []
+    last5_vals = vals.tail(5)
+    last10_vals = vals.tail(10)
+    for d in deltas:
+        t = line_value + d
+        sens_rows.append({
+            "Threshold": round(t, 2),
+            "Δ vs current": f"{d:+.1f}",
+            "Above-line rate": float((vals >= t).mean()) if len(vals) else float("nan"),
+            "Avg margin":      float((vals - t).mean()) if len(vals) else float("nan"),
+            "Last 5 above":    float((last5_vals >= t).mean()) if len(last5_vals) else float("nan"),
+            "Last 10 above":   float((last10_vals >= t).mean()) if len(last10_vals) else float("nan"),
+        })
+    sens_df = pd.DataFrame(sens_rows)
+    st.dataframe(
+        sens_df, hide_index=True, width="stretch",
+        column_config={
+            "Above-line rate": st.column_config.NumberColumn(format="%.0f%%"),
+            "Last 5 above":    st.column_config.NumberColumn(format="%.0f%%"),
+            "Last 10 above":   st.column_config.NumberColumn(format="%.0f%%"),
+            "Avg margin":      st.column_config.NumberColumn(format="%.2f"),
+        },
+    )
+    st.plotly_chart(
+        charts.line_sensitivity_curve_chart(games, metric_col, line_value,
+                                            projection=projection),
+        width="stretch",
+    )
+    st.markdown(
+        '<div class="hl-methodology-card">'
+        '<p>Sensitivity analysis shows how quickly the historical outcome rate changes as '
+        'the threshold moves. A steep curve means the signal is fragile; a flatter curve '
+        'means production has been more stable around this range.</p></div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Section 8: Analyst Notes ───────────────────────────────────────────
+    section("Analyst notes",
+            "Synthesis of projection, recent form, and historical outcomes.")
+    summary = _generate_player_line_lab_summary(
+        player=player, metric=metric_label, line=line_value, projection=projection,
+        averages=averages, outcomes=historical_outcomes, trend_label=trend_label,
+    )
+    st.markdown(
+        f'<div class="hl-signal-summary">'
+        f'<p class="eyebrow">Synthesis</p>'
+        f'<p>{summary}</p>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Section 9: Detailed Game Log ───────────────────────────────────────
+    section("Detailed game log",
+            "Per-game performance vs the active line for the selected metric.")
+    log = games.copy()
+    cols_keep = ["game_date"]
+    if "MATCHUP" in log.columns:
+        cols_keep.append("MATCHUP")
+    if "min" in log.columns:
+        cols_keep.append("min")
+    cols_keep.append(metric_col)
+
+    log = log[[c for c in cols_keep if c in log.columns]].copy()
+    log["Line"]   = float(line_value)
+    log["Margin"] = pd.to_numeric(log[metric_col], errors="coerce") - float(line_value)
+    log["Outcome"] = log["Margin"].apply(
+        lambda v: "Above" if pd.notna(v) and v > 0 else
+                  ("Below" if pd.notna(v) and v < 0 else "Push")
+    )
+    rename = {"game_date": "Date", "MATCHUP": "Matchup", "min": "Minutes",
+              metric_col: metric_label}
+    log = log.rename(columns=rename)
+    if "Date" in log.columns:
+        log = log.sort_values("Date", ascending=False)
+    st.dataframe(
+        log, hide_index=True, width="stretch",
+        column_config={
+            "Margin": st.column_config.NumberColumn(format="%+.1f"),
+            "Line":   st.column_config.NumberColumn(format="%.1f"),
+        },
+    )
+
+    # Disclaimer
+    st.markdown(
+        f'<div class="hl-disclaimer-card"><strong>Note:</strong> {_LAB_DISCLAIMER}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def page_diagnostics(roster: dict, api_key: str) -> None:
@@ -1279,6 +1768,10 @@ def page_diagnostics(roster: dict, api_key: str) -> None:
         "How well the trained models actually fit the held-out data — accuracy, "
         "ranking, residuals, and feature drivers.",
     )
+    if not roster:
+        empty_state("No players in roster",
+                    "Add a player from the sidebar to run model diagnostics.")
+        return
     bundle = _bundle(_roster_key())
     modeling_df = _modeling_frame(_roster_key())
 
@@ -1419,7 +1912,7 @@ PAGES = {
     "Player projection":   page_projection,
     "Analytics Dashboard": page_edge_board,
     "Compare players":     page_compare,
-    "Scenario lab":        page_scenario,
+    "Player Line Lab":     page_scenario,
     "Model diagnostics":   page_diagnostics,
 }
 

@@ -170,9 +170,9 @@ def distribution_facets(
 
     fig.update_layout(
         barmode="overlay",
-        height=260 * rows + 80,
-        legend=dict(orientation="h", y=-0.08, x=0.5, xanchor="center"),
-        margin=dict(t=60, b=80, l=40, r=20),
+        height=260 * rows + 140,
+        legend=dict(orientation="h", y=-0.18, x=0.5, xanchor="center"),
+        margin=dict(t=60, b=140, l=40, r=20),
         title="Distribution by metric — recent games",
     )
     fig.update_annotations(font_size=12)
@@ -218,8 +218,8 @@ def violin_grid(
 
     fig.update_layout(
         height=300 * rows + 80,
-        legend=dict(orientation="h", y=-0.06, x=0.5, xanchor="center"),
-        margin=dict(t=60, b=80, l=40, r=20),
+        legend=dict(orientation="h", y=-0.14, x=0.5, xanchor="center"),
+        margin=dict(t=60, b=140, l=40, r=20),
         title="Shape & spread by metric",
         showlegend=True,
     )
@@ -256,7 +256,8 @@ def normalized_radar(
         polar=dict(radialaxis=dict(visible=True, range=[0, 1],
                                    tickvals=[0.25, 0.5, 0.75, 1.0],
                                    tickfont=dict(size=10))),
-        legend=dict(orientation="h", y=-0.05, x=0.5, xanchor="center"),
+        legend=dict(orientation="h", y=-0.15, x=0.5, xanchor="center"),
+        margin=dict(t=60, b=100, l=60, r=60),
     )
     return fig
 
@@ -1036,5 +1037,327 @@ def signal_strength_distribution_chart(df: pd.DataFrame) -> go.Figure:
         height=300,
         xaxis_title=None, yaxis_title="signals",
         legend=dict(orientation="h", y=1.1, x=1, xanchor="right"),
+    )
+    return fig
+
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Player Line Lab chart factories
+# ════════════════════════════════════════════════════════════════════════════
+def book_line_comparison_chart(
+    lines_df: pd.DataFrame,
+    player: str | None = None,
+    metric: str | None = None,
+) -> go.Figure:
+    """Horizontal bar of line by book. lines_df expects cols: book, line.
+
+    If only a single consensus row is present (cols: line, books), renders a
+    single bar. Returns an empty-state figure when data is missing.
+    """
+    if lines_df is None or lines_df.empty:
+        return _empty_figure("No book-level line data available")
+
+    df = lines_df.copy()
+    if "book" not in df.columns:
+        # Single consensus row → fall back to one synthetic bar
+        line_val = float(df["line"].iloc[0]) if "line" in df.columns else None
+        if line_val is None:
+            return _empty_figure("No line data available")
+        df = pd.DataFrame({"book": ["Consensus"], "line": [line_val]})
+
+    df = df.dropna(subset=["line"]).sort_values("line")
+    if df.empty:
+        return _empty_figure("No line data available")
+
+    title = "Line by book"
+    if player and metric:
+        title = f"{player} · {metric} — line by book"
+
+    fig = go.Figure(go.Bar(
+        x=df["line"], y=df["book"], orientation="h",
+        marker=dict(color=COLOR_ACCENT, line=dict(color="white", width=0.4)),
+        hovertemplate="<b>%{y}</b><br>line: %{x:.1f}<extra></extra>",
+    ))
+    fig.update_layout(
+        title=title, height=max(220, 36 * len(df) + 120),
+        xaxis_title="Line", yaxis_title="",
+        margin=dict(t=60, b=40, l=80, r=20),
+        showlegend=False,
+    )
+    return fig
+
+
+def projection_vs_line_bullet_chart(values: dict[str, float]) -> go.Figure:
+    """Horizontal bullet chart comparing projection / averages against current line.
+
+    ``values`` keys recognized (any subset, all optional):
+        - 'line'        → reference vertical marker
+        - 'projection'  → model projection bar
+        - 'last5'       → last-5 average bar
+        - 'last10'      → last-10 average bar
+        - 'season'      → season-average bar
+    """
+    series_order = [
+        ("season",      "Season avg",       "#7f8c9b"),
+        ("last10",      "Last 10 avg",      "#5dade2"),
+        ("last5",       "Last 5 avg",       COLOR_MORE),
+        ("projection",  "Model projection", COLOR_ACCENT),
+    ]
+    rows = [(label, color, float(values[key]))
+            for key, label, color in series_order
+            if key in values and values[key] is not None
+            and not pd.isna(values[key])]
+
+    if not rows:
+        return _empty_figure("Not enough data for projection vs line")
+
+    line = values.get("line")
+    line = float(line) if line is not None and not pd.isna(line) else None
+
+    labels = [r[0] for r in rows]
+    colors = [r[1] for r in rows]
+    bars   = [r[2] for r in rows]
+
+    fig = go.Figure(go.Bar(
+        x=bars, y=labels, orientation="h",
+        marker=dict(color=colors, line=dict(color="white", width=0.4)),
+        text=[f"{v:.1f}" for v in bars], textposition="outside",
+        hovertemplate="<b>%{y}</b><br>value: %{x:.1f}<extra></extra>",
+    ))
+    if line is not None:
+        fig.add_vline(
+            x=line, line=dict(color="white", width=2, dash="dash"),
+            annotation_text=f"Line {line:.1f}", annotation_position="top",
+        )
+    fig.update_layout(
+        title="Projection vs line", height=320,
+        margin=dict(t=60, b=40, l=120, r=40),
+        showlegend=False, xaxis_title="Value",
+    )
+    return fig
+
+
+def historical_outcome_distribution_chart(
+    games: pd.DataFrame,
+    metric: str,
+    line: float,
+) -> go.Figure:
+    """Histogram of metric with vertical line marker at threshold."""
+    if games is None or games.empty or metric not in games.columns:
+        return _empty_figure("No historical games for this metric")
+    vals = pd.to_numeric(games[metric], errors="coerce").dropna()
+    if vals.empty:
+        return _empty_figure("No historical games for this metric")
+
+    above = vals >= float(line)
+    fig = go.Figure()
+    fig.add_trace(go.Histogram(
+        x=vals[above], name="Above line", nbinsx=20,
+        marker=dict(color=_hex_to_rgba(COLOR_MORE, 0.65),
+                    line=dict(color=COLOR_MORE, width=1)),
+        hovertemplate=f"{metric}: %{{x}}<br>games: %{{y}}<extra></extra>",
+    ))
+    fig.add_trace(go.Histogram(
+        x=vals[~above], name="Below line", nbinsx=20,
+        marker=dict(color=_hex_to_rgba(COLOR_LESS, 0.65),
+                    line=dict(color=COLOR_LESS, width=1)),
+        hovertemplate=f"{metric}: %{{x}}<br>games: %{{y}}<extra></extra>",
+    ))
+    fig.add_vline(
+        x=float(line), line=dict(color="white", width=2, dash="dash"),
+        annotation_text=f"Line {float(line):.1f}", annotation_position="top",
+    )
+    fig.update_layout(
+        title=f"Historical {metric} distribution vs line",
+        barmode="overlay", height=360,
+        margin=dict(t=60, b=40, l=40, r=20),
+        legend=dict(orientation="h", y=-0.15, x=0.5, xanchor="center"),
+        xaxis_title=metric, yaxis_title="Games",
+    )
+    return fig
+
+
+def game_by_game_margin_chart(
+    games: pd.DataFrame,
+    metric: str,
+    line: float,
+    n: int = 20,
+) -> go.Figure:
+    """Last-N games margin vs line as colored bars."""
+    if games is None or games.empty or metric not in games.columns:
+        return _empty_figure("No game data available")
+    date_col = _resolve_date_col(games)
+    df = games.copy()
+    if date_col and date_col in df.columns:
+        df = df.sort_values(date_col)
+    df = df.tail(n).copy()
+    df["__margin"] = pd.to_numeric(df[metric], errors="coerce") - float(line)
+    df = df.dropna(subset=["__margin"])
+    if df.empty:
+        return _empty_figure("No game data available")
+
+    if date_col and date_col in df.columns:
+        x = pd.to_datetime(df[date_col], errors="coerce").astype(str)
+    else:
+        x = [f"G{i+1}" for i in range(len(df))]
+
+    colors = [COLOR_MORE if v >= 0 else COLOR_LESS for v in df["__margin"]]
+    fig = go.Figure(go.Bar(
+        x=x, y=df["__margin"],
+        marker=dict(color=colors, line=dict(color="white", width=0.4)),
+        hovertemplate="<b>%{x}</b><br>margin: %{y:+.1f}<extra></extra>",
+    ))
+    fig.add_hline(y=0, line=dict(color="white", width=1.2, dash="dash"))
+    fig.update_layout(
+        title=f"Margin vs line — last {len(df)} games",
+        height=320, showlegend=False,
+        margin=dict(t=60, b=80, l=40, r=20),
+        xaxis_title="", yaxis_title=f"{metric} − line",
+        xaxis=dict(tickangle=-30),
+    )
+    return fig
+
+
+def above_below_timeline_chart(
+    games: pd.DataFrame,
+    metric: str,
+    line: float,
+    n: int = 20,
+) -> go.Figure:
+    """Last-N games timeline of actual metric value with line reference."""
+    if games is None or games.empty or metric not in games.columns:
+        return _empty_figure("No game data available")
+    date_col = _resolve_date_col(games)
+    df = games.copy()
+    if date_col and date_col in df.columns:
+        df = df.sort_values(date_col)
+    df = df.tail(n).copy()
+    df["__val"] = pd.to_numeric(df[metric], errors="coerce")
+    df = df.dropna(subset=["__val"])
+    if df.empty:
+        return _empty_figure("No game data available")
+
+    if date_col and date_col in df.columns:
+        x = pd.to_datetime(df[date_col], errors="coerce").astype(str)
+    else:
+        x = [f"G{i+1}" for i in range(len(df))]
+
+    colors = [COLOR_MORE if v >= float(line) else COLOR_LESS for v in df["__val"]]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=x, y=df["__val"], name=metric,
+        marker=dict(color=colors, line=dict(color="white", width=0.4)),
+        hovertemplate=f"<b>%{{x}}</b><br>{metric}: %{{y:.1f}}<extra></extra>",
+    ))
+    fig.add_hline(
+        y=float(line), line=dict(color="white", width=2, dash="dash"),
+        annotation_text=f"Line {float(line):.1f}", annotation_position="top right",
+    )
+    fig.update_layout(
+        title=f"{metric} — last {len(df)} games",
+        height=320, showlegend=False,
+        margin=dict(t=60, b=80, l=40, r=20),
+        xaxis_title="", yaxis_title=metric,
+        xaxis=dict(tickangle=-30),
+    )
+    return fig
+
+
+def similar_threshold_outcome_chart(
+    games: pd.DataFrame,
+    metric: str,
+    line: float,
+    tolerance: float = 1.0,
+) -> go.Figure:
+    """Histogram with a highlighted band of width 2*tolerance around ``line``."""
+    if games is None or games.empty or metric not in games.columns:
+        return _empty_figure("No historical games for similar-line study")
+    vals = pd.to_numeric(games[metric], errors="coerce").dropna()
+    if vals.empty:
+        return _empty_figure("No historical games for similar-line study")
+
+    line = float(line)
+    tol = float(tolerance)
+    lo, hi = line - tol, line + tol
+
+    fig = go.Figure()
+    fig.add_trace(go.Histogram(
+        x=vals, nbinsx=22, name="All games",
+        marker=dict(color=_hex_to_rgba(COLOR_ACCENT, 0.45),
+                    line=dict(color=COLOR_ACCENT, width=1)),
+        hovertemplate=f"{metric}: %{{x}}<br>games: %{{y}}<extra></extra>",
+    ))
+    in_band = vals[(vals >= lo) & (vals <= hi)]
+    if not in_band.empty:
+        fig.add_trace(go.Histogram(
+            x=in_band, nbinsx=22, name=f"Within ±{tol:.1f}",
+            marker=dict(color=_hex_to_rgba("#f5b041", 0.85),
+                        line=dict(color="#f5b041", width=1)),
+            hovertemplate=f"{metric}: %{{x}}<br>games: %{{y}}<extra></extra>",
+        ))
+    fig.add_vrect(
+        x0=lo, x1=hi, fillcolor="#f5b041", opacity=0.10,
+        line_width=0, layer="below",
+    )
+    fig.add_vline(
+        x=line, line=dict(color="white", width=2, dash="dash"),
+        annotation_text=f"Line {line:.1f}", annotation_position="top",
+    )
+    fig.update_layout(
+        title=f"Similar-line outcome band — {metric}",
+        barmode="overlay", height=360,
+        margin=dict(t=60, b=40, l=40, r=20),
+        legend=dict(orientation="h", y=-0.15, x=0.5, xanchor="center"),
+        xaxis_title=metric, yaxis_title="Games",
+    )
+    return fig
+
+
+def line_sensitivity_curve_chart(
+    games: pd.DataFrame,
+    metric: str,
+    base_line: float,
+    *,
+    projection: float | None = None,
+) -> go.Figure:
+    """Historical above-line rate as a function of threshold."""
+    if games is None or games.empty or metric not in games.columns:
+        return _empty_figure("No history for sensitivity analysis")
+    vals = pd.to_numeric(games[metric], errors="coerce").dropna()
+    if vals.empty or len(vals) < 3:
+        return _empty_figure("Not enough history for sensitivity analysis")
+
+    base = float(base_line)
+    span = max(2.5, float(vals.std() or 0.0))
+    lo, hi = base - span * 1.5, base + span * 1.5
+    thresholds = np.linspace(lo, hi, 41)
+    rates = [float((vals >= t).mean()) for t in thresholds]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=thresholds, y=rates, mode="lines",
+        line=dict(color=COLOR_ACCENT, width=2.5),
+        fill="tozeroy", fillcolor=_hex_to_rgba(COLOR_ACCENT, 0.18),
+        hovertemplate="threshold: %{x:.1f}<br>above-rate: %{y:.0%}<extra></extra>",
+        name="Historical above-rate",
+    ))
+    fig.add_vline(
+        x=base, line=dict(color="white", width=2, dash="dash"),
+        annotation_text=f"Current line {base:.1f}",
+        annotation_position="top",
+    )
+    if projection is not None and not pd.isna(projection):
+        fig.add_vline(
+            x=float(projection), line=dict(color=COLOR_MORE, width=2, dash="dot"),
+            annotation_text=f"Projection {float(projection):.1f}",
+            annotation_position="bottom",
+        )
+    fig.update_layout(
+        title=f"Line sensitivity — {metric}",
+        height=340, showlegend=False,
+        margin=dict(t=60, b=50, l=50, r=30),
+        xaxis_title="Threshold", yaxis_title="Above-line rate",
+        yaxis=dict(tickformat=".0%", range=[0, 1.02]),
     )
     return fig
