@@ -626,6 +626,14 @@ def _build_edge_board_cached(roster_key: str, api_key: str, _bust: int,
                 continue
             books = int(plr_lines.loc[plr_lines["model"] == r["model"], "books"].iloc[0])
             matchup = plr_lines.loc[plr_lines["model"] == r["model"], "matchup"].iloc[0]
+            book_names_val = ""
+            book_lines_val: dict = {}
+            if "book_names" in plr_lines.columns:
+                book_names_val = str(plr_lines.loc[plr_lines["model"] == r["model"], "book_names"].iloc[0])
+            if "book_lines" in plr_lines.columns:
+                bl_raw = plr_lines.loc[plr_lines["model"] == r["model"], "book_lines"].iloc[0]
+                if isinstance(bl_raw, dict):
+                    book_lines_val = bl_raw
             out.append({
                 "player": player,
                 "model": r["model"],
@@ -637,6 +645,8 @@ def _build_edge_board_cached(roster_key: str, api_key: str, _bust: int,
                 "call": r["decision"].split()[0],
                 "matchup": matchup,
                 "books": books,
+                "book_names": book_names_val,
+                "book_lines": book_lines_val,
             })
     df = pd.DataFrame(out)
     if df.empty:
@@ -1418,6 +1428,8 @@ def _prepare_signal_frame(df: pd.DataFrame) -> pd.DataFrame:
     for opt_src, opt_dst in (
         (_find_col(df, ["books", "book", "sportsbook", "book_count"]), "books"),
         (_find_col(df, ["matchup", "game", "opponent"]), "matchup"),
+        (_find_col(df, ["book_names", "book_list"]), "book_names"),
+        (_find_col(df, ["book_lines"]), "book_lines"),
     ):
         if opt_src is not None:
             out[opt_dst] = df[opt_src].values
@@ -1684,15 +1696,44 @@ def _render_dashboard_explorer(signal_df: pd.DataFrame) -> None:
         "line": "Current line", "projection": "Model projection",
         "gap": "Gap", "abs_gap": "|Gap|", "gap_pct": "Gap %",
         "direction": "Direction", "signal_strength": "Signal",
-        "books": "Books", "matchup": "Matchup",
+        "books": "Books", "book_names": "Sportsbooks", "matchup": "Matchup",
     }
     display = display.rename(columns=rename)
     keep = [c for c in (
         "Player", "Metric", "Direction", "Signal",
         "Current line", "Model projection", "Gap", "|Gap|", "Gap %",
-        "Books", "Matchup",
+        "Books", "Sportsbooks", "Matchup",
     ) if c in display.columns]
     st.dataframe(display[keep], width="stretch", hide_index=True)
+
+    # Per-book line breakdown (expandable). Uses raw `book_lines` dict from
+    # the filtered signal frame so users can see exactly which sportsbook
+    # posted which line for the highest-edge plays.
+    if "book_lines" in f.columns:
+        rows: list[dict] = []
+        for _, row in f.iterrows():
+            bl = row.get("book_lines")
+            if not isinstance(bl, dict) or not bl:
+                continue
+            for book, line in sorted(bl.items()):
+                rows.append({
+                    "Player": row.get("player", ""),
+                    "Metric": _pretty_metric(row.get("metric", "")),
+                    "Sportsbook": book,
+                    "Line": round(float(line), 2),
+                })
+        if rows:
+            with st.expander(f"Per-book line breakdown ({len(rows)} entries)", expanded=False):
+                st.caption(
+                    "Consensus line is the median across the high-quality NA "
+                    "books listed below. Lines that diverge from the consensus "
+                    "indicate book-specific edges."
+                )
+                st.dataframe(
+                    pd.DataFrame(rows),
+                    width="stretch",
+                    hide_index=True,
+                )
 
 
 def page_edge_board(roster: dict, api_key: str) -> None:

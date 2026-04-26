@@ -104,3 +104,38 @@ ODDS_HISTORICAL_BASE = "https://api.the-odds-api.com/v4/historical/sports/basket
 ODDS_HIST_CACHE_DIR = ODDS_CACHE_DIR / "history"
 # Player prop data is only available in the historical API from this date onward.
 ODDS_PLAYER_PROPS_CUTOFF = "2023-05-03"
+
+# North American region keys for The Odds API. `us` covers the established
+# tier-1 books (DraftKings, FanDuel, BetMGM, Caesars, BetRivers, …) while
+# `us2` adds newer/regional NA books (ESPN BET, Hard Rock Bet, Bally Bet, …).
+ODDS_REGIONS = "us"
+
+# Whitelist of high-quality NA sportsbooks used to compute consensus lines.
+# Filtering to these books removes noise from offshore/low-liquidity books
+# (BetUS, BetOnline.ag, MyBookie, LowVig, BetAnySports, Fliff, …) which
+# otherwise drag the median around with stale or wide-vig lines.
+NA_BOOKMAKERS: tuple[str, ...] = (
+    "draftkings",
+    "fanduel",
+    "betmgm",
+    "williamhill_us",   # Caesars
+    "betrivers",
+    "espnbet",
+    "hardrockbet",
+    "fanatics",
+    "bovada",
+)
+
+# Pretty display names for the tier-1 NA books (fallback to title-cased key
+# when missing). Used by the UI to render per-book line breakdowns.
+NA_BOOKMAKER_TITLES: dict[str, str] = {
+    "draftkings":     "DraftKings",
+    "fanduel":        "FanDuel",
+    "betmgm":         "BetMGM",
+    "williamhill_us": "Caesars",
+    "betrivers":      "BetRivers",
+    "espnbet":        "ESPN BET",
+    "hardrockbet":    "Hard Rock Bet",
+    "fanatics":       "Fanatics",
+    "bovada":         "Bovada",
+}

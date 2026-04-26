@@ -13,12 +13,15 @@ import pandas as pd
 import requests
 
 from .constants import (
+    NA_BOOKMAKER_TITLES,
+    NA_BOOKMAKERS,
     ODDS_BASE,
     ODDS_CACHE_DIR,
     ODDS_HIST_CACHE_DIR,
     ODDS_HISTORICAL_BASE,
     ODDS_MARKETS,
     ODDS_PLAYER_PROPS_CUTOFF,
+    ODDS_REGIONS,
 )
 
 
@@ -81,8 +84,9 @@ def _fetch_odds_payload(api_key: str, *, force_refresh: bool = False) -> list[di
                 f"{ODDS_BASE}/events/{ev['id']}/odds",
                 params={
                     "apiKey": api_key,
-                    "regions": "us",
+                    "regions": ODDS_REGIONS,
                     "markets": ",".join(ODDS_MARKETS),
+                    "bookmakers": ",".join(NA_BOOKMAKERS),
                     "oddsFormat": "american",
                 },
                 timeout=15,
@@ -116,27 +120,41 @@ def fetch_live_player_lines(
     *,
     force_refresh: bool = False,
 ) -> pd.DataFrame:
-    """Return one row per (player, model_name, line) using consensus median across books.
+    """Return one row per (player, model_name) using consensus median across high-quality NA books.
+
+    Only books in :data:`NA_BOOKMAKERS` (DraftKings, FanDuel, BetMGM, Caesars,
+    BetRivers, ESPN BET, Hard Rock Bet, Fanatics, Bovada) contribute to the
+    consensus, which removes noise from low-liquidity offshore books.
+
+    Each row exposes both an aggregate count (``books``) and a per-book
+    breakdown (``book_names`` as a comma-joined string and ``book_lines`` as a
+    ``{book_title: line}`` dict) so the UI can show which sportsbooks contributed.
 
     Empty DataFrame on off-days, no-key, or no-matches. Player matching is
     case- and punctuation-insensitive (handles 'Shai Gilgeous-Alexander' vs
     'Shai Gilgeous Alexander').
     """
+    empty_cols = ["player", "model", "line", "books", "book_names", "book_lines", "matchup"]
     if not api_key or not roster_players:
-        return pd.DataFrame(columns=["player", "model", "line", "books", "matchup"])
+        return pd.DataFrame(columns=empty_cols)
 
     payload = _fetch_odds_payload(api_key, force_refresh=force_refresh)
     if not payload:
-        return pd.DataFrame(columns=["player", "model", "line", "books", "matchup"])
+        return pd.DataFrame(columns=empty_cols)
 
     canon_to_name: dict[str, str] = {_canon_name(p): p for p in roster_players}
+    allowed_books = set(NA_BOOKMAKERS)
     rows: list[dict] = []
 
     for ev_entry in payload:
         matchup = ev_entry.get("matchup", "?")
         props = ev_entry.get("props", {})
-        bucket: dict[tuple[str, str], list[float]] = {}
+        # bucket: (roster_name, model_name) -> {book_key: line}
+        bucket: dict[tuple[str, str], dict[str, float]] = {}
         for bm in props.get("bookmakers", []):
+            book_key = bm.get("key", "")
+            if book_key not in allowed_books:
+                continue
             for market in bm.get("markets", []):
                 model_name = ODDS_MARKETS.get(market["key"])
                 if model_name is None:
@@ -150,14 +168,17 @@ def fetch_live_player_lines(
                     roster_name = canon_to_name.get(_canon_name(api_name))
                     if roster_name is None:
                         continue
-                    bucket.setdefault((roster_name, model_name), []).append(float(o["point"]))
+                    bucket.setdefault((roster_name, model_name), {})[book_key] = float(o["point"])
 
-        for (roster_name, model_name), points in bucket.items():
+        for (roster_name, model_name), books_map in bucket.items():
+            titles = {NA_BOOKMAKER_TITLES.get(k, k.title()): v for k, v in books_map.items()}
             rows.append({
                 "player": roster_name,
                 "model": model_name,
-                "line": float(np.median(points)),
-                "books": len(points),
+                "line": float(np.median(list(books_map.values()))),
+                "books": len(books_map),
+                "book_names": ", ".join(sorted(titles.keys())),
+                "book_lines": titles,
                 "matchup": matchup,
             })
 
@@ -266,8 +287,9 @@ def fetch_historical_odds_for_date(
                 params={
                     "apiKey": api_key,
                     "date": query_ts,
-                    "regions": "us",
+                    "regions": ODDS_REGIONS,
                     "markets": ",".join(ODDS_MARKETS),
+                    "bookmakers": ",".join(NA_BOOKMAKERS),
                     "oddsFormat": "decimal",
                 },
                 timeout=20,
@@ -286,7 +308,10 @@ def fetch_historical_odds_for_date(
         event_data = payload.get("data", {}) if isinstance(payload, dict) else {}
 
         bucket: dict[tuple[str, str], list[float]] = {}
+        allowed_books = set(NA_BOOKMAKERS)
         for bm in event_data.get("bookmakers", []):
+            if bm.get("key", "") not in allowed_books:
+                continue
             for market in bm.get("markets", []):
                 model_name = ODDS_MARKETS.get(market["key"])
                 if model_name is None:
