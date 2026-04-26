@@ -210,7 +210,24 @@ def _training_data(roster_key: str, include_display_players: bool) -> pd.DataFra
     )
 
 
+@st.cache_resource(show_spinner=False, max_entries=2)
+def _prebuilt_bundle(prebuilt_path: str) -> ModelBundle:
+    """Load a prebuilt RACE bundle from disk. Cached for the whole session."""
+    return load_models(prebuilt_path)
+
+
 @st.cache_resource(show_spinner="Training models…", max_entries=1)
+def _trained_bundle(
+    roster_key: str,
+    include_display_players: bool,
+    fast_mode: bool,
+) -> ModelBundle:
+    return ensure_models(
+        _training_data(roster_key, include_display_players),
+        fast_mode=fast_mode,
+    )
+
+
 def _bundle(
     roster_key: str,
     use_prebuilt: bool,
@@ -218,12 +235,10 @@ def _bundle(
     include_display_players: bool,
     fast_mode: bool,
 ) -> ModelBundle:
+    """Resolve the active bundle: prefer prebuilt (cached on path only)."""
     if use_prebuilt and prebuilt_path:
-        return load_models(prebuilt_path)
-    return ensure_models(
-        _training_data(roster_key, include_display_players),
-        fast_mode=fast_mode,
-    )
+        return _prebuilt_bundle(prebuilt_path)
+    return _trained_bundle(roster_key, include_display_players, fast_mode)
 
 
 def _default_prebuilt_bundle_path() -> str:
@@ -276,9 +291,22 @@ def _player_games(roster_key: str, player: str) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60, max_entries=32)
-def _project_next_game_cached(roster_key: str, player: str, last_n: int) -> pd.DataFrame:
-    """Cache projection by (roster, player, window) so tab/slider rerenders are free."""
-    bundle = _bundle_for_ui()
+def _project_next_game_cached(
+    roster_key: str,
+    player: str,
+    last_n: int,
+    use_prebuilt: bool,
+    prebuilt_path: str,
+    include_display_players: bool,
+    fast_mode: bool,
+) -> pd.DataFrame:
+    """Cache projection by (roster, player, window, bundle-config).
+
+    Bundle config is passed in so the cached result is invalidated only when
+    the underlying bundle would change \u2014 not on every Streamlit rerun.
+    """
+    bundle = _bundle(roster_key, use_prebuilt, prebuilt_path,
+                     include_display_players, fast_mode)
     modeling_df = _modeling_frame(roster_key)
     return project_next_game(
         player,
@@ -896,6 +924,10 @@ def page_projection(roster: dict, api_key: str) -> None:
                     _roster_key(),
                     st.session_state.last_proj_player,
                     int(st.session_state.last_proj_n),
+                    bool(st.session_state.get("use_prebuilt_bundle", False)),
+                    str(st.session_state.get("prebuilt_bundle_path", "")),
+                    bool(st.session_state.get("train_on_display_roster", False)),
+                    bool(st.session_state.get("fast_training_mode", True)),
                 )
         except Exception as exc:
             empty_state("Projection failed", f"{exc}")
