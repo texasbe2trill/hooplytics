@@ -877,9 +877,6 @@ def page_projection(roster: dict, api_key: str) -> None:
         empty_state("No players in roster",
                     "Add a player from the sidebar to start projecting games.")
         return
-    bundle = _bundle_for_ui()
-    modeling_df = _modeling_frame(_roster_key())
-    store = _store()
 
     cols = st.columns([2, 1, 1])
     player = cols[0].selectbox("Player", list(roster))
@@ -894,11 +891,12 @@ def page_projection(roster: dict, api_key: str) -> None:
             st.session_state.last_proj_player = player
             st.session_state.last_proj_n = last_n
         try:
-            proj = _project_next_game_cached(
-                _roster_key(),
-                st.session_state.last_proj_player,
-                int(st.session_state.last_proj_n),
-            )
+            with st.spinner("Projecting next game…"):
+                proj = _project_next_game_cached(
+                    _roster_key(),
+                    st.session_state.last_proj_player,
+                    int(st.session_state.last_proj_n),
+                )
         except Exception as exc:
             empty_state("Projection failed", f"{exc}")
             proj = pd.DataFrame()
@@ -969,7 +967,9 @@ def page_projection(roster: dict, api_key: str) -> None:
         if not present:
             empty_state("No profile data", "Required metrics are missing for this player.")
         else:
-            mdf = _modeling_frame(_roster_key())
+            # Use raw player data (already cached & cheap) instead of the
+            # heavy modeling frame just to compute roster-wide maxima.
+            mdf = _player_data(_roster_key())
             roster_max = {m: max(1e-9, float(mdf[m].max())) for m in present
                           if m in mdf.columns}
             profile = {
