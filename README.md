@@ -249,15 +249,16 @@ Your key stays in session memory only — it is never written to disk or printed
 #### 📑 Roster Report (PDF)
 One-click, print-ready scouting report built with ReportLab — no headless browser required. Pulls directly from the live model bundle, edge board, and (optional) AI scout context.
 
-**What's inside:**
-- 🎨 Branded cover with players / live edges / median R² meta tiles
-- 📊 6-tile KPI strip (Players, Model rows, Live edges, Strong edges, Avg \|edge\|, Median R²)
-- 💬 Executive summary callout + optional AI slate outlook
-- 🥇 Signal Spotlight: top 3 ranked edges with A/B/C tier badges and MORE/LESS coloring
-- 📈 Analytics visuals: R² lollipop, diverging edge bar chart, edge distribution histogram, slate summary panel
-- 🧪 Model quality table with color-coded **Tier** column (Strong / Solid / Light / Noisy)
-- 🎯 Top-14 edge board with green/red signed edges and side coloring
-- 👤 Per-player hero blocks: recent-form pills, side-by-side **projection vs market** mini bar chart, projections-vs-line table, data rationale, and optional AI context
+| Section | What you get |
+| :--- | :--- |
+| 🎨 **Cover** | Branded cover with Players / Live edges / Median R² meta tiles |
+| 📊 **KPI strip** | 6 tiles: Players, Model rows, Live edges, Strong edges, Avg \|edge\|, Median R² |
+| 💬 **Executive summary** | Deterministic callout box + optional AI slate outlook |
+| 🥇 **Signal Spotlight** | Top 3 ranked edges with A/B/C tier badges and MORE/LESS coloring |
+| 📈 **Analytics visuals** | R² lollipop · diverging edge bar · edge histogram · slate summary panel |
+| 🧪 **Model quality** | Table with color-coded **Tier** column (Strong / Solid / Light / Noisy) |
+| 🎯 **Edge board** | Top 14 edges with green/red signed values and side coloring |
+| 👤 **Per-player blocks** | Recent-form pills · projection vs market mini bar chart · projections-vs-line table · data rationale · optional AI context |
 
 Open the **Roster Report** page, click *Generate PDF*, and download.
 
@@ -353,8 +354,8 @@ A player intelligence workbench is built to make data easier to *explore, explai
 | 📡 **Live line context** | Auto-fetched lines from The Odds API across CLI and dashboard, with session-only BYO-key support in the web app |
 | 🎯 **Edge board** | Slate-wide projection-vs-line gap analysis, signed edges, MORE/LESS calls, and book counts — feeds the dashboard, the AI scout, and the PDF report |
 | 👤 **Player analysis** | Recent form, rolling trends, distributions, player profiles, season averages, and recent-window comparisons |
-| 🤖 **Modeling stack** | RACE blend (Ridge + kNN + Random Forest pipelines) across eight target stats, role and context features |
-| ⚡ **Prebuilt RACE bundle** | High-accuracy `bundles/race_fast.joblib` (163K+ training rows) auto-loaded by the Streamlit app — zero cold-start training required |
+| � **Modeling stack** | RACE blend (Ridge + kNN + Random Forest pipelines) across eight target stats, role and context features |
+| 📦 **Prebuilt RACE bundle** | High-accuracy `bundles/race_fast.joblib` (163K+ training rows) auto-loaded by the Streamlit app — zero cold-start training required |
 | 🔬 **Diagnostics** | RMSE / MAE / R², predicted-vs-actual panels, residual views, feature importance, and per-stat health summaries |
 | ⚡ **CLI workflows** | Single-player projection, prop comparison, scenario inputs, live line board, roster persistence, and prebuilt-bundle training |
 | 📓 **Notebook workflow** | Rich exploratory narrative with tables, charts, code, and reproducible analysis in one place |
