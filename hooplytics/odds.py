@@ -47,11 +47,37 @@ def _odds_cache_path(date_str: str) -> Path:
     return ODDS_CACHE_DIR / f"nba_player_props_{date_str}.json"
 
 
-def _fetch_odds_payload(api_key: str, *, force_refresh: bool = False) -> list[dict]:
-    """Fetch (or load from disk cache) today's full per-event player-prop payload."""
-    cache_path = _odds_cache_path(date.today().isoformat())
+def _cache_age_minutes(path: Path) -> float:
+    """Return how many minutes ago ``path`` was last written. Inf if missing."""
+    try:
+        return (time.time() - path.stat().st_mtime) / 60
+    except OSError:
+        return float("inf")
 
-    if cache_path.exists() and not force_refresh:
+
+# Minimum minutes between live API fetches even when force_refresh=True.
+# Prevents rapid roster/season-change events from each burning credits.
+_MIN_REFRESH_MINUTES: int = 30
+
+
+def _fetch_odds_payload(
+    api_key: str,
+    *,
+    force_refresh: bool = False,
+    min_refresh_minutes: int = _MIN_REFRESH_MINUTES,
+) -> list[dict]:
+    """Fetch (or load from disk cache) today's full per-event player-prop payload.
+
+    ``force_refresh`` is honoured only when the cache file is at least
+    ``min_refresh_minutes`` old (default 30 min). This prevents rapid
+    roster/season-change events from each firing a fresh API request and
+    burning quota unnecessarily.
+    """
+    cache_path = _odds_cache_path(date.today().isoformat())
+    age = _cache_age_minutes(cache_path)
+
+    # Use cache if: explicitly not refreshing, OR cache is too fresh to re-fetch.
+    if cache_path.exists() and (not force_refresh or age < min_refresh_minutes):
         try:
             with cache_path.open("r") as f:
                 return json.load(f)
@@ -119,6 +145,7 @@ def fetch_live_player_lines(
     roster_players: list[str],
     *,
     force_refresh: bool = False,
+    min_refresh_minutes: int = _MIN_REFRESH_MINUTES,
 ) -> pd.DataFrame:
     """Return one row per (player, model_name) using consensus median across high-quality NA books.
 
@@ -138,7 +165,11 @@ def fetch_live_player_lines(
     if not api_key or not roster_players:
         return pd.DataFrame(columns=empty_cols)
 
-    payload = _fetch_odds_payload(api_key, force_refresh=force_refresh)
+    payload = _fetch_odds_payload(
+        api_key,
+        force_refresh=force_refresh,
+        min_refresh_minutes=min_refresh_minutes,
+    )
     if not payload:
         return pd.DataFrame(columns=empty_cols)
 

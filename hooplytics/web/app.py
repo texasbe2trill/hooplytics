@@ -678,6 +678,12 @@ def _build_edge_board(roster: dict, api_key: str) -> pd.DataFrame:
         return pd.DataFrame()
     st.session_state.odds_api_status = "ok"
     st.session_state.odds_api_error = ""
+    # Record how old the odds cache is so the UI can surface it.
+    from hooplytics.odds import _cache_age_minutes, _odds_cache_path  # noqa: PLC0415
+    from datetime import date as _date  # noqa: PLC0415
+    st.session_state["odds_cache_age_minutes"] = _cache_age_minutes(
+        _odds_cache_path(_date.today().isoformat())
+    )
     return out
 
 
@@ -873,6 +879,15 @@ def _render_sidebar() -> tuple[str, str, str]:
             else pill("OFFLINE", "warn")
         )
         cols[2].markdown(odds_status_pill, unsafe_allow_html=True)
+        age_min = st.session_state.get("odds_cache_age_minutes")
+        if age_min is not None and age_min < float("inf"):
+            if age_min < 1:
+                age_label = "updated just now"
+            elif age_min < 60:
+                age_label = f"updated {int(age_min)}m ago"
+            else:
+                age_label = f"updated {int(age_min // 60)}h {int(age_min % 60)}m ago"
+            cols[2].caption(age_label)
         if st.session_state.get("odds_api_status") == "error":
             st.caption(
                 "Odds API unavailable (invalid/revoked key or quota/network issue). "
