@@ -222,6 +222,10 @@ class PlayerStore:
     def _cache_path(self, name: str) -> Path:
         return self.cache_dir / f"{name.replace(' ', '_')}.parquet"
 
+    def _seed_cache_path(self, name: str) -> Path:
+        """Read-only seed cache shipped with the repo for fast cold starts."""
+        return Path(__file__).resolve().parent.parent / "data" / "seed_cache" / f"{name.replace(' ', '_')}.parquet"
+
     def fetch_player_seasons(self, name: str, seasons: list[str]) -> pd.DataFrame:
         """Return raw game logs for ``name`` across ``seasons``, using disk cache.
 
@@ -232,6 +236,16 @@ class PlayerStore:
         from nba_api.stats.endpoints import playergamelog
 
         cache_path = self._cache_path(name)
+        # Hydrate from the shipped seed cache on first run if no per-user cache yet.
+        if not cache_path.exists():
+            seed = self._seed_cache_path(name)
+            if seed.exists():
+                try:
+                    seed_df = pd.read_parquet(seed)
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    seed_df.to_parquet(cache_path, index=False)
+                except Exception:
+                    pass
         if cache_path.exists():
             try:
                 cached = pd.read_parquet(cache_path)
