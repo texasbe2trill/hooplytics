@@ -1,4 +1,4 @@
-.
+-e .
 nba_api>=1.4.1
 pandas>=2.2
 numpy>=2.1

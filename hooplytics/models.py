@@ -414,11 +414,17 @@ def train_models(
     random_state: int = 123,
     time_aware_validation: bool = True,
     verbose: bool = False,
+    fast_mode: bool = False,
 ) -> ModelBundle:
     """Train RACE models for each target.
 
     By default, validation is chronological to avoid leaking adjacent game state
     across train/validation windows.
+
+    When ``fast_mode`` is True, training is dramatically simplified for hosted
+    deployments (e.g. Streamlit Cloud): only the baseline feature set and a
+    single ridge family are evaluated, and ensemble blending is skipped. This
+    reduces ~128 model fits to ~8 with similar baseline-quality predictions.
     """
     if player_data.empty:
         raise ValueError("player_data is empty; cannot train models")
@@ -509,6 +515,9 @@ def train_models(
         y_val = val_df[target].to_numpy()
 
         variant_features = _target_variant_features(name, sub)
+        if fast_mode:
+            # Only evaluate the baseline (lagged) feature set in fast mode.
+            variant_features = {k: v for k, v in variant_features.items() if k == "baseline"}
         variant_results: dict[str, dict[str, Any]] = {}
 
         for variant, feats in variant_features.items():
@@ -519,9 +528,12 @@ def train_models(
             X_train = train_df.reindex(columns=feats)
             X_val = val_df.reindex(columns=feats)
 
-            families = ["ridge", "rf", "hgb"]
-            if name in {"points", "rebounds", "threepm", "pra"}:
-                families.append("knn")
+            if fast_mode:
+                families = ["ridge"]
+            else:
+                families = ["ridge", "rf", "hgb"]
+                if name in {"points", "rebounds", "threepm", "pra"}:
+                    families.append("knn")
 
             family_candidates: list[dict[str, Any]] = []
             for fam in families:
@@ -575,7 +587,7 @@ def train_models(
         blend_use = False
         blend_estimator: Any = None
         blend_metrics = None
-        if len(blend_parts) >= 2:
+        if not fast_mode and len(blend_parts) >= 2:
             weights = []
             comps = []
             preds = []
@@ -743,11 +755,13 @@ def ensure_models(
     force: bool = False,
     verbose: bool = False,
     time_aware_validation: bool = True,
+    fast_mode: bool = False,
 ) -> ModelBundle:
     """Load a cached RACE bundle matching ``player_data``, or train + save one."""
     players = sorted(player_data["player"].dropna().unique().tolist()) if "player" in player_data.columns else []
     seasons = sorted(player_data["season"].dropna().unique().tolist()) if "season" in player_data.columns else []
-    key = _bundle_hash(players, seasons)
+    spec_version = "race-v1-fast" if fast_mode else "race-v1"
+    key = _bundle_hash(players, seasons, spec_version=spec_version)
     cache_path = Path(cache_dir) / f"models_{key}.joblib"
 
     if cache_path.exists() and not force:
@@ -767,6 +781,7 @@ def ensure_models(
         player_data,
         verbose=verbose,
         time_aware_validation=time_aware_validation,
+        fast_mode=fast_mode,
     )
 
     try:
