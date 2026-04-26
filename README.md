@@ -36,7 +36,7 @@
 <td width="33%" valign="top">
 
 ### 🎛️ Streamlit dashboard
-Click-driven analytics for the modern fan. Six purpose-built pages.
+Click-driven analytics for the modern fan. Eight purpose-built pages, an AI scout, and a printable PDF report.
 
 ```bash
 hooplytics-web
@@ -85,6 +85,8 @@ python3 -m venv .venv && source .venv/bin/activate && pip install -e .
 | 🎯 &nbsp; Project a player's next game | `hooplytics project "Jalen Brunson"` |
 | 📈 &nbsp; Compare a projection vs. a live line | `hooplytics prop "Shai Gilgeous-Alexander" points` |
 | 📊 &nbsp; See the live line board | `hooplytics lines --refresh` |
+| 📑 &nbsp; Generate a printable scouting report | Open the dashboard → **Roster Report** → *Generate PDF* |
+| 🤖 &nbsp; Ask the AI scout a question | Open the dashboard → **Hooplytics Scout** |
 | ❓ &nbsp; See all CLI commands | `hooplytics --help` |
 | 📓 &nbsp; Open the notebook | `jupyter lab hooplytics.ipynb` |
 
@@ -169,7 +171,7 @@ hooplytics decisions "Victor Wembanyama"
 
 ## 🖼️ App Preview
 
-The Streamlit app ships with **seven** purpose-built pages, each focused on a different analytics workflow.
+The Streamlit app ships with **eight** purpose-built pages, each focused on a different analytics workflow.
 
 <table>
 <tr>
@@ -238,6 +240,26 @@ Bring-your-own-key OpenAI chatbot that is grounded in your local roster, project
 3. Open the **Hooplytics Scout** tab and ask a question (e.g. *"Give me a MORE/LESS read on the largest edge tonight, with confidence and risk factors."*).
 
 Your key stays in session memory only — it is never written to disk or printed in logs.
+
+</td>
+</tr>
+<tr>
+<td colspan="2" valign="top" align="center">
+
+#### 📑 Roster Report (PDF)
+One-click, print-ready scouting report built with ReportLab — no headless browser required. Pulls directly from the live model bundle, edge board, and (optional) AI scout context.
+
+**What's inside:**
+- 🎨 Branded cover with players / live edges / median R² meta tiles
+- 📊 6-tile KPI strip (Players, Model rows, Live edges, Strong edges, Avg \|edge\|, Median R²)
+- 💬 Executive summary callout + optional AI slate outlook
+- 🥇 Signal Spotlight: top 3 ranked edges with A/B/C tier badges and MORE/LESS coloring
+- 📈 Analytics visuals: R² lollipop, diverging edge bar chart, edge distribution histogram, slate summary panel
+- 🧪 Model quality table with color-coded **Tier** column (Strong / Solid / Light / Noisy)
+- 🎯 Top-14 edge board with green/red signed edges and side coloring
+- 👤 Per-player hero blocks: recent-form pills, side-by-side **projection vs market** mini bar chart, projections-vs-line table, data rationale, and optional AI context
+
+Open the **Roster Report** page, click *Generate PDF*, and download.
 
 </td>
 </tr>
@@ -325,12 +347,16 @@ A player intelligence workbench is built to make data easier to *explore, explai
 
 | Area | Highlights |
 | :--- | :--- |
-| 🎛️ **Streamlit dashboard** | Six purpose-built pages: Home, Player Projection, Analytics Dashboard, Compare Players, Player Line Lab, Model Diagnostics |
+| 🎛️ **Streamlit dashboard** | Eight purpose-built pages: Home, Player Projection, Analytics Dashboard, Compare Players, Player Line Lab, Model Diagnostics, Hooplytics Scout, Roster Report |
+| 📑 **PDF Roster Report** | One-click ReportLab PDF with branded cover, KPI strip, signal spotlight, R² lollipop, diverging edge bars, distribution histogram, color-coded tier table, and per-player hero blocks with mini bar charts |
+| 🤖 **Hooplytics Scout (AI)** | BYO-key OpenAI chatbot grounded in your local roster, projections, edge board, and model metrics — Hybrid or Strict grounded modes, structured Confidence + Risk factors |
 | 📡 **Live line context** | Auto-fetched lines from The Odds API across CLI and dashboard, with session-only BYO-key support in the web app |
+| 🎯 **Edge board** | Slate-wide projection-vs-line gap analysis, signed edges, MORE/LESS calls, and book counts — feeds the dashboard, the AI scout, and the PDF report |
 | 👤 **Player analysis** | Recent form, rolling trends, distributions, player profiles, season averages, and recent-window comparisons |
-| 🤖 **Modeling stack** | kNN, Ridge, and Random Forest estimators wrapped in scikit-learn pipelines, eight target stats |
+| 🤖 **Modeling stack** | RACE blend (Ridge + kNN + Random Forest pipelines) across eight target stats, role and context features |
+| ⚡ **Prebuilt RACE bundle** | High-accuracy `bundles/race_fast.joblib` (163K+ training rows) auto-loaded by the Streamlit app — zero cold-start training required |
 | 🔬 **Diagnostics** | RMSE / MAE / R², predicted-vs-actual panels, residual views, feature importance, and per-stat health summaries |
-| ⚡ **CLI workflows** | Single-player projection, prop comparison, scenario inputs, live line board, roster persistence, and model pre-warming |
+| ⚡ **CLI workflows** | Single-player projection, prop comparison, scenario inputs, live line board, roster persistence, and prebuilt-bundle training |
 | 📓 **Notebook workflow** | Rich exploratory narrative with tables, charts, code, and reproducible analysis in one place |
 
 ---
@@ -551,14 +577,22 @@ hooplytics/
 │   ├── index.html
 │   ├── assets/                   # Notebook-era visualizations
 │   └── screenshots/              # Streamlit dashboard captures
+├── bundles/
+│   └── race_fast.joblib          # Prebuilt RACE bundle auto-loaded by the app
 ├── hooplytics/
 │   ├── cli.py                    # Typer CLI entry point
 │   ├── constants.py
 │   ├── data.py                   # Game log ingestion + caching
 │   ├── fantasy.py
-│   ├── models.py                 # 8-stat model training
+│   ├── features_context.py       # Pace / matchup / opponent context
+│   ├── features_market.py        # Market-aware features
+│   ├── features_role.py          # Role / usage features
+│   ├── models.py                 # 8-stat RACE model training
 │   ├── odds.py                   # The Odds API client
+│   ├── openai_agent.py           # Hooplytics Scout (BYO-key OpenAI grounding)
 │   ├── predict.py                # Projection + line comparison
+│   ├── report.py                 # PDF Roster Report builder (ReportLab)
+│   ├── train_bundle.py           # Interactive prebuilt-bundle trainer
 │   └── web/
 │       ├── app.py                # Streamlit multi-page app
 │       ├── charts.py
@@ -571,10 +605,11 @@ hooplytics/
 
 ## 🗺️ Roadmap
 
-- 🎬 Fresh Streamlit dashboard screenshots and rendered demos
+- 🎬 Fresh Streamlit dashboard screenshots and rendered demos for the Roster Report and Hooplytics Scout pages
 - 📡 Richer book-level line telemetry inside the Streamlit app
 - 🧪 Expanded Player Line Lab sensitivity views
 - 🔬 Better model calibration and confidence summaries
+- 📑 Saveable / shareable PDF report templates with custom branding
 - 📦 More reproducible demo datasets for first-time users
 - 👥 Broader player and season presets for faster onboarding
 
