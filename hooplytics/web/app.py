@@ -335,14 +335,20 @@ def _modeling_frame(roster_key: str) -> pd.DataFrame:
     chunks: list[pd.DataFrame] = []
     for player, seasons in roster.items():
         season_list = [s for s in (seasons or []) if isinstance(s, str)]
-        if player in seed_players:
+        if player in seed_players and season_list:
             sub = seed[seed["player"] == player]
-            if season_list and "season" in sub.columns:
-                sub = sub[sub["season"].isin(season_list)]
-            if not sub.empty:
-                chunks.append(sub)
-                continue
-            # Fall through if seed doesn't cover the requested seasons.
+            if "season" in sub.columns:
+                seed_seasons = set(sub["season"].dropna().astype(str).unique())
+                requested = set(season_list)
+                # Only short-circuit to the seed slice when it covers EVERY
+                # requested season. Otherwise fall through so newly-selected
+                # seasons (e.g. the current in-progress season) are pulled via
+                # the live per-player pipeline.
+                if requested.issubset(seed_seasons):
+                    sub = sub[sub["season"].isin(season_list)]
+                    if not sub.empty:
+                        chunks.append(sub)
+                        continue
         seasons_key = json.dumps(sorted(season_list))
         rows = _player_modeling_rows(player, seasons_key)
         if not rows.empty:
@@ -554,6 +560,8 @@ def _apply_sidebar_season_select_to_roster() -> None:
             changed = True
     if changed:
         st.session_state.live_bust += 1
+        st.session_state["force_refresh_odds"] = True
+        st.rerun()
 
 
 def _roster_key() -> str:
