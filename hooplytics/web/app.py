@@ -148,30 +148,41 @@ def _parse_seasons_input(value: str) -> list[str]:
     return list(dict.fromkeys(out))
 
 
-def _training_roster(display_roster: dict[str, list[str]]) -> dict[str, list[str]]:
-    # Train on veteran anchors + currently selected roster players.
-    # This increases training rows and stabilizes coefficients while keeping
-    # direct examples for the players shown in the UI.
+def _training_roster(
+    display_roster: dict[str, list[str]],
+    include_display_players: bool = False,
+) -> dict[str, list[str]]:
+    # Fast default: train on veteran anchors only. Users can opt in to include
+    # displayed players for more personalization at higher compute cost.
     all_seasons = [s for seasons in display_roster.values() for s in seasons]
     train_seasons = sorted({s for s in all_seasons if isinstance(s, str) and s.strip()})
     if not train_seasons:
         # Fallback to current default window if roster is malformed.
         train_seasons = _default_seasons()
-    train_players = list(dict.fromkeys([*_TRAINING_ANCHOR_PLAYERS, *display_roster.keys()]))
+    train_players = list(_TRAINING_ANCHOR_PLAYERS)
+    if include_display_players:
+        train_players = list(dict.fromkeys([*train_players, *display_roster.keys()]))
     return {name: list(train_seasons) for name in train_players}
 
 
-@st.cache_data(show_spinner="Building training corpus…", ttl=60 * 60 * 6, max_entries=3)
-def _training_data(roster_key: str) -> pd.DataFrame:
+@st.cache_data(show_spinner="Building training corpus…", ttl=60 * 60 * 6, max_entries=6)
+def _training_data(roster_key: str, include_display_players: bool) -> pd.DataFrame:
     display_roster = json.loads(roster_key)
-    return _store().load_player_data(_training_roster(display_roster))
+    return _store().load_player_data(
+        _training_roster(display_roster, include_display_players=include_display_players)
+    )
 
 
 @st.cache_resource(show_spinner="Training models…", max_entries=1)
-def _bundle(roster_key: str, use_prebuilt: bool, prebuilt_path: str) -> ModelBundle:
+def _bundle(
+    roster_key: str,
+    use_prebuilt: bool,
+    prebuilt_path: str,
+    include_display_players: bool,
+) -> ModelBundle:
     if use_prebuilt and prebuilt_path:
         return load_models(prebuilt_path)
-    return ensure_models(_training_data(roster_key))
+    return ensure_models(_training_data(roster_key, include_display_players))
 
 
 def _default_prebuilt_bundle_path() -> str:
@@ -234,6 +245,8 @@ def _init_state() -> None:
         st.session_state.prebuilt_bundle_path = _default_prebuilt_bundle_path()
     if "use_prebuilt_bundle" not in st.session_state:
         st.session_state.use_prebuilt_bundle = bool(st.session_state.prebuilt_bundle_path)
+    if "train_on_display_roster" not in st.session_state:
+        st.session_state.train_on_display_roster = False
 
 
 def _sync_session_odds_api_key() -> None:
@@ -288,7 +301,10 @@ def _active_training_seasons() -> list[str]:
     roster = st.session_state.get("roster", {})
     if not roster:
         return []
-    train = _training_roster({p: list(s) for p, s in roster.items()})
+    train = _training_roster(
+        {p: list(s) for p, s in roster.items()},
+        include_display_players=bool(st.session_state.get("train_on_display_roster", False)),
+    )
     if not train:
         return []
     return list(next(iter(train.values()), []))
@@ -299,6 +315,7 @@ def _bundle_for_ui() -> ModelBundle:
         _roster_key(),
         bool(st.session_state.get("use_prebuilt_bundle", False)),
         str(st.session_state.get("prebuilt_bundle_path", "")),
+        bool(st.session_state.get("train_on_display_roster", False)),
     )
 
 
@@ -427,6 +444,11 @@ def _render_sidebar() -> tuple[str, str]:
             "Use prebuilt model bundle",
             key="use_prebuilt_bundle",
             help="When enabled, load the prebuilt bundle path below instead of retraining in-app.",
+        )
+        st.checkbox(
+            "Include roster players in training (slower)",
+            key="train_on_display_roster",
+            help="Off by default for speed. Enable to personalize training to displayed players.",
         )
         st.caption("Prebuilt bundle: " + (st.session_state.prebuilt_bundle_path or "not found"))
 
