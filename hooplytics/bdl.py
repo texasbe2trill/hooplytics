@@ -28,7 +28,15 @@ _OFF_RTG_KEYS = ("off_rtg", "off_rating", "offensive_rating")
 
 
 def _warn(msg: str) -> None:
+    # Deduplicate identical warnings within a single process so noisy retry
+    # paths (e.g. 429 rate limits) don't spam Streamlit Cloud logs.
+    if msg in _WARN_SEEN:
+        return
+    _WARN_SEEN.add(msg)
     warnings.warn(f"BDLClient: {msg}", RuntimeWarning, stacklevel=2)
+
+
+_WARN_SEEN: set[str] = set()
 
 
 # ── Key loading ───────────────────────────────────────────────────────────────

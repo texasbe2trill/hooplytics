@@ -54,7 +54,7 @@ _TRAINING_ANCHOR_PLAYERS: list[str] = [
     "Nikola Jokic",
     "Giannis Antetokounmpo",
 ]
-from hooplytics.bdl import BDLClient
+from hooplytics.bdl import BDLClient  # noqa: F401  # re-exported for tooling
 from hooplytics.data import PlayerStore, nba_seasons
 from hooplytics.models import ModelBundle, ensure_models, load_models
 from hooplytics.odds import fetch_live_player_lines
@@ -120,22 +120,15 @@ def _deployment_odds_api_key() -> str:
 
 @st.cache_resource(show_spinner=False)
 def _store() -> PlayerStore:
-    # Only attach a BDLClient when a key is actually configured. Otherwise the
-    # context endpoints would just emit noisy warnings and return empty frames.
-    bdl_key = os.getenv("BDL_API_KEY", "").strip()
-    if not bdl_key:
-        try:
-            # secrets.toml is only available inside Streamlit; ignore otherwise.
-            bdl_key = str(st.secrets.get("BDL_API_KEY", "")).strip()
-        except Exception:
-            bdl_key = ""
-    if not bdl_key:
-        return PlayerStore()
-    try:
-        bdl = BDLClient(api_key=bdl_key)
-        return PlayerStore(bdl_client=bdl)
-    except Exception:
-        return PlayerStore()
+    # The Streamlit web app never enriches context features at runtime. The
+    # shipped seed parquet (data/seed_cache/_modeling_default.parquet) already
+    # contains all opponent/lineup/availability context columns for the
+    # default roster, and per-player pipeline runs for non-default players
+    # tolerate NaN context columns via the model pipelines' imputers.
+    #
+    # Skipping BDL here avoids 429 rate-limit warnings on Streamlit Cloud
+    # cold starts and keeps the per-player pipeline fast (no extra HTTP).
+    return PlayerStore()
 
 
 @st.cache_data(show_spinner="Fetching season game logs…", ttl=60 * 60 * 6, max_entries=3)
