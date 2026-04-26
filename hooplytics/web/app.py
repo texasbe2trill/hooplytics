@@ -14,10 +14,22 @@ import pandas as pd
 import streamlit as st
 
 # Streamlit Cloud may keep an old site-packages wheel around; force imports to
-# resolve from the mounted repo source first.
+# resolve from the mounted repo source first, and evict any pre-cached
+# `hooplytics` submodules that may have been imported before this shim.
 _REPO_ROOT = str(Path(__file__).resolve().parents[2])
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
+elif sys.path.index(_REPO_ROOT) != 0:
+    sys.path.remove(_REPO_ROOT)
+    sys.path.insert(0, _REPO_ROOT)
+
+# Drop any already-loaded hooplytics modules so the next imports below resolve
+# from the live repo source instead of any stale editable/site-packages copy.
+for _mod in [m for m in list(sys.modules) if m == "hooplytics" or m.startswith("hooplytics.")]:
+    # Don't evict ourselves (hooplytics.web.app) — we're currently executing.
+    if _mod == "hooplytics.web.app":
+        continue
+    sys.modules.pop(_mod, None)
 
 from hooplytics.constants import (
     DEFAULT_ROSTER,
