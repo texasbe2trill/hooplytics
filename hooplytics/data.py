@@ -9,13 +9,52 @@ import numpy as np
 import pandas as pd
 
 from .constants import (
-    ALL_COLS,
     CACHE_DIR,
+    MODEL_SPECS,
     NBA_RENAME,
     ROLL_BASE_STATS,
     ROLL_WINDOWS,
 )
+from .features_context import build_context_features
+from .features_market import build_market_features
+from .features_role import build_role_features
 from .fantasy import fantasy
+
+
+def _join_opponent_context(df: pd.DataFrame, opp_df: pd.DataFrame) -> pd.DataFrame:
+    """Join opponent-context columns from ``opp_df`` into ``df``.
+
+    Parses the opponent team abbreviation from the MATCHUP column
+    (``"OKC @ LAL"`` → ``"LAL"``, ``"OKC vs. LAL"`` → ``"LAL"``)
+    and maps the nba_api season string to a BDL integer year
+    (``"2024-25"`` → ``2024``).
+
+    Rows whose opponent is not found in ``opp_df`` receive NaN for
+    the context columns (handled gracefully by RandomForest).
+    """
+    if opp_df.empty:
+        return df
+    if "MATCHUP" not in df.columns or "season" not in df.columns:
+        return df
+
+    opp_cols = [c for c in opp_df.columns if c not in ("bdl_season", "abbreviation")]
+    if not opp_cols:
+        return df
+
+    work = df.copy()
+    work["_opp_abbr"]   = work["MATCHUP"].str.strip().str.split().str[-1].str.upper()
+    work["_bdl_season"] = (
+        work["season"].astype(str).str.split("-").str[0].replace("", np.nan).astype(float).astype("Int64")
+    )
+
+    lookup = opp_df.rename(columns={"bdl_season": "_bdl_season", "abbreviation": "_opp_abbr"})
+    merged = work.merge(lookup, on=["_bdl_season", "_opp_abbr"], how="left")
+
+    for col in opp_cols:
+        if col in merged.columns:
+            work[col] = merged[col].values
+
+    return work.drop(columns=["_opp_abbr", "_bdl_season"])
 
 
 def nba_seasons(start: int, end: int) -> list[str]:
@@ -53,6 +92,13 @@ def add_pregame_features(df: pd.DataFrame) -> pd.DataFrame:
             if src in df.columns:
                 df[f"{stat}_per36_l30"] = df[src] * 36.0 / min30
 
+    if "min_l10" in df.columns:
+        min10 = df["min_l10"].replace(0, np.nan)
+        for stat in ("ast", "stl", "blk", "tov", "fga"):
+            src = f"{stat}_l10"
+            if src in df.columns:
+                df[f"{stat}_per36_l10"] = df[src] * 36.0 / min10
+
     if {"fga", "fta", "tov", "min"}.issubset(df.columns):
         usg = (df["fga"] + 0.44 * df["fta"] + df["tov"]) / df["min"].replace(0, np.nan)
         df["_usg_proxy_raw"] = usg
@@ -60,6 +106,49 @@ def add_pregame_features(df: pd.DataFrame) -> pd.DataFrame:
             lambda s: s.shift(1).rolling(30, min_periods=10).mean()
         )
         df = df.drop(columns=["_usg_proxy_raw"])
+
+    # Rolling std dev (consistency signal — high variance = harder to predict)
+    def _roll_std(col: str, window: int) -> pd.Series:
+        return g[col].transform(
+            lambda s: s.shift(1).rolling(window, min_periods=max(2, window // 3)).std()
+        )
+
+    for stat in ("ast", "stl", "blk", "tov"):
+        if stat not in df.columns:
+            continue
+        df[f"{stat}_std_l10"] = _roll_std(stat, 10)
+        df[f"{stat}_std_l30"] = _roll_std(stat, 30)
+
+    # Trend delta: recent form vs baseline (positive = heating up, negative = cooling off)
+    for stat in ("ast", "stl", "blk", "tov"):
+        l3 = f"{stat}_l3"
+        l10 = f"{stat}_l10"
+        l30 = f"{stat}_l30"
+        if l3 in df.columns and l10 in df.columns:
+            df[f"{stat}_trend_s"] = df[l3] - df[l10]   # short-term trend
+        if l10 in df.columns and l30 in df.columns:
+            df[f"{stat}_trend_l"] = df[l10] - df[l30]  # long-term trend
+
+    # Days rest (fatigue/freshness — affects defensive effort stats most)
+    if "game_date" in df.columns:
+        df["days_rest"] = (
+            df.groupby("player")["game_date"]
+            .transform(lambda s: s.diff().dt.days.shift(1).clip(upper=14))
+            .fillna(3)  # assume 3-day rest if no prior game
+        )
+
+    # Home/away indicator (derived from MATCHUP: "TM @ OPP" = away, "TM vs. OPP" = home)
+    if "MATCHUP" in df.columns:
+        df["is_home"] = (~df["MATCHUP"].str.contains("@", na=False)).astype(int)
+
+    # Per-player deviation: recent form minus own season baseline.
+    # Captures "above/below your own mean" without leaking the current game.
+    # This improves ridge's ability to differentiate high from low scorers.
+    for stat in ("pts", "reb", "ast", "fg3a", "tov", "stl", "blk"):
+        l10 = f"{stat}_l10"
+        l30 = f"{stat}_l30"
+        if l10 in df.columns and l30 in df.columns:
+            df[f"{stat}_dev_s"] = df[l10] - df[l30]   # recent vs season avg
 
     return df
 
@@ -75,10 +164,11 @@ class PlayerStore:
         Sleep between successive ``nba_api`` calls (seconds).
     """
 
-    def __init__(self, cache_dir: Path | str = CACHE_DIR, pause: float = 0.6) -> None:
+    def __init__(self, cache_dir: Path | str = CACHE_DIR, pause: float = 0.6, bdl_client: object | None = None) -> None:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.pause = pause
+        self.bdl_client = bdl_client  # optional BDLClient for opponent context
 
     # ── Player resolution ────────────────────────────────────────────────────
     @staticmethod
@@ -143,9 +233,17 @@ class PlayerStore:
 
         cache_path = self._cache_path(name)
         if cache_path.exists():
-            cached = pd.read_parquet(cache_path)
-            if set(seasons).issubset(cached["season"].unique()):
-                return cached[cached["season"].isin(seasons)].copy()
+            try:
+                cached = pd.read_parquet(cache_path)
+                if set(seasons).issubset(cached["season"].unique()):
+                    return cached[cached["season"].isin(seasons)].copy()
+            except Exception:
+                # Corrupt or zero-byte cache file; remove and rebuild.
+                try:
+                    cache_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                cached = pd.DataFrame()
         else:
             cached = pd.DataFrame()
 
@@ -210,15 +308,28 @@ class PlayerStore:
         df["stl_blk"] = df["stl"] + df["blk"]
         df["fantasy_score"] = fantasy(df)
         df = add_pregame_features(df)
+
+        # ── RACE context + role features (all pregame-safe) ───────────────────
+        df = build_context_features(df, bdl_client=self.bdl_client)
+        df = build_role_features(df)
+
+        # ── Market features: join pregame consensus lines (NaN-safe) ─────────
+        df = build_market_features(df)
+
         return df
 
     def modeling_frame(self, player_data: pd.DataFrame) -> pd.DataFrame:
-        """Subset ``player_data`` to the columns the models need, dropping NaNs."""
+        """Subset ``player_data`` to modeling columns.
+
+        Optional context columns are allowed to remain NaN; model pipelines use
+        imputers and target-specific feature selection.
+        """
         meta = [c for c in ("game_date", "MATCHUP") if c in player_data.columns]
-        cols = [c for c in ALL_COLS if c in player_data.columns]
+        cols = [c for c in player_data.columns if c not in {"player", *meta}]
+        target_cols = [spec["target"] for spec in MODEL_SPECS.values() if spec["target"] in player_data.columns]
         return (
             player_data[["player", *meta, *cols]]
-            .dropna(subset=cols)
+            .dropna(subset=target_cols)
             .reset_index(drop=True)
         )
 

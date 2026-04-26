@@ -47,8 +47,8 @@ def project_next_game(
     rows = store.player_modeling_rows(
         player, last_n, seasons=seasons, modeling_df=modeling_df
     )
-    drop_cols = [c for c in ("player", "game_date", "MATCHUP") if c in rows.columns]
-    feats_all = rows.drop(columns=drop_cols).median().to_dict()
+    drop_cols = [c for c in ("player", "season", "game_date", "MATCHUP") if c in rows.columns]
+    feats_all = rows.drop(columns=drop_cols).median(numeric_only=True).to_dict()
     proj = predict_scenario(feats_all, bundle)
     proj.insert(0, "player", player)
     return proj
@@ -116,7 +116,7 @@ def custom_prop(
         player, last_n, seasons=seasons, modeling_df=modeling_df
     )
     spec = bundle.specs[model_name]
-    feats = rows[spec["features"]].median().to_frame().T
+    feats = rows.reindex(columns=spec["features"]).median(numeric_only=True).to_frame().T
     pred = float(bundle.estimators[model_name].predict(feats)[0])
 
     if last_5_avg is None:
@@ -173,7 +173,7 @@ def fantasy_decisions(
     predictions: dict[str, float] = {}
     for name, est in bundle.estimators.items():
         spec = bundle.specs[name]
-        feats = last_rows[spec["features"]].median().to_frame().T
+        feats = last_rows.reindex(columns=spec["features"]).median(numeric_only=True).to_frame().T
         predictions[name] = float(est.predict(feats)[0])
 
     widget_projections = widget_projections or {}

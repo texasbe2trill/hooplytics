@@ -23,12 +23,14 @@ from rich.table import Table
 from rich.text import Text
 
 from . import (
+    BDLClient,
     DEFAULT_ROSTER,
     PlayerStore,
     custom_prop,
     ensure_models,
     fantasy_decisions,
     fetch_live_player_lines,
+    ingest_historical_odds,
     load_api_key,
     nba_seasons,
     predict_scenario,
@@ -90,7 +92,10 @@ def _resolve_player(store: PlayerStore, query: str) -> str:
 
 
 def _bootstrap(verbose: bool = False) -> tuple[PlayerStore, "ModelBundle", dict[str, list[str]]]:  # noqa: F821
-    store = PlayerStore()
+    try:
+        store = PlayerStore(bdl_client=BDLClient())
+    except Exception:
+        store = PlayerStore()
     roster = _load_roster()
     if verbose:
         console.print(f"[dim]roster: {', '.join(roster)}[/dim]")
@@ -275,21 +280,82 @@ def lines(
     console.print(_df_to_table(df, title="Live lines — sorted by |edge|"))
 
 
+@app.command(name="ingest-odds")
+def ingest_odds(
+    start: str = typer.Option(..., "--start", help="Start date ISO, e.g. 2023-10-01"),
+    end: str = typer.Option(..., "--end", help="End date ISO (exclusive), e.g. 2024-06-30"),
+    force: bool = typer.Option(False, "--force", help="Re-fetch already-cached dates."),
+) -> None:
+    """Ingest historical player prop lines from The Odds API into the local cache.
+
+    Example: hooplytics ingest-odds --start 2023-10-01 --end 2024-04-15
+
+    NOTE: Requires a paid Odds API plan. Costs ~40 credits per game per date
+    (4 markets × 1 region × 10x historical multiplier).
+    """
+    import datetime
+
+    api_key = load_api_key()
+    if not api_key:
+        err_console.print("[red]ODDS_API_KEY not set in .env or environment.[/red]")
+        raise typer.Exit(1)
+
+    try:
+        start_dt = datetime.date.fromisoformat(start)
+        end_dt = datetime.date.fromisoformat(end)
+    except ValueError as exc:
+        err_console.print(f"[red]Invalid date: {exc}[/red]")
+        raise typer.Exit(1)
+
+    dates = [
+        str(start_dt + datetime.timedelta(days=i))
+        for i in range((end_dt - start_dt).days)
+    ]
+
+    console.print(f"[dim]Ingesting odds for {len(dates)} dates ({start} → {end})…[/dim]")
+    from .constants import ODDS_PLAYER_PROPS_CUTOFF
+
+    eligible = [d for d in dates if d >= ODDS_PLAYER_PROPS_CUTOFF]
+    if len(eligible) < len(dates):
+        console.print(
+            f"[dim]Skipping {len(dates) - len(eligible)} date(s) before {ODDS_PLAYER_PROPS_CUTOFF}"
+            " (player props not available).[/dim]"
+        )
+
+    try:
+        result = ingest_historical_odds(api_key, eligible, force_refresh=force, verbose=True)
+    except RuntimeError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+    n_rows = len(result)
+    n_dates = result["game_date"].nunique() if not result.empty else 0
+    console.print(
+        f"[green]✓ Ingested {n_rows} player-prop lines across {n_dates} date(s).[/green]"
+    )
+
+
 @app.command()
 def train(
     force: bool = typer.Option(False, "--force", help="Retrain even if a cached bundle exists."),
 ) -> None:
     """Pre-warm the model cache for the current roster."""
-    store = PlayerStore()
+    try:
+        store = PlayerStore(bdl_client=BDLClient())
+    except Exception:
+        store = PlayerStore()
     roster = _load_roster()
     console.print(f"[dim]Loading game logs for {len(roster)} player(s)…[/dim]")
     player_data = store.load_player_data(roster, verbose=True)
     bundle = ensure_models(player_data, force=force, verbose=True)
-    console.print(Panel(
+    body = (
         f"[green]✓ models ready[/green]  [dim]({len(bundle.estimators)} estimators)[/dim]\n"
-        + (bundle.metrics.to_string(index=False) if bundle.metrics is not None else ""),
-        title="Training complete",
-    ))
+        + (bundle.metrics.to_string(index=False) if bundle.metrics is not None else "")
+    )
+    if getattr(bundle, "uplift_report", None) is not None and not bundle.uplift_report.empty:
+        body += "\n\n[bold]Context Feature Uplift[/bold]\n"
+        body += bundle.uplift_report.to_string(index=False)
+    console.print(Panel(body, title="Training complete"))
 
 
 # ── Roster sub-commands ─────────────────────────────────────────────────────

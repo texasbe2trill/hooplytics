@@ -11,8 +11,11 @@ Public API:
     fantasy_decisions  — full 8-stat decision table for a player
     fetch_live_player_lines — pull consensus lines from The Odds API
     nba_seasons        — 'YYYY-YY' season strings
+    BDLClient          — BallDontLie API client for opponent context features
 """
 from __future__ import annotations
+
+from .bdl import BDLClient
 
 from .constants import (
     DEFAULT_ROSTER,
@@ -25,9 +28,21 @@ from .constants import (
     ROLL_WINDOWS,
 )
 from .data import PlayerStore, add_pregame_features, nba_seasons
+from .features_context import (
+    add_assist_opportunity_score,
+    add_availability_context,
+    add_lineup_context,
+    add_opponent_context,
+    add_schedule_context,
+    add_stocks_matchup_score,
+    add_turnover_pressure_score,
+    build_context_features,
+)
+from .features_role import build_role_features
 from .fantasy import fantasy
-from .models import ModelBundle, ensure_models, train_models
-from .odds import fetch_live_player_lines, load_api_key
+from .features_market import build_market_features
+from .models import ModelBundle, TARGET_FEATURE_GROUPS, ensure_models, train_models
+from .odds import fetch_live_player_lines, ingest_historical_odds, load_api_key, load_cached_historical_odds
 from .predict import (
     custom_prop,
     fantasy_decisions,
@@ -37,6 +52,7 @@ from .predict import (
 
 __all__ = [
     "DEFAULT_ROSTER",
+    "BDLClient",
     "FANTASY_WEIGHTS",
     "METRICS",
     "MODEL_SPECS",
@@ -47,15 +63,28 @@ __all__ = [
     "ROLL_BASE_STATS",
     "ROLL_WINDOWS",
     "add_pregame_features",
+    "add_schedule_context",
+    "add_opponent_context",
+    "add_availability_context",
+    "add_lineup_context",
+    "build_context_features",
+    "build_market_features",
+    "build_role_features",
+    "add_assist_opportunity_score",
+    "add_turnover_pressure_score",
+    "add_stocks_matchup_score",
     "custom_prop",
     "ensure_models",
     "fantasy",
     "fantasy_decisions",
     "fetch_live_player_lines",
+    "ingest_historical_odds",
     "load_api_key",
+    "load_cached_historical_odds",
     "nba_seasons",
     "predict_scenario",
     "project_next_game",
+    "TARGET_FEATURE_GROUPS",
     "train_models",
 ]
 

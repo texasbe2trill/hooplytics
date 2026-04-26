@@ -8,6 +8,7 @@ from typing import Any
 CACHE_DIR = Path("data/cache")
 ODDS_CACHE_DIR = CACHE_DIR / "odds"
 MODEL_CACHE_DIR = Path(".hooplytics_cache/models")
+BDL_CACHE_DIR = CACHE_DIR / "bdl"
 
 # ── Fantasy scoring ───────────────────────────────────────────────────────────
 FANTASY_WEIGHTS: dict[str, float] = dict(
@@ -38,23 +39,43 @@ DEFAULT_ROSTER: dict[str, dict[str, float]] = {
     "Ausar Thompson":          {"points": 14.5, "fantasy_score": 34.0, "pra": 26.0, "threepm": 0.5, "assists": 3.5},
 }
 
+# Veteran anchor cohort used to stabilize model training.
+# The web app trains on these players plus the current display roster so models
+# see deeper historical samples while still supporting roster-specific inference.
+TRAINING_ANCHOR_PLAYERS: list[str] = [
+    "LeBron James",
+    "Kevin Durant",
+    "Stephen Curry",
+    "James Harden",
+    "Damian Lillard",
+    "Kyrie Irving",
+    "DeMar DeRozan",
+    "Jimmy Butler",
+    "Paul George",
+    "Chris Paul",
+    "Nikola Jokic",
+    "Giannis Antetokounmpo",
+]
+
 # ── Pregame-safe rolling features ────────────────────────────────────────────
 ROLL_BASE_STATS: list[str] = [
     "pts", "reb", "ast", "stl", "blk", "tov",
     "min", "fga", "fg3a", "fta", "plus_minus",
 ]
-ROLL_WINDOWS: tuple[int, ...] = (5, 10, 30)
+ROLL_WINDOWS: tuple[int, ...] = (3, 5, 10, 30)
 
 # ── Model specs ──────────────────────────────────────────────────────────────
 MODEL_SPECS: dict[str, dict[str, Any]] = {
-    "points":        {"target": "pts",           "features": ["fgm", "fg3m", "ftm", "min", "fg_pct", "ft_pct"], "kind": "knn"},
-    "rebounds":      {"target": "reb",           "features": ["oreb", "dreb", "min"], "kind": "knn"},
-    "assists":       {"target": "ast",           "features": ["ast_l5", "ast_l10", "ast_l30", "ast_per36_l30", "min_l10", "usg_proxy_l30"], "kind": "ridge"},
-    "pra":           {"target": "pra",           "features": ["pts", "reb", "ast", "min", "plus_minus"], "kind": "knn"},
-    "threepm":       {"target": "fg3m",          "features": ["fg3a", "min", "fg3_pct"], "kind": "knn"},
-    "stl_blk":       {"target": "stl_blk",       "features": ["stl_l10", "blk_l10", "stl_l30", "blk_l30", "stl_per36_l30", "blk_per36_l30", "min_l30"], "kind": "ridge"},
-    "turnovers":     {"target": "tov",           "features": ["tov_l5", "tov_l10", "tov_l30", "tov_per36_l30", "min_l10", "usg_proxy_l30", "ast_l10", "fga_l10"], "kind": "ridge"},
-    "fantasy_score": {"target": "fantasy_score", "features": ["pts", "reb", "ast", "stl", "blk", "tov", "min", "plus_minus"], "kind": "rf"},
+    # Pregame-safe: all features are rolled over PRIOR games only (shift(1) before rolling).
+    # Same-game component columns (fgm, oreb, etc.) were removed to eliminate data leakage.
+    "points":        {"target": "pts",           "features": ["pts_l3", "pts_l5", "pts_l10", "pts_l30", "pts_dev_s", "fga_l10", "fga_l30", "fta_l10", "min_l3", "min_l10", "min_l30", "usg_proxy_l30", "days_rest", "is_home"], "kind": "rf"},
+    "rebounds":      {"target": "reb",           "features": ["reb_l3", "reb_l5", "reb_l10", "reb_l30", "reb_dev_s", "min_l3", "min_l10", "min_l30", "days_rest", "is_home"], "kind": "rf"},
+    "assists":       {"target": "ast",           "features": ["ast_l3", "ast_l5", "ast_l10", "ast_l30", "ast_dev_s", "ast_per36_l10", "ast_per36_l30", "ast_std_l10", "ast_trend_s", "ast_trend_l", "tov_l10", "fga_l10", "pts_l10", "min_l10", "min_l3", "days_rest", "is_home", "usg_proxy_l30", "opp_pace", "opp_def_rtg"], "kind": "rf"},
+    "pra":           {"target": "pra",           "features": ["pts_l3", "pts_l5", "pts_l10", "pts_l30", "pts_dev_s", "reb_l3", "reb_l5", "reb_l10", "reb_l30", "reb_dev_s", "ast_l3", "ast_l5", "ast_l10", "ast_l30", "ast_dev_s", "min_l3", "min_l10", "plus_minus_l10", "usg_proxy_l30", "days_rest", "is_home"], "kind": "rf"},
+    "threepm":       {"target": "fg3m",          "features": ["fg3a_l3", "fg3a_l5", "fg3a_l10", "fg3a_l30", "fg3a_dev_s", "fga_l10", "fga_l30", "min_l3", "min_l10", "days_rest", "is_home"], "kind": "rf"},
+    "stl_blk":       {"target": "stl_blk",       "features": ["stl_l3", "blk_l3", "stl_l5", "blk_l5", "stl_l10", "blk_l10", "stl_l30", "blk_l30", "stl_dev_s", "blk_dev_s", "stl_std_l10", "blk_std_l10", "stl_trend_s", "blk_trend_s", "stl_trend_l", "blk_trend_l", "min_l3", "min_l10", "min_l30", "days_rest", "is_home", "opp_pace", "opp_stl_pg", "opp_blk_pg"], "kind": "rf"},
+    "turnovers":     {"target": "tov",           "features": ["tov_l3", "tov_l5", "tov_l10", "tov_l30", "tov_dev_s", "tov_per36_l10", "tov_per36_l30", "tov_std_l10", "tov_trend_s", "tov_trend_l", "fga_l10", "fga_l30", "fg3a_l10", "fta_l10", "min_l3", "min_l10", "days_rest", "is_home", "usg_proxy_l30", "ast_l10", "opp_pace", "opp_def_rtg", "opp_stl_pg"], "kind": "rf"},
+    "fantasy_score": {"target": "fantasy_score", "features": ["pts_l3", "pts_l5", "pts_l10", "pts_l30", "pts_dev_s", "reb_l3", "reb_l5", "reb_l10", "reb_l30", "reb_dev_s", "ast_l3", "ast_l5", "ast_l10", "ast_l30", "ast_dev_s", "stl_l3", "stl_l5", "stl_l10", "stl_dev_s", "blk_l3", "blk_l5", "blk_l10", "blk_dev_s", "tov_l3", "tov_l5", "tov_l10", "tov_dev_s", "min_l3", "min_l10", "min_l30", "plus_minus_l10", "usg_proxy_l30", "days_rest", "is_home"], "kind": "rf"},
 }
 
 MODEL_TO_COL: dict[str, str] = {name: spec["target"] for name, spec in MODEL_SPECS.items()}
@@ -80,3 +101,7 @@ ODDS_MARKETS: dict[str, str] = {
     "player_threes":   "threepm",
 }
 ODDS_BASE = "https://api.the-odds-api.com/v4/sports/basketball_nba"
+ODDS_HISTORICAL_BASE = "https://api.the-odds-api.com/v4/historical/sports/basketball_nba"
+ODDS_HIST_CACHE_DIR = ODDS_CACHE_DIR / "history"
+# Player prop data is only available in the historical API from this date onward.
+ODDS_PLAYER_PROPS_CUTOFF = "2023-05-03"
