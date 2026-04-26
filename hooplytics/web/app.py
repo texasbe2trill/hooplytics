@@ -102,6 +102,20 @@ def _all_active_players() -> list[str]:
         return []
 
 
+def _deployment_odds_api_key() -> str:
+    """Resolve a deployment-configured Odds API key without exposing it in the UI.
+
+    Order: ODDS_API_KEY env var, then Streamlit secrets["ODDS_API_KEY"].
+    """
+    key = os.getenv("ODDS_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        return str(st.secrets.get("ODDS_API_KEY", "")).strip()
+    except Exception:
+        return ""
+
+
 @st.cache_resource(show_spinner=False)
 def _store() -> PlayerStore:
     # Only attach a BDLClient when a key is actually configured. Otherwise the
@@ -570,11 +584,19 @@ def _render_sidebar() -> tuple[str, str]:
 
         # API key
         st.markdown('<p class="hl-section">Live odds</p>', unsafe_allow_html=True)
-        st.caption(
-            "Bring your own key from The Odds API for this session. The Streamlit app does "
-            "not load a deployment key into the UI, and your pasted key is not "
-            "written to the repository."
-        )
+        deployment_key = _deployment_odds_api_key()
+        if deployment_key:
+            st.caption(
+                "A deployment-configured Odds API key is active. Paste your own "
+                "key below to override it for this session \u2014 the deployment "
+                "key is never displayed."
+            )
+        else:
+            st.caption(
+                "Bring your own key from The Odds API for this session. The Streamlit app does "
+                "not load a deployment key into the UI, and your pasted key is not "
+                "written to the repository."
+            )
         if (
             st.session_state.session_odds_api_key_input
             != st.session_state.session_odds_api_key
@@ -590,7 +612,7 @@ def _render_sidebar() -> tuple[str, str]:
             label_visibility="collapsed",
             placeholder="Paste your key from The Odds API",
         )
-        api_key = st.session_state.session_odds_api_key.strip()
+        api_key = st.session_state.session_odds_api_key.strip() or deployment_key
         cols = st.columns(3)
         if cols[0].button("Refresh", width="stretch"):
             st.session_state.live_bust += 1
