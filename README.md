@@ -17,6 +17,7 @@
 <br>
 
 [**Quick Start**](#-tldr) ·
+[**First 5 Minutes**](#-your-first-5-minutes-with-hooplytics) ·
 [**Live Lines**](#-live-lines-made-analytical) ·
 [**Dashboard**](#-app-preview) ·
 [**CLI**](#-cli-walkthrough) ·
@@ -91,6 +92,68 @@ python3 -m venv .venv && source .venv/bin/activate && pip install -e .
 | 📓 &nbsp; Open the notebook | `jupyter lab hooplytics.ipynb` |
 
 > 💡 **Tip:** set `ODDS_API_KEY` in `.env` and `prop` will auto-fetch the line for you — no `--line` needed.
+
+---
+
+## 🏀 Your First 5 Minutes With Hooplytics
+
+New here? This is the smoothest path to **"oh, that's actually useful"** — and you don't even have to install anything.
+
+<table>
+<tr>
+<td width="50px" align="center" valign="top"><h2>1️⃣</h2></td>
+<td valign="top">
+<strong>Open the live app — no install required</strong><br>
+Go to <a href="https://hooplytics.streamlit.app/"><strong>hooplytics.streamlit.app</strong></a>. The hosted Streamlit app loads instantly with a pre-shipped roster of stars and a high-accuracy <strong>RACE</strong> model bundle already in memory — zero training, zero waiting.
+<br><br>
+<sub>Prefer to run it locally? <code>pip install -e . && hooplytics-web</code> opens the same app at <code>http://localhost:8501</code>.</sub>
+</td>
+</tr>
+<tr>
+<td align="center" valign="top"><h2>2️⃣</h2></td>
+<td valign="top">
+<strong>Land on Home — see today's slate at a glance</strong><br>
+You’ll see roster coverage, model-quality medians, and a roll-up of strong edges. This is your control tower.
+</td>
+</tr>
+<tr>
+<td align="center" valign="top"><h2>3️⃣</h2></td>
+<td valign="top">
+<strong>(Optional) Paste your Odds API key in the sidebar</strong><br>
+Get a free key at <a href="https://the-odds-api.com/">the-odds-api.com</a>, paste it into the sidebar password field, and the entire app lights up with live market lines and a real edge board. The key stays in session memory — never written to disk or sent anywhere except The Odds API.
+</td>
+</tr>
+<tr>
+<td align="center" valign="top"><h2>4️⃣</h2></td>
+<td valign="top">
+<strong>Open <em>Analytics Dashboard</em> → read the slate</strong><br>
+This is the fastest way to find tonight’s biggest projection-vs-line gaps. Sort by signed edge, filter by call (MORE / LESS), and use the <em>Strong</em> badge to surface the highest-conviction rows.
+</td>
+</tr>
+<tr>
+<td align="center" valign="top"><h2>5️⃣</h2></td>
+<td valign="top">
+<strong>Drill into a player on <em>Player Projection</em></strong><br>
+Pick a player from the sidebar to see their next-game projection across all 8 models, recent form trend, distribution context, and the model’s read versus the live line.
+</td>
+</tr>
+<tr>
+<td align="center" valign="top"><h2>6️⃣</h2></td>
+<td valign="top">
+<strong>Generate a printable scouting PDF</strong><br>
+Go to <em>Roster Report</em> → click <strong>Generate PDF</strong>. You get a branded, multi-page report with KPI tiles, a signal spotlight, R² lollipops, diverging edge charts, and per-player hero blocks — ready to share.
+</td>
+</tr>
+<tr>
+<td align="center" valign="top"><h2>7️⃣</h2></td>
+<td valign="top">
+<strong>(Optional) Talk to <em>Hooplytics Scout</em></strong><br>
+Paste your OpenAI key in the sidebar, click <strong>Connect</strong>, and ask things like <em>“Give me a MORE/LESS read on the largest edge tonight, with confidence and risk factors.”</em> The Scout is grounded in your local data and structured for confidence + risk, not hot takes.
+</td>
+</tr>
+</table>
+
+> 🎯 **In a hurry?** The first three steps are the bare minimum. Steps 4–7 are where the real fun lives.
 
 ---
 
@@ -344,7 +407,7 @@ A player intelligence workbench is built to make data easier to *explore, explai
 | 📡 **Live line context** | Auto-fetched lines from The Odds API across CLI and dashboard, with session-only BYO-key support in the web app |
 | 🎯 **Edge board** | Slate-wide projection-vs-line gap analysis, signed edges, MORE/LESS calls, and book counts — feeds the dashboard, the AI scout, and the PDF report |
 | 👤 **Player analysis** | Recent form, rolling trends, distributions, player profiles, season averages, and recent-window comparisons |
-| � **Modeling stack** | RACE blend (Ridge + kNN + Random Forest pipelines) across eight target stats, role and context features |
+| 🧠 **Modeling stack** | RACE blend (Ridge + kNN + Random Forest pipelines) across eight target stats, role and context features |
 | 📦 **Prebuilt RACE bundle** | High-accuracy `bundles/race_fast.joblib` (163K+ training rows) auto-loaded by the Streamlit app — zero cold-start training required |
 | 🔬 **Diagnostics** | RMSE / MAE / R², predicted-vs-actual panels, residual views, feature importance, and per-stat health summaries |
 | ⚡ **CLI workflows** | Single-player projection, prop comparison, scenario inputs, live line board, roster persistence, and prebuilt-bundle training |
@@ -486,30 +549,53 @@ cp .env.example .env
 
 ## 🛠️ Usage
 
-#### 🎛️ Streamlit dashboard
+### 🎛️ Streamlit dashboard — the recommended starting point
 
 ```bash
 hooplytics-web
 ```
 
-The sidebar accepts a session-only Odds API key — paste it once, use it for the session, and it's gone when you close the tab.
+This launches the full multi-page dashboard at `http://localhost:8501`. A pre-trained **RACE** model bundle ships with the repo at `bundles/race_fast.joblib` and is auto-loaded — you get production-quality projections instantly, no training step required.
 
-#### 📓 Jupyter workflow
+<table>
+<tr>
+<td valign="top" width="33%">
+<strong>🔑 Sidebar setup (optional)</strong><br>
+• Paste your <strong>Odds API key</strong> to enable live lines and the edge board.<br>
+• Paste your <strong>OpenAI key</strong> under <em>Hooplytics Scout</em> to enable the AI assistant.<br>
+• Both keys are session-only — never written to disk.
+</td>
+<td valign="top" width="33%">
+<strong>📍 Where to go first</strong><br>
+• <strong>Home</strong> for the slate overview.<br>
+• <strong>Analytics Dashboard</strong> for the live edge board.<br>
+• <strong>Player Projection</strong> for a single-player deep dive.<br>
+• <strong>Roster Report</strong> to export a branded PDF.<br>
+• <strong>Hooplytics Scout</strong> to chat with your data.
+</td>
+<td valign="top" width="34%">
+<strong>👥 Roster management</strong><br>
+The sidebar lets you add or remove tracked players. Changes are persisted locally between sessions, so your roster is ready to go next time you launch the app.
+</td>
+</tr>
+</table>
+
+### ⚡ CLI
+
+```bash
+hooplytics --help                        # browse all commands
+hooplytics roster list                   # see who's tracked
+hooplytics project "Jalen Brunson" --last-n 10
+hooplytics lines --refresh               # fresh live line board
+```
+
+### 📓 Jupyter workflow
 
 ```bash
 jupyter lab hooplytics.ipynb
 ```
 
 Follow the notebook top-to-bottom for the full narrative analysis, or jump to a section.
-
-#### ⚡ CLI
-
-```bash
-hooplytics --help
-hooplytics roster list
-hooplytics project "Jalen Brunson" --last-n 10
-hooplytics lines --refresh
-```
 
 ---
 
