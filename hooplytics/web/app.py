@@ -8,6 +8,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -2314,41 +2315,83 @@ def page_diagnostics(roster: dict, api_key: str) -> None:
     with tabs[3]:
         insight_card(
             "Feature importance",
-            "For tree-based models, this shows which input features the model relied "
-            "on most when making predictions on the training data.",
+            "For tree-based models this shows feature_importances_ from the trained "
+            "estimator. For linear models (ridge) the absolute coefficient magnitude "
+            "is shown as a proxy — features are standardized during training so "
+            "magnitudes are directly comparable.",
             icon="i",
         )
-        def _importance_tuple(name: str):
+
+        def _extract_importance(model: Any, feats: list[str]) -> pd.Series | None:
+            """Return a Series of feature importances for tree- or linear-based models."""
+            if hasattr(model, "feature_importances_"):
+                vals = np.asarray(model.feature_importances_, dtype=float)
+            elif hasattr(model, "coef_"):
+                coef = np.asarray(model.coef_, dtype=float)
+                # Ridge can output (n_targets, n_features); collapse to per-feature magnitude.
+                if coef.ndim > 1:
+                    coef = np.abs(coef).mean(axis=0)
+                vals = np.abs(coef)
+            else:
+                return None
+            if len(vals) != len(feats):
+                return None
+            return pd.Series(vals, index=feats)
+
+        def _importance_for(name: str) -> tuple[pd.Series | None, str]:
+            """Resolve importance for the active estimator (Pipeline or RACE)."""
             est = bundle.estimators[name]
             # Direct sklearn Pipeline case
             if hasattr(est, "named_steps"):
                 model = est.named_steps.get("model", None)
-                if hasattr(model, "feature_importances_"):
-                    return model, bundle.specs[name]["features"]
-            # RACE wrapper case
+                series = _extract_importance(model, bundle.specs[name]["features"])
+                if series is not None:
+                    kind = "importance" if hasattr(model, "feature_importances_") else "|coef|"
+                    return series, kind
+            # RACE wrapper case — aggregate across components weighted by their weights.
             if hasattr(est, "components") and est.components:
-                model0 = est.components[0][0]
-                feats0 = est.components[0][1]
-                if hasattr(model0, "named_steps"):
-                    inner = model0.named_steps.get("model", None)
-                    if hasattr(inner, "feature_importances_"):
-                        return inner, feats0
-            return None, None
+                aggregated: dict[str, float] = {}
+                kinds: set[str] = set()
+                total_weight = 0.0
+                for component in est.components:
+                    inner_est, feats, weight = component[0], component[1], component[2]
+                    inner_model = (
+                        inner_est.named_steps.get("model", None)
+                        if hasattr(inner_est, "named_steps") else inner_est
+                    )
+                    series = _extract_importance(inner_model, list(feats))
+                    if series is None:
+                        continue
+                    kinds.add("importance" if hasattr(inner_model, "feature_importances_")
+                              else "|coef|")
+                    w = float(weight)
+                    total_weight += w
+                    for feat, val in series.items():
+                        aggregated[feat] = aggregated.get(feat, 0.0) + w * float(val)
+                if aggregated and total_weight > 0:
+                    out = pd.Series(aggregated) / total_weight
+                    kind = "importance" if kinds == {"importance"} else "|coef|"
+                    return out, kind
+            return None, ""
 
-        rf_models = [n for n in bundle.estimators if _importance_tuple(n)[0] is not None]
-        if not rf_models:
-            empty_state("No tree-based models",
-                        "None of the trained models expose feature importances.")
+        importance_models = [n for n in bundle.estimators if _importance_for(n)[0] is not None]
+        if not importance_models:
+            empty_state(
+                "No importance data",
+                "None of the trained models expose feature importances or coefficients.",
+            )
         else:
-            picked = st.selectbox("Model", rf_models)
-            model_obj, feats = _importance_tuple(picked)
-            if model_obj is None or feats is None:
-                empty_state("No tree-based importance available", "The selected model does not expose importances.")
+            picked = st.selectbox("Model", importance_models)
+            series, kind = _importance_for(picked)
+            if series is None or series.empty:
+                empty_state("No importance data", "The selected model has no extractable importances.")
             else:
-                importances = pd.Series(model_obj.feature_importances_, index=feats)
+                title_suffix = "feature importance" if kind == "importance" else "coefficient magnitude"
                 st.plotly_chart(
-                    charts.feature_importance_bar(importances,
-                                                  title=f"Feature importance — {picked}"),
+                    charts.feature_importance_bar(
+                        series,
+                        title=f"{picked} — {title_suffix}",
+                    ),
                     width="stretch",
                 )
 
