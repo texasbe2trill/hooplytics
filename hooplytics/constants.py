@@ -8,7 +8,6 @@ from typing import Any
 CACHE_DIR = Path("data/cache")
 ODDS_CACHE_DIR = CACHE_DIR / "odds"
 MODEL_CACHE_DIR = Path(".hooplytics_cache/models")
-BDL_CACHE_DIR = CACHE_DIR / "bdl"
 
 # ── Fantasy scoring ───────────────────────────────────────────────────────────
 FANTASY_WEIGHTS: dict[str, float] = dict(

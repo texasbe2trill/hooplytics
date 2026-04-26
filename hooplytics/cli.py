@@ -23,7 +23,6 @@ from rich.table import Table
 from rich.text import Text
 
 from . import (
-    BDLClient,
     DEFAULT_ROSTER,
     PlayerStore,
     custom_prop,
@@ -92,10 +91,7 @@ def _resolve_player(store: PlayerStore, query: str) -> str:
 
 
 def _bootstrap(verbose: bool = False) -> tuple[PlayerStore, "ModelBundle", dict[str, list[str]]]:  # noqa: F821
-    try:
-        store = PlayerStore(bdl_client=BDLClient())
-    except Exception:
-        store = PlayerStore()
+    store = PlayerStore()
     roster = _load_roster()
     if verbose:
         console.print(f"[dim]roster: {', '.join(roster)}[/dim]")
@@ -340,10 +336,7 @@ def train(
     force: bool = typer.Option(False, "--force", help="Retrain even if a cached bundle exists."),
 ) -> None:
     """Pre-warm the model cache for the current roster."""
-    try:
-        store = PlayerStore(bdl_client=BDLClient())
-    except Exception:
-        store = PlayerStore()
+    store = PlayerStore()
     roster = _load_roster()
     console.print(f"[dim]Loading game logs for {len(roster)} player(s)…[/dim]")
     player_data = store.load_player_data(roster, verbose=True)

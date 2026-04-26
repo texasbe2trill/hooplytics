@@ -1,12 +1,10 @@
 """Pregame-safe context feature engineering for RACE.
 
-These features are derived from schedule metadata, prior games, and optional
-Ball Don't Lie context endpoints. Missing context never crashes the pipeline;
-when unavailable, conservative proxy values are emitted.
+These features are derived from schedule metadata and prior games. Missing
+context never crashes the pipeline; when unavailable, conservative proxy
+values are emitted.
 """
 from __future__ import annotations
-
-from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -88,10 +86,10 @@ def add_schedule_context(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def add_opponent_context(df: pd.DataFrame, bdl_client: Any = None) -> pd.DataFrame:
-    """Join opponent context from BDL lookup when available.
+def add_opponent_context(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure opponent-context columns exist (NaN-filled when unavailable).
 
-    Fallback behavior: emit NaN columns and continue.
+    The pipeline's imputers handle NaN values downstream.
     """
     if df.empty:
         return df
@@ -100,46 +98,13 @@ def add_opponent_context(df: pd.DataFrame, bdl_client: Any = None) -> pd.DataFra
     for col in ("opp_pace", "opp_def_rtg", "opp_off_rtg", "opp_stl_pg", "opp_blk_pg"):
         if col not in out.columns:
             out[col] = np.nan
-
-    if bdl_client is None or "season" not in out.columns or "opp_abbr" not in out.columns:
-        return out
-
-    try:
-        seasons = sorted({
-            int(str(s).split("-")[0])
-            for s in out["season"].dropna().unique()
-            if isinstance(s, str) and "-" in s
-        })
-        lookup = bdl_client.build_opponent_lookup(seasons)
-    except Exception:
-        return out
-
-    if lookup is None or lookup.empty:
-        return out
-
-    merge = out.copy()
-    merge["bdl_season"] = merge["season"].astype(str).str.split("-").str[0]
-    merge["bdl_season"] = pd.to_numeric(merge["bdl_season"], errors="coerce")
-
-    keep = [c for c in ("bdl_season", "abbreviation", "opp_pace", "opp_def_rtg", "opp_off_rtg", "opp_stl_pg", "opp_blk_pg") if c in lookup.columns]
-    joined = merge.merge(
-        lookup[keep].rename(columns={"abbreviation": "opp_abbr"}),
-        on=["bdl_season", "opp_abbr"],
-        how="left",
-        suffixes=("", "_ctx"),
-    )
-
-    for col in ("opp_pace", "opp_def_rtg", "opp_off_rtg", "opp_stl_pg", "opp_blk_pg"):
-        src = f"{col}_ctx"
-        if src in joined.columns:
-            out[col] = joined[src].values
     return out
 
 
-def add_availability_context(df: pd.DataFrame, bdl_client: Any = None) -> pd.DataFrame:
+def add_availability_context(df: pd.DataFrame) -> pd.DataFrame:
     """Add availability features.
 
-    Uses conservative proxies when injury feed is unavailable:
+    Uses conservative proxies derived from team active-player counts:
     - team_injury_count proxy from prior team active-player count drift
     - opp_injury_count via opponent team's proxy on the same game date
     - teammate_usage_missing_proxy from team-level active-player contraction
@@ -188,35 +153,6 @@ def add_availability_context(df: pd.DataFrame, bdl_client: Any = None) -> pd.Dat
     )[["opp_abbr", "game_date", "opp_injury_count"]]
     out = out.merge(opp, on=["opp_abbr", "game_date"], how="left")
 
-    # Optional injury feed refinement.
-    if bdl_client is not None:
-        try:
-            injuries = bdl_client.fetch_player_injuries()
-        except Exception:
-            injuries = pd.DataFrame()
-        if injuries is not None and not injuries.empty:
-            team_col = None
-            for c in ("team", "team_abbr", "abbreviation"):
-                if c in injuries.columns:
-                    team_col = c
-                    break
-            status_col = "status" if "status" in injuries.columns else None
-            if team_col is not None:
-                inj = injuries.copy()
-                inj["team_abbr"] = inj[team_col].astype(str).str.upper().str[-3:]
-                if status_col is not None:
-                    inj = inj[inj[status_col].astype(str).str.lower().isin(["out", "doubtful", "questionable"]) ]
-                inj_counts = inj.groupby("team_abbr").size().rename("inj_cnt").reset_index()
-                out = out.merge(inj_counts.rename(columns={"inj_cnt": "_team_inj_live"}), on="team_abbr", how="left")
-                out = out.merge(
-                    inj_counts.rename(columns={"team_abbr": "opp_abbr", "inj_cnt": "_opp_inj_live"}),
-                    on="opp_abbr",
-                    how="left",
-                )
-                out["team_injury_count"] = out["_team_inj_live"].fillna(out["team_injury_count"]).fillna(0)
-                out["opp_injury_count"] = out["_opp_inj_live"].fillna(out["opp_injury_count"]).fillna(0)
-                out = out.drop(columns=[c for c in ("_team_inj_live", "_opp_inj_live") if c in out.columns])
-
     for col in ("teammate_usage_missing_proxy", "team_injury_count", "opp_injury_count"):
         if col not in out.columns:
             out[col] = 0.0
@@ -227,11 +163,10 @@ def add_availability_context(df: pd.DataFrame, bdl_client: Any = None) -> pd.Dat
     return out
 
 
-def add_lineup_context(df: pd.DataFrame, bdl_client: Any = None) -> pd.DataFrame:
+def add_lineup_context(df: pd.DataFrame) -> pd.DataFrame:
     """Add lineup-stability and expected-starter context.
 
-    When lineup endpoints are unavailable, this falls back to prior-games minutes
-    stability proxies, which are pregame-safe.
+    Uses prior-games minutes stability proxies (pregame-safe).
     """
     if df.empty:
         return df
@@ -258,32 +193,6 @@ def add_lineup_context(df: pd.DataFrame, bdl_client: Any = None) -> pd.DataFrame
         out["min_std_l10"].fillna(out["min_std_l10"].median()) / (min_l10.abs().fillna(20.0) + 1.0)
     )
     out["lineup_stability_score"] = out["lineup_stability_score"].clip(0.0, 1.0)
-
-    if bdl_client is not None and "season" in out.columns:
-        # Non-fatal enrich: if lineups endpoint exists, use lineup continuity per team-date.
-        try:
-            seasons = sorted({int(str(s).split("-")[0]) for s in out["season"].dropna().unique() if isinstance(s, str) and "-" in s})
-            lineup_frames = [bdl_client.fetch_lineups(season) for season in seasons]
-            lineups = pd.concat([d for d in lineup_frames if d is not None and not d.empty], ignore_index=True) if lineup_frames else pd.DataFrame()
-        except Exception:
-            lineups = pd.DataFrame()
-
-        if not lineups.empty:
-            tcol = "team_abbr" if "team_abbr" in lineups.columns else None
-            dcol = "game_date" if "game_date" in lineups.columns else None
-            lcol = "lineup_id" if "lineup_id" in lineups.columns else None
-            if tcol and dcol and lcol:
-                lu = lineups[[tcol, dcol, lcol]].copy()
-                lu[dcol] = pd.to_datetime(lu[dcol], errors="coerce")
-                lu = lu.sort_values([tcol, dcol])
-                lu["lineup_stability_score_bdl"] = (
-                    lu.groupby(tcol)[lcol]
-                    .transform(lambda s: (s.shift(1) == s).astype(float))
-                )
-                merge_lu = lu.rename(columns={tcol: "team_abbr", dcol: "game_date"})[["team_abbr", "game_date", "lineup_stability_score_bdl"]]
-                out = out.merge(merge_lu, on=["team_abbr", "game_date"], how="left")
-                out["lineup_stability_score"] = out["lineup_stability_score_bdl"].fillna(out["lineup_stability_score"])
-                out = out.drop(columns=["lineup_stability_score_bdl"])
 
     return out
 
@@ -352,12 +261,12 @@ def add_stocks_matchup_score(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def build_context_features(df: pd.DataFrame, bdl_client: Any = None) -> pd.DataFrame:
+def build_context_features(df: pd.DataFrame) -> pd.DataFrame:
     """Build all context features in a leakage-safe order."""
     out = add_schedule_context(df)
-    out = add_opponent_context(out, bdl_client=bdl_client)
-    out = add_availability_context(out, bdl_client=bdl_client)
-    out = add_lineup_context(out, bdl_client=bdl_client)
+    out = add_opponent_context(out)
+    out = add_availability_context(out)
+    out = add_lineup_context(out)
     out = add_assist_opportunity_score(out)
     out = add_turnover_pressure_score(out)
     out = add_stocks_matchup_score(out)

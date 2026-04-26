@@ -21,42 +21,6 @@ from .features_role import build_role_features
 from .fantasy import fantasy
 
 
-def _join_opponent_context(df: pd.DataFrame, opp_df: pd.DataFrame) -> pd.DataFrame:
-    """Join opponent-context columns from ``opp_df`` into ``df``.
-
-    Parses the opponent team abbreviation from the MATCHUP column
-    (``"OKC @ LAL"`` → ``"LAL"``, ``"OKC vs. LAL"`` → ``"LAL"``)
-    and maps the nba_api season string to a BDL integer year
-    (``"2024-25"`` → ``2024``).
-
-    Rows whose opponent is not found in ``opp_df`` receive NaN for
-    the context columns (handled gracefully by RandomForest).
-    """
-    if opp_df.empty:
-        return df
-    if "MATCHUP" not in df.columns or "season" not in df.columns:
-        return df
-
-    opp_cols = [c for c in opp_df.columns if c not in ("bdl_season", "abbreviation")]
-    if not opp_cols:
-        return df
-
-    work = df.copy()
-    work["_opp_abbr"]   = work["MATCHUP"].str.strip().str.split().str[-1].str.upper()
-    work["_bdl_season"] = (
-        work["season"].astype(str).str.split("-").str[0].replace("", np.nan).astype(float).astype("Int64")
-    )
-
-    lookup = opp_df.rename(columns={"bdl_season": "_bdl_season", "abbreviation": "_opp_abbr"})
-    merged = work.merge(lookup, on=["_bdl_season", "_opp_abbr"], how="left")
-
-    for col in opp_cols:
-        if col in merged.columns:
-            work[col] = merged[col].values
-
-    return work.drop(columns=["_opp_abbr", "_bdl_season"])
-
-
 def nba_seasons(start: int, end: int) -> list[str]:
     """Season strings from ``start`` (inclusive) to ``end`` (exclusive on year, inclusive on season).
 
@@ -164,11 +128,10 @@ class PlayerStore:
         Sleep between successive ``nba_api`` calls (seconds).
     """
 
-    def __init__(self, cache_dir: Path | str = CACHE_DIR, pause: float = 0.25, bdl_client: object | None = None) -> None:
+    def __init__(self, cache_dir: Path | str = CACHE_DIR, pause: float = 0.25) -> None:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.pause = pause
-        self.bdl_client = bdl_client  # optional BDLClient for opponent context
 
     # ── Player resolution ────────────────────────────────────────────────────
     @staticmethod
@@ -330,7 +293,7 @@ class PlayerStore:
         df = add_pregame_features(df)
 
         # ── RACE context + role features (all pregame-safe) ───────────────────
-        df = build_context_features(df, bdl_client=self.bdl_client)
+        df = build_context_features(df)
         df = build_role_features(df)
 
         # ── Market features: join pregame consensus lines (NaN-safe) ─────────

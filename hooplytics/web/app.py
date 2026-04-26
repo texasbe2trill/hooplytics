@@ -54,7 +54,6 @@ _TRAINING_ANCHOR_PLAYERS: list[str] = [
     "Nikola Jokic",
     "Giannis Antetokounmpo",
 ]
-from hooplytics.bdl import BDLClient  # noqa: F401  # re-exported for tooling
 from hooplytics.data import PlayerStore, nba_seasons
 from hooplytics.models import ModelBundle, ensure_models, load_models
 from hooplytics.odds import fetch_live_player_lines
@@ -120,14 +119,6 @@ def _deployment_odds_api_key() -> str:
 
 @st.cache_resource(show_spinner=False)
 def _store() -> PlayerStore:
-    # The Streamlit web app never enriches context features at runtime. The
-    # shipped seed parquet (data/seed_cache/_modeling_default.parquet) already
-    # contains all opponent/lineup/availability context columns for the
-    # default roster, and per-player pipeline runs for non-default players
-    # tolerate NaN context columns via the model pipelines' imputers.
-    #
-    # Skipping BDL here avoids 429 rate-limit warnings on Streamlit Cloud
-    # cold starts and keeps the per-player pipeline fast (no extra HTTP).
     return PlayerStore()
 
 
@@ -342,7 +333,12 @@ def _modeling_frame(roster_key: str) -> pd.DataFrame:
 @st.cache_data(show_spinner=False, ttl=60 * 60, max_entries=32)
 def _player_games(roster_key: str, player: str) -> pd.DataFrame:
     df = _modeling_frame(roster_key)
-    return df[df["player"] == player].sort_values("game_date").reset_index(drop=True)
+    if df.empty or "player" not in df.columns:
+        return pd.DataFrame()
+    sub = df[df["player"] == player]
+    if "game_date" in sub.columns:
+        sub = sub.sort_values("game_date")
+    return sub.reset_index(drop=True)
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60, max_entries=32)

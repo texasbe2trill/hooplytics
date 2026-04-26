@@ -11,11 +11,8 @@ Public API:
     fantasy_decisions  — full 8-stat decision table for a player
     fetch_live_player_lines — pull consensus lines from The Odds API
     nba_seasons        — 'YYYY-YY' season strings
-    BDLClient          — BallDontLie API client for opponent context features
 """
 from __future__ import annotations
-
-from .bdl import BDLClient
 
 from .constants import (
     DEFAULT_ROSTER,
@@ -52,7 +49,6 @@ from .predict import (
 
 __all__ = [
     "DEFAULT_ROSTER",
-    "BDLClient",
     "FANTASY_WEIGHTS",
     "METRICS",
     "MODEL_SPECS",

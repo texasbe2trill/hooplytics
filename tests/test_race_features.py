@@ -72,7 +72,7 @@ def _toy_df() -> pd.DataFrame:
 def test_context_features_create_without_bdl() -> None:
     df = _toy_df()
     df = add_pregame_features(df)
-    out = build_context_features(df, bdl_client=None)
+    out = build_context_features(df)
 
     for col in (
         "rest_days",
