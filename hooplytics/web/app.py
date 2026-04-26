@@ -370,17 +370,19 @@ def _bundle_for_ui() -> ModelBundle:
 
 
 # Edge board builder ──────────────────────────────────────────────────────────
-def _build_edge_board(roster: dict, api_key: str) -> pd.DataFrame:
+@st.cache_data(show_spinner=False, ttl=60 * 5, max_entries=4)
+def _build_edge_board_cached(roster_key: str, api_key: str, _bust: int) -> pd.DataFrame:
     if not api_key:
         return pd.DataFrame()
+    roster = json.loads(roster_key)
     players = list(roster)
-    live = _live_lines(api_key, json.dumps(players), st.session_state.live_bust)
+    live = _live_lines(api_key, json.dumps(players), _bust)
     if live.empty:
         return pd.DataFrame()
 
     bundle = _bundle_for_ui()
     store = _store()
-    modeling_df = _modeling_frame(_roster_key())
+    modeling_df = _modeling_frame(roster_key)
 
     out: list[dict] = []
     for player in players:
@@ -418,6 +420,49 @@ def _build_edge_board(roster: dict, api_key: str) -> pd.DataFrame:
     df["abs_edge"] = df["edge"].abs()
     df["side"] = np.where(df["edge"] > 0, "MORE", "LESS")
     return df.sort_values("abs_edge", ascending=False).reset_index(drop=True)
+
+
+def _build_edge_board(roster: dict, api_key: str) -> pd.DataFrame:
+    return _build_edge_board_cached(
+        json.dumps({p: list(s) for p, s in sorted(roster.items())}, sort_keys=True),
+        api_key,
+        int(st.session_state.get("live_bust", 0)),
+    )
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60, max_entries=2)
+def _diagnostics_panels(roster_key: str, color_map: dict) -> list[dict]:
+    """Rebuild predicted-vs-actual / residual panels once per (roster, bundle)."""
+    from sklearn.model_selection import train_test_split
+
+    bundle = _bundle_for_ui()
+    modeling_df = _modeling_frame(roster_key)
+    metrics = bundle.metrics
+    panels: list[dict] = []
+    if modeling_df.empty or metrics is None or metrics.empty:
+        return panels
+    _, test = train_test_split(modeling_df, test_size=0.2, random_state=123)
+    for name, est in bundle.estimators.items():
+        spec = bundle.specs[name]
+        X = test.reindex(columns=spec["features"])
+        y = test[spec["target"]].to_numpy()
+        yhat = est.predict(X)
+        r2 = float(metrics.loc[metrics["model"] == name, "R²"].iloc[0])
+        points = [
+            {
+                "player": p, "date": str(d.date()) if pd.notna(d) else "",
+                "matchup": m or "", "actual": float(a), "pred": float(yh),
+                "color": color_map.get(p, "#888"),
+            }
+            for p, d, m, a, yh in zip(
+                test["player"],
+                test.get("game_date", pd.Series([pd.NaT] * len(test))),
+                test.get("MATCHUP", pd.Series([""] * len(test))),
+                y, yhat,
+            )
+        ]
+        panels.append({"metric": name, "r2": r2, "points": points})
+    return panels
 
 
 # Sidebar ─────────────────────────────────────────────────────────────────────
@@ -2153,29 +2198,8 @@ def page_diagnostics(roster: dict, api_key: str) -> None:
     # ── Predicted vs actual + residuals share the same panel construction ──
     panels: list[dict] = []
     try:
-        from sklearn.model_selection import train_test_split
         cmap = player_color_map(list(roster))
-        _, test = train_test_split(modeling_df, test_size=0.2, random_state=123)
-        for name, est in bundle.estimators.items():
-            spec = bundle.specs[name]
-            X = test.reindex(columns=spec["features"])
-            y = test[spec["target"]].to_numpy()
-            yhat = est.predict(X)
-            r2 = float(metrics.loc[metrics["model"] == name, "R²"].iloc[0])
-            points = [
-                {
-                    "player": p, "date": str(d.date()) if pd.notna(d) else "",
-                    "matchup": m or "", "actual": float(a), "pred": float(yh),
-                    "color": cmap.get(p, "#888"),
-                }
-                for p, d, m, a, yh in zip(
-                    test["player"],
-                    test.get("game_date", pd.Series([pd.NaT] * len(test))),
-                    test.get("MATCHUP", pd.Series([""] * len(test))),
-                    y, yhat,
-                )
-            ]
-            panels.append({"metric": name, "r2": r2, "points": points})
+        panels = _diagnostics_panels(_roster_key(), cmap)
     except Exception as exc:
         st.warning(f"Could not rebuild prediction panels: {exc}")
 
