@@ -562,12 +562,31 @@ End with a one-line confidence read (low/medium/high) and a key risk."
 }
 
 Rules:
-- Quote local numbers faithfully; never invent a line, projection, or stat.
+- Do NOT include any exact numeric values in your prose. Do not quote lines,
+  projections, edges, percentages, dates, or counts.
+- Keep the prose qualitative (e.g., "strong edge", "moderate confidence")
+  and leave all numeric reporting to the deterministic report tables.
 - Include EVERY player from the LOCAL CONTEXT roster. If a player has no \
 edge data, write a brief paragraph on recent form and role context only.
 - Keep each player paragraph under ~110 words.
 - Do not include any keys other than the schema above.
 """
+
+
+def _strip_numeric_content(text: str) -> str:
+    """Remove explicit numeric tokens from model prose as a safety net."""
+    if not text:
+        return ""
+    # Remove whole sentences containing digits.
+    parts = re.split(r"(?<=[.!?])\s+", text.strip())
+    kept = [p for p in parts if not re.search(r"\d", p)]
+    out = " ".join(kept).strip()
+    if out:
+        return out
+    # If everything had digits, redact digits instead of returning empty.
+    out = re.sub(r"\d+(?:\.\d+)?", "", text)
+    out = re.sub(r"\s+", " ", out).strip()
+    return out
 
 
 def generate_report_sections(
@@ -696,11 +715,11 @@ def generate_report_sections(
     if isinstance(players_raw, dict):
         for k, v in players_raw.items():
             if isinstance(k, str) and isinstance(v, str) and v.strip():
-                players[k] = v.strip()
+                players[k] = _strip_numeric_content(v.strip())
 
     return {
-        "executive_summary": str(parsed.get("executive_summary", "")).strip(),
-        "slate_outlook": str(parsed.get("slate_outlook", "")).strip(),
+        "executive_summary": _strip_numeric_content(str(parsed.get("executive_summary", "")).strip()),
+        "slate_outlook": _strip_numeric_content(str(parsed.get("slate_outlook", "")).strip()),
         "players": players,
     }
 
