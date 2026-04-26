@@ -203,12 +203,28 @@ def _training_roster(
     return {name: list(train_seasons) for name in train_players}
 
 
-@st.cache_data(show_spinner="Building training corpus…", ttl=60 * 60 * 6, max_entries=6)
-def _training_data(roster_key: str, include_display_players: bool) -> pd.DataFrame:
+def _training_roster_key(roster_key: str, include_display_players: bool) -> str:
+    """Stable cache key for the *resolved* training roster.
+
+    When ``include_display_players`` is False (the default) the training roster
+    is just the veteran anchors plus whatever seasons the user has selected, so
+    adding/removing a sidebar player must NOT invalidate the trained bundle.
+    """
     display_roster = json.loads(roster_key)
-    return _store().load_player_data(
-        _training_roster(display_roster, include_display_players=include_display_players)
+    resolved = _training_roster(
+        display_roster, include_display_players=include_display_players
     )
+    # sort for determinism so equivalent rosters hit the same cache slot
+    return json.dumps(
+        {name: sorted(seasons) for name, seasons in sorted(resolved.items())},
+        separators=(",", ":"),
+    )
+
+
+@st.cache_data(show_spinner="Building training corpus…", ttl=60 * 60 * 6, max_entries=6)
+def _training_data(training_key: str) -> pd.DataFrame:
+    training_roster = json.loads(training_key)
+    return _store().load_player_data(training_roster)
 
 
 @st.cache_resource(show_spinner=False, max_entries=2)
@@ -217,16 +233,9 @@ def _prebuilt_bundle(prebuilt_path: str) -> ModelBundle:
     return load_models(prebuilt_path)
 
 
-@st.cache_resource(show_spinner="Training models…", max_entries=1)
-def _trained_bundle(
-    roster_key: str,
-    include_display_players: bool,
-    fast_mode: bool,
-) -> ModelBundle:
-    return ensure_models(
-        _training_data(roster_key, include_display_players),
-        fast_mode=fast_mode,
-    )
+@st.cache_resource(show_spinner="Training models…", max_entries=2)
+def _trained_bundle(training_key: str, fast_mode: bool) -> ModelBundle:
+    return ensure_models(_training_data(training_key), fast_mode=fast_mode)
 
 
 def _bundle(
@@ -239,7 +248,8 @@ def _bundle(
     """Resolve the active bundle: prefer prebuilt (cached on path only)."""
     if use_prebuilt and prebuilt_path:
         return _prebuilt_bundle(prebuilt_path)
-    return _trained_bundle(roster_key, include_display_players, fast_mode)
+    training_key = _training_roster_key(roster_key, include_display_players)
+    return _trained_bundle(training_key, fast_mode)
 
 
 def _default_prebuilt_bundle_path() -> str:
@@ -264,20 +274,24 @@ def _live_lines(api_key: str, players_key: str, _bust: int = 0) -> pd.DataFrame:
     return fetch_live_player_lines(api_key, json.loads(players_key))
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60 * 6, max_entries=3)
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 6, max_entries=6)
 def _modeling_frame(roster_key: str) -> pd.DataFrame:
-    # Cold-start fast path: serve the shipped precomputed modeling frame when
-    # the active roster matches the default starter set.
+    # Cold-start fast path: serve the shipped precomputed modeling frame for
+    # any subset of the default starter roster (so removing a sidebar player
+    # still hits the seed cache instantly).
     try:
         roster = json.loads(roster_key)
         default_names = set(DEFAULT_ROSTER.keys())
-        if set(roster.keys()) == default_names:
+        roster_names = set(roster.keys())
+        if roster_names and roster_names.issubset(default_names):
             seed = Path(__file__).resolve().parents[2] / "data" / "seed_cache" / "_modeling_default.parquet"
             if seed.exists():
                 df = pd.read_parquet(seed)
+                df = df[df["player"].isin(roster_names)]
                 requested_seasons = {s for vals in roster.values() for s in (vals or [])}
                 if requested_seasons and "season" in df.columns:
-                    df = df[df["season"].isin(requested_seasons)].reset_index(drop=True)
+                    df = df[df["season"].isin(requested_seasons)]
+                df = df.reset_index(drop=True)
                 if not df.empty:
                     return _store().modeling_frame(df)
     except Exception:
