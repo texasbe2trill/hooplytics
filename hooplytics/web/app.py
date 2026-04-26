@@ -278,34 +278,77 @@ def _live_lines(api_key: str, players_key: str, _bust: int = 0,
     )
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60 * 6, max_entries=6)
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 24, max_entries=1)
+def _seed_modeling_frame() -> pd.DataFrame:
+    """Load the shipped per-default-player modeling parquet (if present)."""
+    seed = Path(__file__).resolve().parents[2] / "data" / "seed_cache" / "_modeling_default.parquet"
+    if seed.exists():
+        try:
+            return pd.read_parquet(seed)
+        except Exception:
+            return pd.DataFrame()
+    return pd.DataFrame()
+
+
+@st.cache_data(show_spinner="Building player features…", ttl=60 * 60 * 6, max_entries=64)
+def _player_modeling_rows(player: str, seasons_key: str) -> pd.DataFrame:
+    """Compute modeling-ready rows for one player. Cached per (player, seasons).
+
+    Per-player caching means adding or removing a sidebar player only triggers
+    pipeline work for that single player — every other roster member's
+    modeling rows are reused from cache (or from the shipped seed parquet).
+    """
+    seasons = list(json.loads(seasons_key))
+    raw = _store().load_player_data({player: seasons})
+    if raw.empty:
+        return raw
+    return _store().modeling_frame(raw)
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 6, max_entries=12)
 def _modeling_frame(roster_key: str) -> pd.DataFrame:
-    # Cold-start fast path: serve the shipped precomputed modeling frame for
-    # any subset of the default starter roster (so removing a sidebar player
-    # still hits the seed cache instantly).
+    """Compose the modeling frame by concatenating per-player cached chunks.
+
+    Default-roster players are sliced directly from the shipped seed parquet
+    (no pipeline cost); non-default players are pulled from the per-player
+    cache, which only invokes the full data + feature pipeline once per
+    (player, seasons) tuple per session.
+    """
     try:
-        roster = json.loads(roster_key)
-        default_names = set(DEFAULT_ROSTER.keys())
-        roster_names = set(roster.keys())
-        if roster_names and roster_names.issubset(default_names):
-            seed = Path(__file__).resolve().parents[2] / "data" / "seed_cache" / "_modeling_default.parquet"
-            if seed.exists():
-                df = pd.read_parquet(seed)
-                df = df[df["player"].isin(roster_names)]
-                requested_seasons = {s for vals in roster.values() for s in (vals or [])}
-                if requested_seasons and "season" in df.columns:
-                    df = df[df["season"].isin(requested_seasons)]
-                df = df.reset_index(drop=True)
-                if not df.empty:
-                    return _store().modeling_frame(df)
+        roster: dict[str, list[str]] = json.loads(roster_key)
     except Exception:
-        pass
-    return _store().modeling_frame(_player_data(roster_key))
+        roster = {}
+    if not roster:
+        return pd.DataFrame()
+
+    seed = _seed_modeling_frame()
+    seed_players = set(seed["player"].unique()) if not seed.empty else set()
+
+    chunks: list[pd.DataFrame] = []
+    for player, seasons in roster.items():
+        season_list = [s for s in (seasons or []) if isinstance(s, str)]
+        if player in seed_players:
+            sub = seed[seed["player"] == player]
+            if season_list and "season" in sub.columns:
+                sub = sub[sub["season"].isin(season_list)]
+            if not sub.empty:
+                chunks.append(sub)
+                continue
+            # Fall through if seed doesn't cover the requested seasons.
+        seasons_key = json.dumps(sorted(season_list))
+        rows = _player_modeling_rows(player, seasons_key)
+        if not rows.empty:
+            chunks.append(rows)
+
+    if not chunks:
+        return pd.DataFrame()
+    df = pd.concat(chunks, ignore_index=True, sort=False)
+    return _store().modeling_frame(df)
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60, max_entries=32)
 def _player_games(roster_key: str, player: str) -> pd.DataFrame:
-    df = _player_data(roster_key)
+    df = _modeling_frame(roster_key)
     return df[df["player"] == player].sort_values("game_date").reset_index(drop=True)
 
 
@@ -1046,9 +1089,9 @@ def page_projection(roster: dict, api_key: str) -> None:
         if not present:
             empty_state("No profile data", "Required metrics are missing for this player.")
         else:
-            # Use raw player data (already cached & cheap) instead of the
-            # heavy modeling frame just to compute roster-wide maxima.
-            mdf = _player_data(_roster_key())
+            # Use the modeling frame (per-player cached) for roster-wide maxima
+            # so we don't trigger a separate full-roster pipeline run.
+            mdf = _modeling_frame(_roster_key())
             roster_max = {m: max(1e-9, float(mdf[m].max())) for m in present
                           if m in mdf.columns}
             profile = {

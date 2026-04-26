@@ -164,7 +164,7 @@ class PlayerStore:
         Sleep between successive ``nba_api`` calls (seconds).
     """
 
-    def __init__(self, cache_dir: Path | str = CACHE_DIR, pause: float = 0.6, bdl_client: object | None = None) -> None:
+    def __init__(self, cache_dir: Path | str = CACHE_DIR, pause: float = 0.25, bdl_client: object | None = None) -> None:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.pause = pause
@@ -264,25 +264,31 @@ class PlayerStore:
         pid = self.resolve_player_id(name)
         needed = [s for s in seasons if cached.empty or s not in cached["season"].unique()]
         frames: list[pd.DataFrame] = [cached] if not cached.empty else []
+        # Tighter timeouts + smaller backoff: nba_api occasionally hangs the
+        # full default 30s window per attempt, which previously stacked up to
+        # ~3min for a single brand-new player across 2 seasons * 2 types * 3
+        # retries. 12s + 2s/4s backoff fails fast and keeps the UI responsive.
         for season in needed:
             season_frames: list[pd.DataFrame] = []
             for season_type in ("Regular Season", "Playoffs"):
                 gl = pd.DataFrame()
-                for attempt in range(3):
+                for attempt in range(2):
                     try:
                         gl = playergamelog.PlayerGameLog(
                             player_id=pid, season=season,
-                            season_type_all_star=season_type, timeout=30
+                            season_type_all_star=season_type, timeout=12
                         ).get_data_frames()[0]
                         break
                     except Exception:  # noqa: BLE001 — transient network errors
-                        if attempt == 2:
+                        if attempt == 1:
                             break
-                        time.sleep(2 ** attempt)
+                        time.sleep(1.5)
                 if not gl.empty:
                     gl = gl.assign(player=name, season=season, season_type=season_type)
                     season_frames.append(gl)
-                time.sleep(self.pause)
+                # Brief politeness pause only when an actual network hop happened.
+                if not gl.empty or attempt > 0:
+                    time.sleep(self.pause)
             if season_frames:
                 frames.extend(season_frames)
 
