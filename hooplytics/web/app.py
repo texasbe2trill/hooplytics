@@ -3,47 +3,15 @@
 from __future__ import annotations
 
 import json
-import os
-import re
-import sys
 from datetime import datetime
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-# Streamlit Cloud may keep an old site-packages wheel around; force imports to
-# resolve from the mounted repo source first.
-_REPO_ROOT = str(Path(__file__).resolve().parents[2])
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
-
-from hooplytics.constants import (
-    DEFAULT_ROSTER,
-    MODEL_SPECS,
-    MODEL_TO_COL,
-)
-
-# Veteran anchors augment the training corpus so models see deeper samples.
-# Defined here rather than constants to avoid stale-install import issues.
-_TRAINING_ANCHOR_PLAYERS: list[str] = [
-    "LeBron James",
-    "Kevin Durant",
-    "Stephen Curry",
-    "James Harden",
-    "Damian Lillard",
-    "Kyrie Irving",
-    "DeMar DeRozan",
-    "Jimmy Butler",
-    "Paul George",
-    "Chris Paul",
-    "Nikola Jokic",
-    "Giannis Antetokounmpo",
-]
-from hooplytics.bdl import BDLClient
+from hooplytics.constants import DEFAULT_ROSTER, MODEL_SPECS, MODEL_TO_COL
 from hooplytics.data import PlayerStore, nba_seasons
-from hooplytics.models import ModelBundle, ensure_models, load_models
+from hooplytics.models import ModelBundle, ensure_models
 from hooplytics.odds import fetch_live_player_lines
 from hooplytics.predict import (
     fantasy_decisions,
@@ -92,11 +60,7 @@ def _all_active_players() -> list[str]:
 
 @st.cache_resource(show_spinner=False)
 def _store() -> PlayerStore:
-    try:
-        bdl = BDLClient()
-        return PlayerStore(bdl_client=bdl)
-    except Exception:
-        return PlayerStore()
+    return PlayerStore()
 
 
 @st.cache_data(show_spinner="Fetching season game logs…", ttl=60 * 60 * 6, max_entries=3)
@@ -105,95 +69,9 @@ def _player_data(roster_key: str) -> pd.DataFrame:
     return _store().load_player_data(roster)
 
 
-def _season_start_year(season: str) -> int | None:
-    try:
-        return int(str(season).split("-")[0])
-    except Exception:
-        return None
-
-
-def _parse_seasons_input(value: str) -> list[str]:
-    """Parse season input into canonical nba season strings.
-
-    Accepted token forms (comma-separated):
-    - `2024-25` (season string)
-    - `2024` (single start year -> `2024-25`)
-    - `2021-2024` (year range -> `2021-22`..`2024-25`)
-    """
-    tokens = [t.strip() for t in str(value).split(",") if t.strip()]
-    out: list[str] = []
-    for t in tokens:
-        m_season = re.fullmatch(r"(\d{4})-(\d{2})", t)
-        if m_season:
-            y = int(m_season.group(1))
-            out.append(f"{y}-{str(y + 1)[-2:]}")
-            continue
-
-        m_year = re.fullmatch(r"\d{4}", t)
-        if m_year:
-            y = int(t)
-            out.append(f"{y}-{str(y + 1)[-2:]}")
-            continue
-
-        m_range = re.fullmatch(r"(\d{4})\s*[-:]\s*(\d{4})", t)
-        if m_range:
-            y0 = int(m_range.group(1))
-            y1 = int(m_range.group(2))
-            if y1 < y0:
-                y0, y1 = y1, y0
-            out.extend(nba_seasons(y0, y1 + 1))
-            continue
-
-    # preserve order, remove duplicates
-    return list(dict.fromkeys(out))
-
-
-def _training_roster(
-    display_roster: dict[str, list[str]],
-    include_display_players: bool = False,
-) -> dict[str, list[str]]:
-    # Fast default: train on veteran anchors only. Users can opt in to include
-    # displayed players for more personalization at higher compute cost.
-    all_seasons = [s for seasons in display_roster.values() for s in seasons]
-    train_seasons = sorted({s for s in all_seasons if isinstance(s, str) and s.strip()})
-    if not train_seasons:
-        # Fallback to current default window if roster is malformed.
-        train_seasons = _default_seasons()
-    train_players = list(_TRAINING_ANCHOR_PLAYERS)
-    if include_display_players:
-        train_players = list(dict.fromkeys([*train_players, *display_roster.keys()]))
-    return {name: list(train_seasons) for name in train_players}
-
-
-@st.cache_data(show_spinner="Building training corpus…", ttl=60 * 60 * 6, max_entries=6)
-def _training_data(roster_key: str, include_display_players: bool) -> pd.DataFrame:
-    display_roster = json.loads(roster_key)
-    return _store().load_player_data(
-        _training_roster(display_roster, include_display_players=include_display_players)
-    )
-
-
 @st.cache_resource(show_spinner="Training models…", max_entries=1)
-def _bundle(
-    roster_key: str,
-    use_prebuilt: bool,
-    prebuilt_path: str,
-    include_display_players: bool,
-) -> ModelBundle:
-    if use_prebuilt and prebuilt_path:
-        return load_models(prebuilt_path)
-    return ensure_models(_training_data(roster_key, include_display_players))
-
-
-def _default_prebuilt_bundle_path() -> str:
-    env_path = os.getenv("HOOPLYTICS_PRETRAINED_BUNDLE", "").strip()
-    if env_path and Path(env_path).exists():
-        return env_path
-    model_dir = Path(".hooplytics_cache/models")
-    if not model_dir.exists():
-        return ""
-    candidates = sorted(model_dir.glob("models_*.joblib"), key=lambda p: p.stat().st_mtime, reverse=True)
-    return str(candidates[0]) if candidates else ""
+def _bundle(roster_key: str) -> ModelBundle:
+    return ensure_models(_player_data(roster_key))
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 5)
@@ -221,11 +99,6 @@ def _default_seasons() -> list[str]:
     return nba_seasons(start, today.year + 1)
 
 
-def _season_dropdown_options() -> list[str]:
-    today = datetime.now().date()
-    return nba_seasons(2015, today.year + 1)
-
-
 def _init_state() -> None:
     if "roster" not in st.session_state:
         seasons = _default_seasons()
@@ -236,17 +109,6 @@ def _init_state() -> None:
         st.session_state.session_odds_api_key = ""
     if "session_odds_api_key_input" not in st.session_state:
         st.session_state.session_odds_api_key_input = st.session_state.session_odds_api_key
-    if "sidebar_seasons_input" not in st.session_state:
-        st.session_state.sidebar_seasons_input = "2024-25,2025-26"
-    if "sidebar_seasons_select" not in st.session_state:
-        cur = sorted({s for seasons in st.session_state.roster.values() for s in seasons})
-        st.session_state.sidebar_seasons_select = cur or _default_seasons()
-    if "prebuilt_bundle_path" not in st.session_state:
-        st.session_state.prebuilt_bundle_path = _default_prebuilt_bundle_path()
-    if "use_prebuilt_bundle" not in st.session_state:
-        st.session_state.use_prebuilt_bundle = bool(st.session_state.prebuilt_bundle_path)
-    if "train_on_display_roster" not in st.session_state:
-        st.session_state.train_on_display_roster = False
 
 
 def _sync_session_odds_api_key() -> None:
@@ -255,68 +117,9 @@ def _sync_session_odds_api_key() -> None:
     )
 
 
-def _apply_sidebar_seasons_to_roster() -> None:
-    """Apply sidebar season input to all rostered players.
-
-    This runs on text-input change so editing the year/season range immediately
-    refreshes the training/data cache keys used by the app.
-    """
-    roster = st.session_state.get("roster", {})
-    if not roster:
-        return
-    seasons_all = _parse_seasons_input(st.session_state.get("sidebar_seasons_input", ""))
-    if not seasons_all:
-        return
-    changed = False
-    for p in list(roster):
-        if list(roster[p]) != list(seasons_all):
-            roster[p] = list(seasons_all)
-            changed = True
-    if changed:
-        st.session_state.live_bust += 1
-
-
-def _apply_sidebar_season_select_to_roster() -> None:
-    roster = st.session_state.get("roster", {})
-    if not roster:
-        return
-    seasons_all = [s for s in st.session_state.get("sidebar_seasons_select", []) if s]
-    if not seasons_all:
-        return
-    changed = False
-    for p in list(roster):
-        if list(roster[p]) != list(seasons_all):
-            roster[p] = list(seasons_all)
-            changed = True
-    if changed:
-        st.session_state.live_bust += 1
-
-
 def _roster_key() -> str:
     roster = st.session_state.roster
     return json.dumps({p: list(s) for p, s in sorted(roster.items())}, sort_keys=True)
-
-
-def _active_training_seasons() -> list[str]:
-    roster = st.session_state.get("roster", {})
-    if not roster:
-        return []
-    train = _training_roster(
-        {p: list(s) for p, s in roster.items()},
-        include_display_players=bool(st.session_state.get("train_on_display_roster", False)),
-    )
-    if not train:
-        return []
-    return list(next(iter(train.values()), []))
-
-
-def _bundle_for_ui() -> ModelBundle:
-    return _bundle(
-        _roster_key(),
-        bool(st.session_state.get("use_prebuilt_bundle", False)),
-        str(st.session_state.get("prebuilt_bundle_path", "")),
-        bool(st.session_state.get("train_on_display_roster", False)),
-    )
 
 
 # Edge board builder ──────────────────────────────────────────────────────────
@@ -328,7 +131,7 @@ def _build_edge_board(roster: dict, api_key: str) -> pd.DataFrame:
     if live.empty:
         return pd.DataFrame()
 
-    bundle = _bundle_for_ui()
+    bundle = _bundle(_roster_key())
     store = _store()
     modeling_df = _modeling_frame(_roster_key())
 
@@ -407,50 +210,17 @@ def _render_sidebar() -> tuple[str, str]:
             label_visibility="collapsed",
             placeholder="Search for a player…",
         )
-        seasons_selected = st.multiselect(
-            "Seasons",
-            options=_season_dropdown_options(),
-            key="sidebar_seasons_select",
-            on_change=_apply_sidebar_season_select_to_roster,
-            help="Select one or more NBA seasons to retrieve logs and train on.",
-        )
-        active_seasons = _active_training_seasons()
-        if active_seasons:
-            st.caption(f"Active seasons in training: {', '.join(active_seasons)}")
-
-        if st.button("Apply seasons to all", width="stretch"):
-            if not seasons_selected:
-                st.error("Select at least one season from the dropdown.")
-            else:
-                for p in list(roster):
-                    roster[p] = list(seasons_selected)
-                st.session_state.live_bust += 1
-                st.rerun()
-
+        seasons_csv = st.text_input("Seasons", value="2024-25,2025-26",
+                                    label_visibility="collapsed",
+                                    help="Comma-separated NBA seasons")
         if st.button("Add", width="stretch") and new_player and new_player.strip():
-            seasons = [s for s in seasons_selected if s]
-            if not seasons:
-                st.error("Select at least one season from the dropdown.")
-                return page, api_key
+            seasons = [s.strip() for s in seasons_csv.split(",") if s.strip()]
             try:
                 resolved = PlayerStore.resolve_player_name(new_player) or new_player
                 roster[resolved] = seasons
-                st.session_state.live_bust += 1
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
-
-        st.checkbox(
-            "Use prebuilt model bundle",
-            key="use_prebuilt_bundle",
-            help="When enabled, load the prebuilt bundle path below instead of retraining in-app.",
-        )
-        st.checkbox(
-            "Include roster players in training (slower)",
-            key="train_on_display_roster",
-            help="Off by default for speed. Enable to personalize training to displayed players.",
-        )
-        st.caption("Prebuilt bundle: " + (st.session_state.prebuilt_bundle_path or "not found"))
 
         divider()
 
@@ -500,7 +270,7 @@ def page_home(roster: dict, api_key: str) -> None:
     if not roster:
         empty_state("No players in roster", "Add at least one player using the sidebar to get started.")
         return
-    bundle = _bundle_for_ui()
+    bundle = _bundle(_roster_key())
     modeling_df = _modeling_frame(_roster_key())
 
     # Brand row
@@ -741,7 +511,7 @@ def page_projection(roster: dict, api_key: str) -> None:
         empty_state("No players in roster",
                     "Add a player from the sidebar to start projecting games.")
         return
-    bundle = _bundle_for_ui()
+    bundle = _bundle(_roster_key())
     modeling_df = _modeling_frame(_roster_key())
     store = _store()
 
@@ -1672,7 +1442,7 @@ def page_scenario(roster: dict, api_key: str) -> None:
                     "Add a player from the sidebar to launch the Player Line Lab.")
         return
 
-    bundle = _bundle_for_ui()
+    bundle = _bundle(_roster_key())
     modeling_df = _modeling_frame(_roster_key())
 
     # Pretty model labels (display only)
@@ -2002,7 +1772,7 @@ def page_diagnostics(roster: dict, api_key: str) -> None:
         empty_state("No players in roster",
                     "Add a player from the sidebar to run model diagnostics.")
         return
-    bundle = _bundle_for_ui()
+    bundle = _bundle(_roster_key())
     modeling_df = _modeling_frame(_roster_key())
 
     if bundle.metrics is None or bundle.metrics.empty:
@@ -2054,47 +1824,6 @@ def page_diagnostics(roster: dict, api_key: str) -> None:
             width="stretch",
         )
 
-        section(
-            "Context Feature Uplift",
-            "This compares the baseline feature set against the best validated variant "
-            "chosen from baseline, context, role, and blended RACE candidates. "
-            "Positive uplift means the richer context actually helped on held-out data.",
-        )
-        uplift = bundle.uplift_report if hasattr(bundle, "uplift_report") else None
-        if uplift is None or uplift.empty:
-            empty_state(
-                "No uplift report available",
-                "Train the latest model bundle to compare baseline and selected-variant performance.",
-            )
-        else:
-            show = uplift.copy()
-            show = show.rename(
-                columns={
-                    "target": "target",
-                    "selected_variant": "selected_variant",
-                    "baseline_R²": "baseline_r2",
-                    "selected_R²": "selected_r2",
-                    "R²_uplift": "r2_uplift",
-                    "baseline_MAE": "baseline_mae",
-                    "selected_MAE": "selected_mae",
-                    "features_added": "features_added",
-                    "model_family": "model_family",
-                }
-            )
-            keep = [
-                "target",
-                "selected_variant",
-                "baseline_r2",
-                "selected_r2",
-                "r2_uplift",
-                "baseline_mae",
-                "selected_mae",
-                "features_added",
-                "model_family",
-            ]
-            keep = [c for c in keep if c in show.columns]
-            st.dataframe(show[keep], width="stretch", hide_index=True)
-
     # ── Predicted vs actual + residuals share the same panel construction ──
     panels: list[dict] = []
     try:
@@ -2103,7 +1832,7 @@ def page_diagnostics(roster: dict, api_key: str) -> None:
         _, test = train_test_split(modeling_df, test_size=0.2, random_state=123)
         for name, est in bundle.estimators.items():
             spec = bundle.specs[name]
-            X = test.reindex(columns=spec["features"])
+            X = test[spec["features"]]
             y = test[spec["target"]].to_numpy()
             yhat = est.predict(X)
             r2 = float(metrics.loc[metrics["model"] == name, "R²"].iloc[0])
@@ -2156,39 +1885,21 @@ def page_diagnostics(roster: dict, api_key: str) -> None:
             "on most when making predictions on the training data.",
             icon="i",
         )
-        def _importance_tuple(name: str):
-            est = bundle.estimators[name]
-            # Direct sklearn Pipeline case
-            if hasattr(est, "named_steps"):
-                model = est.named_steps.get("model", None)
-                if hasattr(model, "feature_importances_"):
-                    return model, bundle.specs[name]["features"]
-            # RACE wrapper case
-            if hasattr(est, "components") and est.components:
-                model0 = est.components[0][0]
-                feats0 = est.components[0][1]
-                if hasattr(model0, "named_steps"):
-                    inner = model0.named_steps.get("model", None)
-                    if hasattr(inner, "feature_importances_"):
-                        return inner, feats0
-            return None, None
-
-        rf_models = [n for n in bundle.estimators if _importance_tuple(n)[0] is not None]
+        rf_models = [n for n, est in bundle.estimators.items()
+                     if hasattr(est.named_steps.get("model", None), "feature_importances_")]
         if not rf_models:
             empty_state("No tree-based models",
                         "None of the trained models expose feature importances.")
         else:
             picked = st.selectbox("Model", rf_models)
-            model_obj, feats = _importance_tuple(picked)
-            if model_obj is None or feats is None:
-                empty_state("No tree-based importance available", "The selected model does not expose importances.")
-            else:
-                importances = pd.Series(model_obj.feature_importances_, index=feats)
-                st.plotly_chart(
-                    charts.feature_importance_bar(importances,
-                                                  title=f"Feature importance — {picked}"),
-                    width="stretch",
-                )
+            est = bundle.estimators[picked]
+            feats = bundle.specs[picked]["features"]
+            importances = pd.Series(est.named_steps["model"].feature_importances_, index=feats)
+            st.plotly_chart(
+                charts.feature_importance_bar(importances,
+                                              title=f"Feature importance — {picked}"),
+                width="stretch",
+            )
 
     with tabs[4]:
         rows = [{"model": n, **bundle.best_params.get(n, {})} for n in bundle.estimators]
