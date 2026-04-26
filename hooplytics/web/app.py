@@ -16,8 +16,24 @@ from hooplytics.constants import (
     DEFAULT_ROSTER,
     MODEL_SPECS,
     MODEL_TO_COL,
-    TRAINING_ANCHOR_PLAYERS,
 )
+
+# Veteran anchors augment the training corpus so models see deeper samples.
+# Defined here rather than constants to avoid stale-install import issues.
+_TRAINING_ANCHOR_PLAYERS: list[str] = [
+    "LeBron James",
+    "Kevin Durant",
+    "Stephen Curry",
+    "James Harden",
+    "Damian Lillard",
+    "Kyrie Irving",
+    "DeMar DeRozan",
+    "Jimmy Butler",
+    "Paul George",
+    "Chris Paul",
+    "Nikola Jokic",
+    "Giannis Antetokounmpo",
+]
 from hooplytics.bdl import BDLClient
 from hooplytics.data import PlayerStore, nba_seasons
 from hooplytics.models import ModelBundle, ensure_models, load_models
@@ -134,7 +150,7 @@ def _training_roster(display_roster: dict[str, list[str]]) -> dict[str, list[str
     if not train_seasons:
         # Fallback to current default window if roster is malformed.
         train_seasons = _default_seasons()
-    train_players = list(dict.fromkeys([*TRAINING_ANCHOR_PLAYERS, *display_roster.keys()]))
+    train_players = list(dict.fromkeys([*_TRAINING_ANCHOR_PLAYERS, *display_roster.keys()]))
     return {name: list(train_seasons) for name in train_players}
 
 
