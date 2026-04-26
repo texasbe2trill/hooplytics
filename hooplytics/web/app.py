@@ -65,6 +65,7 @@ from hooplytics.openai_agent import (
     connect as openai_connect,
     evidence_chips,
     filter_chat_models,
+    generate_report_sections,
     parse_chart_blocks,
 )
 from hooplytics.predict import (
@@ -72,6 +73,7 @@ from hooplytics.predict import (
     predict_scenario,
     project_next_game,
 )
+from hooplytics.report import build_pdf_report
 from hooplytics.web import charts
 from hooplytics.web.styles import (
     chip,
@@ -2948,6 +2950,195 @@ def _render_chat_message(role: str, body: str, evidence: list[str] | None = None
             )
 
 
+# ── Roster Report (PDF export) ──────────────────────────────────────────────
+def _recent_form_for(player: str, games: pd.DataFrame, last_n: int = 10) -> dict[str, float]:
+    """Compute a small dict of recent-form averages for the report player block."""
+    if games is None or games.empty:
+        return {}
+    out: dict[str, float] = {}
+    for col in ("pts", "reb", "ast", "pra", "fantasy_score", "min"):
+        if col not in games.columns:
+            continue
+        s = pd.to_numeric(games[col], errors="coerce").dropna()
+        if s.empty:
+            continue
+        out[col] = float(s.tail(last_n).mean())
+    return out
+
+
+def page_report(roster: dict, api_key: str) -> None:
+    page_hero(
+        "Roster Report",
+        "Export a printable analytics report covering model quality, "
+        "live edges, per-player projections, and AI-written rationale.",
+    )
+
+    if not roster:
+        empty_state(
+            "Roster is empty",
+            "Add players in the sidebar to enable the report export.",
+        )
+        return
+
+    # Resolve OpenAI connection (optional — report is also useful without prose).
+    openai_api_key = (
+        (st.session_state.get("session_openai_api_key") or "").strip()
+        or _deployment_openai_api_key()
+    )
+    conn: OpenAIConnection | None = None
+    if openai_api_key:
+        conn = _resolve_openai_connection(openai_api_key)
+
+    selected_model = st.session_state.get("openai_selected_model") or ""
+    has_chat = bool(conn and selected_model)
+
+    # ── Configuration card ─────────────────────────────────────────────────
+    with st.container():
+        cols = st.columns([2, 1, 1])
+        include_ai = cols[0].toggle(
+            "Include AI-written rationale (uses OpenAI)",
+            value=has_chat,
+            disabled=not has_chat,
+            help=(
+                "Generates an executive summary, slate outlook, and a paragraph "
+                "of analyst-style rationale per player using your configured "
+                "OpenAI key. One API call per export."
+                if has_chat
+                else "Add an OpenAI key in the sidebar to enable AI prose."
+            ),
+        )
+        cols[1].markdown(
+            (pill("AI READY", "live") if has_chat else pill("DATA-ONLY", "warn")),
+            unsafe_allow_html=True,
+        )
+        cols[2].caption(
+            f"Model · {selected_model}" if has_chat else "Add OpenAI key for prose"
+        )
+
+    # ── Preview / status ───────────────────────────────────────────────────
+    bundle = _bundle_for_ui()
+    edge_df = _build_edge_board(roster, api_key)
+
+    overview_cols = st.columns(4)
+    overview_cols[0].metric("Players", len(roster))
+    overview_cols[1].metric(
+        "Models trained",
+        len(bundle.estimators) if bundle and bundle.estimators else 0,
+    )
+    overview_cols[2].metric(
+        "Live edges",
+        int(len(edge_df)) if isinstance(edge_df, pd.DataFrame) else 0,
+    )
+    median_r2 = (
+        float(bundle.metrics["R²"].median())
+        if bundle is not None and bundle.metrics is not None
+        and "R²" in bundle.metrics.columns and not bundle.metrics.empty
+        else float("nan")
+    )
+    overview_cols[3].metric(
+        "Median R²",
+        f"{median_r2:.2f}" if not np.isnan(median_r2) else "—",
+    )
+
+    divider()
+
+    # ── Generate button ────────────────────────────────────────────────────
+    generate = st.button(
+        "Generate report",
+        type="primary",
+        width="stretch",
+        key="report_generate_btn",
+    )
+
+    if not generate:
+        st.caption(
+            "The report is built on demand. Toggle AI rationale above to "
+            "include analyst-style prose for the executive summary, slate "
+            "outlook, and each player."
+        )
+        return
+
+    # ── Build payload ──────────────────────────────────────────────────────
+    store = _store()
+    modeling_df = _modeling_frame(_roster_key())
+    seasons = _active_training_seasons() or None
+
+    projections: dict[str, pd.DataFrame] = {}
+    recent_form: dict[str, dict[str, float]] = {}
+    progress = st.progress(0.0, text="Computing projections…")
+    players = list(roster.keys())
+    for i, player in enumerate(players, start=1):
+        try:
+            proj = project_next_game(
+                player,
+                bundle=bundle,
+                store=store,
+                modeling_df=modeling_df,
+                seasons=seasons,
+            )
+            if isinstance(proj, pd.DataFrame) and not proj.empty:
+                projections[player] = proj
+        except Exception:
+            pass
+        try:
+            games = _player_games(_roster_key(), player)
+            recent_form[player] = _recent_form_for(player, games)
+        except Exception:
+            pass
+        progress.progress(i / max(len(players), 1), text=f"Projection {i}/{len(players)}…")
+    progress.empty()
+
+    # ── AI prose (optional) ────────────────────────────────────────────────
+    ai_sections: dict[str, Any] | None = None
+    if include_ai and conn is not None and selected_model:
+        with st.spinner("Generating AI rationale…"):
+            try:
+                grounding = build_grounding_payload(
+                    roster=roster,
+                    bundle=bundle,
+                    edge_df=edge_df if isinstance(edge_df, pd.DataFrame) and not edge_df.empty else None,
+                    projections=projections or None,
+                )
+                ai_sections = generate_report_sections(
+                    connection=conn,
+                    model=selected_model,
+                    grounding_payload=grounding,
+                )
+            except Exception as exc:
+                st.warning(f"AI rationale failed — exporting data-only report. ({exc})")
+                ai_sections = None
+
+    # ── Build PDF ──────────────────────────────────────────────────────────
+    metrics_df = (
+        bundle.metrics if bundle is not None and bundle.metrics is not None
+        else None
+    )
+    try:
+        pdf_bytes = build_pdf_report(
+            roster={p: list(s) for p, s in roster.items()},
+            bundle_metrics=metrics_df,
+            edge_df=edge_df if isinstance(edge_df, pd.DataFrame) and not edge_df.empty else None,
+            projections=projections or None,
+            recent_form=recent_form or None,
+            ai_sections=ai_sections,
+        )
+    except Exception as exc:
+        st.error(f"PDF generation failed: {exc}")
+        return
+
+    filename = f"hooplytics_report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+    st.success(f"Report ready · {len(pdf_bytes) / 1024:.1f} KB")
+    st.download_button(
+        "Download PDF",
+        data=pdf_bytes,
+        file_name=filename,
+        mime="application/pdf",
+        type="primary",
+        width="stretch",
+        key="report_download_btn",
+    )
+
+
 def page_chatbot(roster: dict, api_key: str) -> None:
     openai_api_key = (
         (st.session_state.get("session_openai_api_key") or "").strip()
@@ -3140,6 +3331,7 @@ PAGES = {
     "Player Line Lab":     page_scenario,
     "Model diagnostics":   page_diagnostics,
     "Hooplytics Scout":    page_chatbot,
+    "Roster Report":       page_report,
 }
 
 

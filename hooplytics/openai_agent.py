@@ -214,7 +214,7 @@ def _safe_records(df: pd.DataFrame | None, limit: int) -> list[dict[str, Any]]:
         if pd.api.types.is_numeric_dtype(head[col]):
             head[col] = pd.to_numeric(head[col], errors="coerce").round(3)
     head = head.where(pd.notna(head), None)
-    return [dict(r) for r in head.to_dict(orient="records")]
+    return [{str(k): v for k, v in r.items()} for r in head.to_dict(orient="records")]
 
 
 def build_grounding_payload(
@@ -533,6 +533,178 @@ def parse_chart_blocks(text: str) -> list[dict[str, Any]]:
     return segments
 
 
+# ── Report prose generation ──────────────────────────────────────────────────
+_REPORT_SYSTEM_PROMPT = """\
+You are Hooplytics Scout, generating prose for a printable PDF analytics \
+report. Use the LOCAL CONTEXT (roster, model metrics, edges, projections) as \
+authoritative; supplement with general NBA knowledge (matchups, role, injuries, \
+pace, defense) flagged inline as "(general NBA context)" when relevant.
+
+Tone: confident, analyst-grade, concise. No hedging filler. No emojis.
+Avoid betting advice language; frame as analytical lean and rationale.
+
+Return ONLY a single JSON object — no prose outside the JSON, no markdown \
+fences. Schema:
+{
+  "executive_summary": "2-4 sentence overview of the slate, highlighting the \
+strongest 1-2 model-vs-market disagreements and the overall confidence \
+posture. Plain prose.",
+  "slate_outlook": "1 short paragraph (3-5 sentences) on broader context: \
+recent form trends across the roster, model reliability summary, key risks \
+to watch tonight (rest, injury risk, blowout risk).",
+  "players": {
+    "<Player Name>": "1 short paragraph (3-5 sentences) covering: which \
+model has the largest projection-vs-line gap and the lean (MORE/LESS), the \
+data behind it (projection, recent form, model R²), and 1-2 outside NBA \
+context bullets (matchup, defense, role, rest) flagged as outside reasoning. \
+End with a one-line confidence read (low/medium/high) and a key risk."
+  }
+}
+
+Rules:
+- Quote local numbers faithfully; never invent a line, projection, or stat.
+- Include EVERY player from the LOCAL CONTEXT roster. If a player has no \
+edge data, write a brief paragraph on recent form and role context only.
+- Keep each player paragraph under ~110 words.
+- Do not include any keys other than the schema above.
+"""
+
+
+def generate_report_sections(
+    *,
+    connection: OpenAIConnection,
+    model: str,
+    grounding_payload: dict[str, Any],
+    max_output_tokens: int = 4000,
+) -> dict[str, Any]:
+    """Generate structured report prose for the PDF builder.
+
+    Returns a dict with keys ``executive_summary`` (str), ``slate_outlook``
+    (str), and ``players`` (dict[str, str]). Falls back to empty strings on
+    parse failure so the PDF still renders without prose.
+    """
+    if connection is None or connection.client is None:
+        raise RuntimeError("No active OpenAI connection.")
+    if not model:
+        raise ValueError("No OpenAI model selected.")
+
+    available_chat_models = filter_chat_models(connection.models or [])
+    if available_chat_models and model not in available_chat_models:
+        model = auto_select_model(available_chat_models) or available_chat_models[0]
+
+    messages = [
+        {"role": "system", "content": _REPORT_SYSTEM_PROMPT},
+        {"role": "system", "content": format_grounding_block(grounding_payload)},
+        {
+            "role": "user",
+            "content": (
+                "Produce the JSON report sections for the roster in LOCAL "
+                "CONTEXT. Return ONLY the JSON object."
+            ),
+        },
+    ]
+
+    client = connection.client
+
+    def _create(req_model: str):
+        kwargs: dict[str, Any] = {
+            "model": req_model,
+            "messages": messages,
+            "response_format": {"type": "json_object"},
+        }
+        try:
+            return client.chat.completions.create(
+                **kwargs, max_completion_tokens=max_output_tokens
+            )
+        except TypeError:
+            return client.chat.completions.create(
+                **kwargs, max_tokens=max_output_tokens
+            )
+
+    try:
+        resp = _create(model)
+    except Exception as exc:
+        msg = _redact(str(exc))
+        # Some models reject response_format; retry without it.
+        if "response_format" in msg.lower():
+            messages_no_fmt = list(messages)
+            messages_no_fmt[0] = {
+                "role": "system",
+                "content": _REPORT_SYSTEM_PROMPT
+                + "\n\nReturn the JSON object as plain text — no code fences.",
+            }
+            try:
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=messages_no_fmt,
+                    max_completion_tokens=max_output_tokens,
+                )
+            except TypeError:
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=messages_no_fmt,
+                    max_tokens=max_output_tokens,
+                )
+        else:
+            raise RuntimeError(msg) from None
+
+    raw_text = ""
+    try:
+        choice = resp.choices[0]
+        message = getattr(choice, "message", None)
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            raw_text = content.strip()
+        elif isinstance(content, list):
+            chunks: list[str] = []
+            for part in content:
+                if isinstance(part, dict) and str(part.get("type", "")).lower() in {"text", "output_text"}:
+                    val = part.get("text")
+                    if isinstance(val, str):
+                        chunks.append(val)
+            raw_text = "\n".join(chunks).strip()
+    except Exception:
+        raw_text = ""
+
+    if not raw_text:
+        return {"executive_summary": "", "slate_outlook": "", "players": {}}
+
+    # Strip code fences if the model added them despite instructions.
+    fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw_text, re.DOTALL)
+    if fenced:
+        raw_text = fenced.group(1)
+
+    try:
+        parsed = json.loads(raw_text)
+    except json.JSONDecodeError:
+        # Try to recover the largest balanced JSON object.
+        start = raw_text.find("{")
+        end = raw_text.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                parsed = json.loads(raw_text[start : end + 1])
+            except Exception:
+                parsed = {}
+        else:
+            parsed = {}
+
+    if not isinstance(parsed, dict):
+        return {"executive_summary": "", "slate_outlook": "", "players": {}}
+
+    players_raw = parsed.get("players")
+    players: dict[str, str] = {}
+    if isinstance(players_raw, dict):
+        for k, v in players_raw.items():
+            if isinstance(k, str) and isinstance(v, str) and v.strip():
+                players[k] = v.strip()
+
+    return {
+        "executive_summary": str(parsed.get("executive_summary", "")).strip(),
+        "slate_outlook": str(parsed.get("slate_outlook", "")).strip(),
+        "players": players,
+    }
+
+
 __all__ = [
     "OpenAIConnection",
     "SYSTEM_PROMPT",
@@ -544,6 +716,7 @@ __all__ = [
     "evidence_chips",
     "filter_chat_models",
     "format_grounding_block",
+    "generate_report_sections",
     "list_available_models",
     "parse_chart_blocks",
 ]

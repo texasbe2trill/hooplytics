@@ -309,6 +309,18 @@ def _fit_best_family(
     return best_est, best_params, best_m
 
 
+def _observed_feature_subset(
+    X: pd.DataFrame,
+    feature_names: list[str],
+) -> tuple[pd.DataFrame, list[str]]:
+    """Return X restricted to features with at least one observed value."""
+    if X.empty or not feature_names:
+        return X.reindex(columns=[]), []
+    Xf = X.reindex(columns=feature_names)
+    observed = [c for c in Xf.columns if Xf[c].notna().any()]
+    return Xf.reindex(columns=observed), observed
+
+
 def _role_dynamic_columns(df: pd.DataFrame) -> list[str]:
     cols: list[str] = []
     for c in df.columns:
@@ -476,7 +488,9 @@ def train_models(
                     [c for c in sub.columns if c not in {"player", "season", "game_date", "MATCHUP", target}],
                     target=target,
                 )
-            Xf = sub.reindex(columns=full_feats)
+            Xf, full_feats = _observed_feature_subset(sub, full_feats)
+            if not full_feats:
+                continue
             yf = sub[target].to_numpy()
             dum = Pipeline([
                 ("impute", SimpleImputer(strategy="median")),
