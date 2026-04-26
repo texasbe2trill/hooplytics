@@ -104,8 +104,19 @@ def _all_active_players() -> list[str]:
 
 @st.cache_resource(show_spinner=False)
 def _store() -> PlayerStore:
+    # Only attach a BDLClient when a key is actually configured. Otherwise the
+    # context endpoints would just emit noisy warnings and return empty frames.
+    bdl_key = os.getenv("BDL_API_KEY", "").strip()
+    if not bdl_key:
+        try:
+            # secrets.toml is only available inside Streamlit; ignore otherwise.
+            bdl_key = str(st.secrets.get("BDL_API_KEY", "")).strip()
+        except Exception:
+            bdl_key = ""
+    if not bdl_key:
+        return PlayerStore()
     try:
-        bdl = BDLClient()
+        bdl = BDLClient(api_key=bdl_key)
         return PlayerStore(bdl_client=bdl)
     except Exception:
         return PlayerStore()
@@ -225,6 +236,22 @@ def _live_lines(api_key: str, players_key: str, _bust: int = 0) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 6, max_entries=3)
 def _modeling_frame(roster_key: str) -> pd.DataFrame:
+    # Cold-start fast path: serve the shipped precomputed modeling frame when
+    # the active roster matches the default starter set.
+    try:
+        roster = json.loads(roster_key)
+        default_names = set(DEFAULT_ROSTER.keys())
+        if set(roster.keys()) == default_names:
+            seed = Path(__file__).resolve().parents[2] / "data" / "seed_cache" / "_modeling_default.parquet"
+            if seed.exists():
+                df = pd.read_parquet(seed)
+                requested_seasons = {s for vals in roster.values() for s in (vals or [])}
+                if requested_seasons and "season" in df.columns:
+                    df = df[df["season"].isin(requested_seasons)].reset_index(drop=True)
+                if not df.empty:
+                    return _store().modeling_frame(df)
+    except Exception:
+        pass
     return _store().modeling_frame(_player_data(roster_key))
 
 
