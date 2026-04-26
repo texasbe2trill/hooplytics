@@ -5,12 +5,19 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+# Streamlit Cloud may keep an old site-packages wheel around; force imports to
+# resolve from the mounted repo source first.
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from hooplytics.constants import (
     DEFAULT_ROSTER,
