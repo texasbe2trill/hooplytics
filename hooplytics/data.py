@@ -369,8 +369,13 @@ class PlayerStore:
             from datetime import date
 
             today = date.today()
-            start_year = today.year - (1 if today.month >= 10 else 2)
-            seasons = nba_seasons(start_year, today.year + 1)
+            if today.month >= 10:
+                start_year = today.year - 1
+                end_exclusive = today.year + 1
+            else:
+                start_year = today.year - 2
+                end_exclusive = today.year
+            seasons = nba_seasons(start_year, end_exclusive)
 
         single = self.load_player_data({player: list(seasons)})
         if single.empty:

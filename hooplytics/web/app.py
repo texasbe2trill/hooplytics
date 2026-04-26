@@ -319,14 +319,30 @@ def _project_next_game_cached(
 
 # State ───────────────────────────────────────────────────────────────────────
 def _default_seasons() -> list[str]:
+    """Return the active + previous NBA season(s).
+
+    NBA seasons start in October. Before October we're in the back half of the
+    prior season, so the "current" season ends at year-1. Including a season
+    that hasn't started yet causes nba_api fetches that bypass the seed cache
+    and stall the Streamlit app.
+    """
     today = datetime.now().date()
-    start = today.year - (1 if today.month >= 10 else 2)
-    return nba_seasons(start, today.year + 1)
+    if today.month >= 10:
+        # In-season: current season is today.year–(year+1); include the prior season too.
+        start = today.year - 1
+        end_exclusive = today.year + 1
+    else:
+        # Off-season / first half of calendar year: current season ended this spring.
+        start = today.year - 2
+        end_exclusive = today.year
+    return nba_seasons(start, end_exclusive)
 
 
 def _season_dropdown_options() -> list[str]:
     today = datetime.now().date()
-    return nba_seasons(2015, today.year + 1)
+    # Don't offer a season that hasn't started yet (NBA seasons start in October).
+    end_exclusive = today.year + 1 if today.month >= 10 else today.year
+    return nba_seasons(2015, end_exclusive)
 
 
 def _init_state() -> None:
