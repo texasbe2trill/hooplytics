@@ -255,10 +255,24 @@ def _modeling_frame(roster_key: str) -> pd.DataFrame:
     return _store().modeling_frame(_player_data(roster_key))
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60 * 6, max_entries=30)
+@st.cache_data(show_spinner=False, ttl=60 * 60, max_entries=32)
 def _player_games(roster_key: str, player: str) -> pd.DataFrame:
     df = _player_data(roster_key)
     return df[df["player"] == player].sort_values("game_date").reset_index(drop=True)
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60, max_entries=32)
+def _project_next_game_cached(roster_key: str, player: str, last_n: int) -> pd.DataFrame:
+    """Cache projection by (roster, player, window) so tab/slider rerenders are free."""
+    bundle = _bundle_for_ui()
+    modeling_df = _modeling_frame(roster_key)
+    return project_next_game(
+        player,
+        bundle=bundle,
+        store=_store(),
+        last_n=last_n,
+        modeling_df=modeling_df,
+    )
 
 
 # State ───────────────────────────────────────────────────────────────────────
@@ -858,11 +872,10 @@ def page_projection(roster: dict, api_key: str) -> None:
             st.session_state.last_proj_player = player
             st.session_state.last_proj_n = last_n
         try:
-            proj = project_next_game(
+            proj = _project_next_game_cached(
+                _roster_key(),
                 st.session_state.last_proj_player,
-                bundle=bundle, store=store,
-                last_n=st.session_state.last_proj_n,
-                modeling_df=modeling_df,
+                int(st.session_state.last_proj_n),
             )
         except Exception as exc:
             empty_state("Projection failed", f"{exc}")
