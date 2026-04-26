@@ -57,6 +57,16 @@ _TRAINING_ANCHOR_PLAYERS: list[str] = [
 from hooplytics.data import PlayerStore, nba_seasons
 from hooplytics.models import ModelBundle, ensure_models, load_models
 from hooplytics.odds import fetch_live_player_lines
+from hooplytics.openai_agent import (
+    OpenAIConnection,
+    auto_select_model,
+    build_grounding_payload,
+    chat_complete,
+    connect as openai_connect,
+    evidence_chips,
+    filter_chat_models,
+    parse_chart_blocks,
+)
 from hooplytics.predict import (
     fantasy_decisions,
     predict_scenario,
@@ -113,6 +123,20 @@ def _deployment_odds_api_key() -> str:
         return key
     try:
         return str(st.secrets.get("ODDS_API_KEY", "")).strip()
+    except Exception:
+        return ""
+
+
+def _deployment_openai_api_key() -> str:
+    """Resolve a deployment-configured OpenAI API key without exposing it.
+
+    Order: OPENAI_API_KEY env var, then Streamlit secrets["OPENAI_API_KEY"].
+    """
+    key = os.getenv("OPENAI_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        return str(st.secrets.get("OPENAI_API_KEY", "")).strip()
     except Exception:
         return ""
 
@@ -419,12 +443,80 @@ def _init_state() -> None:
         st.session_state.train_on_display_roster = False
     if "fast_training_mode" not in st.session_state:
         st.session_state.fast_training_mode = True
+    if "odds_api_status" not in st.session_state:
+        st.session_state.odds_api_status = ""  # "", "ok", "error"
+    if "odds_api_error" not in st.session_state:
+        st.session_state.odds_api_error = ""
+    # OpenAI / chatbot session state
+    if "session_openai_api_key" not in st.session_state:
+        st.session_state.session_openai_api_key = ""
+    if "session_openai_api_key_input" not in st.session_state:
+        st.session_state.session_openai_api_key_input = (
+            st.session_state.session_openai_api_key
+        )
+    if "openai_models" not in st.session_state:
+        st.session_state.openai_models = []
+    if "openai_selected_model" not in st.session_state:
+        st.session_state.openai_selected_model = ""
+    if "openai_connect_status" not in st.session_state:
+        st.session_state.openai_connect_status = ""  # "", "ok", "error"
+    if "openai_connect_error" not in st.session_state:
+        st.session_state.openai_connect_error = ""
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []  # list[{role, content, evidence?}]
+    if "chat_strict_grounded" not in st.session_state:
+        st.session_state.chat_strict_grounded = False
+    if "chat_pending" not in st.session_state:
+        st.session_state.chat_pending = ""
 
 
 def _sync_session_odds_api_key() -> None:
     st.session_state.session_odds_api_key = (
         st.session_state.session_odds_api_key_input.strip()
     )
+
+
+def _sync_session_openai_api_key() -> None:
+    new_key = st.session_state.session_openai_api_key_input.strip()
+    if new_key != st.session_state.session_openai_api_key:
+        # Key changed → drop cached models so the user can re-list with the new key.
+        st.session_state.openai_models = []
+        st.session_state.openai_selected_model = ""
+        st.session_state.openai_connect_status = ""
+        st.session_state.openai_connect_error = ""
+    st.session_state.session_openai_api_key = new_key
+
+
+@st.cache_resource(show_spinner=False)
+def _openai_connect_cached(api_key: str) -> OpenAIConnection:
+    """Cache one OpenAIConnection per key for the session (key never logged)."""
+    return openai_connect(api_key)
+
+
+def _resolve_openai_connection(api_key: str) -> OpenAIConnection | None:
+    """Return a cached OpenAIConnection, refreshing session model state on success."""
+    if not api_key:
+        return None
+    try:
+        conn = _openai_connect_cached(api_key)
+    except Exception as exc:
+        st.session_state.openai_connect_status = "error"
+        st.session_state.openai_connect_error = str(exc)
+        return None
+    st.session_state.openai_connect_status = "ok"
+    st.session_state.openai_connect_error = ""
+    # Always sync with filtered chat-capable models from the latest connection
+    # so stale session values cannot keep non-chat options in the selector.
+    st.session_state.openai_models = list(conn.models)
+    if not st.session_state.openai_selected_model:
+        st.session_state.openai_selected_model = (
+            conn.default_model or (conn.models[0] if conn.models else "")
+        )
+    elif conn.models and st.session_state.openai_selected_model not in conn.models:
+        st.session_state.openai_selected_model = (
+            conn.default_model or conn.models[0]
+        )
+    return conn
 
 
 def _apply_sidebar_seasons_to_roster() -> None:
@@ -550,12 +642,25 @@ def _build_edge_board(roster: dict, api_key: str) -> pd.DataFrame:
     # Consume + reset the one-shot force-refresh flag so the upstream daily
     # odds JSON is re-fetched on this run, then return to disk-cache reads.
     force = bool(st.session_state.pop("force_refresh_odds", False))
-    return _build_edge_board_cached(
-        json.dumps({p: list(s) for p, s in sorted(roster.items())}, sort_keys=True),
-        api_key,
-        int(st.session_state.get("live_bust", 0)),
-        force,
-    )
+    if not api_key:
+        st.session_state.odds_api_status = ""
+        st.session_state.odds_api_error = ""
+        return pd.DataFrame()
+    try:
+        out = _build_edge_board_cached(
+            json.dumps({p: list(s) for p, s in sorted(roster.items())}, sort_keys=True),
+            api_key,
+            int(st.session_state.get("live_bust", 0)),
+            force,
+        )
+    except Exception as exc:
+        # Degrade gracefully when deployment/session keys are invalid/revoked.
+        st.session_state.odds_api_status = "error"
+        st.session_state.odds_api_error = str(exc)
+        return pd.DataFrame()
+    st.session_state.odds_api_status = "ok"
+    st.session_state.odds_api_error = ""
+    return out
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60, max_entries=2)
@@ -594,7 +699,7 @@ def _diagnostics_panels(roster_key: str, color_map: dict) -> list[dict]:
 
 
 # Sidebar ─────────────────────────────────────────────────────────────────────
-def _render_sidebar() -> tuple[str, str]:
+def _render_sidebar() -> tuple[str, str, str]:
     with st.sidebar:
         st.markdown(
             '<div class="hl-brand" style="margin: 0.2rem 0 1.4rem 0;">'
@@ -626,28 +731,24 @@ def _render_sidebar() -> tuple[str, str]:
                 st.session_state.force_refresh_odds = True
                 st.rerun()
 
-        all_names = _all_active_players()
-        new_player = st.selectbox(
-            "Add player",
-            options=[""] + all_names,
-            index=0,
-            label_visibility="collapsed",
-            placeholder="Search for a player…",
-        )
         seasons_selected = st.multiselect(
             "Seasons",
             options=_season_dropdown_options(),
             key="sidebar_seasons_select",
             on_change=_apply_sidebar_season_select_to_roster,
-            help="Select one or more NBA seasons to retrieve logs and train on.",
+            help="Active seasons for the whole roster. Changing this applies to all rostered players immediately.",
         )
         active_seasons = _active_training_seasons()
         if active_seasons:
-            st.caption(f"Active seasons in training: {', '.join(active_seasons)}")
-
-        if st.button("Apply seasons to all", width="stretch"):
+            st.caption(f"Active: {', '.join(active_seasons)}")
+        if st.button(
+            "Update all players\u2019 seasons",
+            width="stretch",
+            key="apply_seasons_btn",
+            help="Forces every rostered player to use the seasons selected above.",
+        ):
             if not seasons_selected:
-                st.error("Select at least one season from the dropdown.")
+                st.error("Select at least one season first.")
             else:
                 for p in list(roster):
                     roster[p] = list(seasons_selected)
@@ -655,11 +756,23 @@ def _render_sidebar() -> tuple[str, str]:
                 st.session_state.force_refresh_odds = True
                 st.rerun()
 
-        if st.button("Add", width="stretch") and new_player and new_player.strip():
+        st.markdown(
+            '<p class="hl-section-sub" style="margin-top:1rem;">Add a player</p>',
+            unsafe_allow_html=True,
+        )
+        all_names = _all_active_players()
+        new_player = st.selectbox(
+            "Search for a player",
+            options=[""] + all_names,
+            index=0,
+            label_visibility="collapsed",
+            placeholder="Search by name\u2026",
+        )
+        if st.button("Add to roster", width="stretch", key="add_player_btn") and new_player and new_player.strip():
             seasons = [s for s in seasons_selected if s]
             if not seasons:
-                st.error("Select at least one season from the dropdown.")
-                return page, api_key
+                st.error("Select at least one season first.")
+                st.stop()
             try:
                 resolved = PlayerStore.resolve_player_name(new_player) or new_player
                 roster[resolved] = seasons
@@ -720,20 +833,141 @@ def _render_sidebar() -> tuple[str, str]:
         )
         api_key = st.session_state.session_odds_api_key.strip() or deployment_key
         cols = st.columns(3)
-        if cols[0].button("Refresh", width="stretch"):
+        if cols[0].button("Refresh", width="stretch", key="odds_refresh_btn"):
             st.session_state.live_bust += 1
             st.session_state.force_refresh_odds = True
+            st.session_state.odds_api_status = ""
+            st.session_state.odds_api_error = ""
             st.rerun()
-        if cols[1].button("Clear key", width="stretch"):
+        if cols[1].button("Clear key", width="stretch", key="odds_clear_key_btn"):
             st.session_state.session_odds_api_key = ""
             st.session_state.session_odds_api_key_input = ""
+            st.session_state.odds_api_status = ""
+            st.session_state.odds_api_error = ""
             st.rerun()
-        cols[2].markdown(
-            pill("LIVE", "live") if api_key else pill("OFFLINE", "warn"),
-            unsafe_allow_html=True,
+        odds_status_pill = (
+            pill("LIVE", "live")
+            if st.session_state.get("odds_api_status") == "ok"
+            else pill("ERROR", "warn")
+            if st.session_state.get("odds_api_status") == "error"
+            else pill("LIVE", "live")
+            if api_key
+            else pill("OFFLINE", "warn")
+        )
+        cols[2].markdown(odds_status_pill, unsafe_allow_html=True)
+        if st.session_state.get("odds_api_status") == "error":
+            st.caption(
+                "Odds API unavailable (invalid/revoked key or quota/network issue). "
+                "Continuing in offline mode."
+            )
+
+        divider()
+
+        # OpenAI key + model picker (powers the Hooplytics Scout tab)
+        st.markdown('<p class="hl-section">Hooplytics Scout</p>', unsafe_allow_html=True)
+        deployment_openai_key = _deployment_openai_api_key()
+        if deployment_openai_key:
+            st.caption(
+                "A deployment-configured OpenAI key is active. Paste your own key "
+                "below to override it for this session \u2014 the deployment key "
+                "is never displayed."
+            )
+        else:
+            st.caption(
+                "Bring your own OpenAI key to enable the Hooplytics Scout tab. The key "
+                "stays in session memory and is never written to disk or logs."
+            )
+        st.text_input(
+            "OpenAI API key",
+            type="password",
+            key="session_openai_api_key_input",
+            on_change=_sync_session_openai_api_key,
+            label_visibility="collapsed",
+            placeholder="Paste your OpenAI API key (sk-...)",
+        )
+        openai_api_key = (
+            st.session_state.session_openai_api_key.strip() or deployment_openai_key
         )
 
-    return page, api_key
+        # Auto-connect exactly once per key. Status is set to "ok"/"error" by
+        # _resolve_openai_connection so this branch cannot re-enter and cause a
+        # render loop on subsequent reruns.
+        if openai_api_key and st.session_state.openai_connect_status == "":
+            with st.spinner("Connecting to OpenAI\u2026"):
+                _resolve_openai_connection(openai_api_key)
+            st.rerun()
+
+        oa_cols = st.columns(3)
+        if oa_cols[0].button(
+            "Reconnect",
+            width="stretch",
+            disabled=not openai_api_key,
+            key="openai_connect_btn",
+        ):
+            # Force a fresh discovery on explicit reconnect.
+            try:
+                _openai_connect_cached.clear()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            st.session_state.openai_models = []
+            st.session_state.openai_selected_model = ""
+            st.session_state.openai_connect_status = ""
+            st.session_state.openai_connect_error = ""
+            _resolve_openai_connection(openai_api_key)
+            st.rerun()
+        if oa_cols[1].button("Clear key", width="stretch", key="openai_clear_key_btn"):
+            st.session_state.session_openai_api_key = ""
+            st.session_state.openai_models = []
+            st.session_state.openai_selected_model = ""
+            st.session_state.openai_connect_status = ""
+            st.session_state.openai_connect_error = ""
+            # Safely reset widget-bound state.
+            for _wk in ("session_openai_api_key_input", "openai_model_select"):
+                st.session_state.pop(_wk, None)
+            try:
+                _openai_connect_cached.clear()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            st.rerun()
+        status_pill = (
+            pill("CONNECTED", "live")
+            if st.session_state.openai_connect_status == "ok"
+            else pill("ERROR", "warn")
+            if st.session_state.openai_connect_status == "error"
+            else pill("OFFLINE", "warn")
+        )
+        oa_cols[2].markdown(status_pill, unsafe_allow_html=True)
+
+        if st.session_state.openai_connect_status == "error":
+            st.caption(
+                f"OpenAI: {st.session_state.openai_connect_error or 'connection failed'}"
+            )
+
+        models = filter_chat_models(st.session_state.openai_models or [])
+        if models != list(st.session_state.openai_models or []):
+            st.session_state.openai_models = list(models)
+        if models:
+            current = st.session_state.openai_selected_model or (
+                auto_select_model(models) or models[0]
+            )
+            if current not in models:
+                current = models[0]
+            picked = st.selectbox(
+                "Model",
+                options=models,
+                index=models.index(current),
+                key="openai_model_select",
+                help="Auto-selects the best available GPT-style model on connect.",
+            )
+            st.session_state.openai_selected_model = picked
+
+        st.checkbox(
+            "Strict grounded mode (no general reasoning)",
+            key="chat_strict_grounded",
+            help="When on, the chatbot will only answer from local Hooplytics data.",
+        )
+
+    return page, api_key, openai_api_key
 
 
 # ── Pages ────────────────────────────────────────────────────────────────────
@@ -746,7 +980,7 @@ def page_home(roster: dict, api_key: str) -> None:
     bundle = _bundle_for_ui()
     modeling_df = _modeling_frame(_roster_key())
 
-    # Brand row
+    # Home hero
     last_refresh = datetime.now().strftime("%b %d · %H:%M")
     status = (
         f'<span class="hl-status-dot"></span>LIVE LINES · UPDATED {last_refresh}'
@@ -755,19 +989,11 @@ def page_home(roster: dict, api_key: str) -> None:
         f'OFFLINE · ADD THE ODDS API KEY FOR LIVE LINES'
     )
     st.markdown(
-        f'<div class="hl-brand-row">'
-        f'<div class="hl-brand"><span class="hl-brand-mark"></span>HOOPLYTICS</div>'
-        f'<div class="hl-status">{status}</div>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
-    # Tagline
-    st.markdown(
         '<div class="hl-hero-wrap">'
         '<h1 class="hl-tagline">Today\'s slate, analyzed.</h1>'
         '<p class="hl-tagline-sub">A precision view of player form, projection gaps, '
         'model confidence, and matchup context.</p>'
+        f'<div class="hl-home-status">{status}</div>'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -795,6 +1021,10 @@ def page_home(roster: dict, api_key: str) -> None:
                 'projection gaps here.</p>',
                 unsafe_allow_html=True,
             )
+            if st.session_state.get("odds_api_status") == "error":
+                st.caption(
+                    "Live lines request failed. Check/replace your Odds API key in the sidebar."
+                )
         else:
             top = edge_df.head(6)
             rows_html = []
@@ -2470,6 +2700,373 @@ def page_diagnostics(roster: dict, api_key: str) -> None:
         st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
 
+# ── Hooplytics Scout (chatbot) ──────────────────────────────────────────────
+# 4-tuple: (icon, title, short_desc, full_prompt)
+_CHAT_STARTERS: list[tuple[str, str, str, str]] = [
+    (
+        "\u25c6",
+        "Top edges tonight",
+        "Strongest projection-vs-line gaps, ranked by magnitude and confidence.",
+        "What are the strongest projection-vs-line edges on tonight\u2019s slate? Show me the top 3 with edge magnitude and model confidence.",
+    ),
+    (
+        "\u25c8",
+        "Pick suggestion",
+        "Structured MORE/LESS read with confidence rating and risk factors.",
+        "Give me a MORE/LESS pick for the best edge tonight. Include a confidence rating and key risk factors.",
+    ),
+    (
+        "\u25cb",
+        "Player form",
+        "5-game trend summary vs model projections for rostered players.",
+        "Which rostered players are in their best recent form? Summarize 5-game trends vs model projections.",
+    ),
+    (
+        "\u2248",
+        "Model quality",
+        "R\u00b2 scores per target with low-confidence flags.",
+        "How reliable are the current models? Summarize R\u00b2 scores per target and flag any low-confidence areas.",
+    ),
+    (
+        "\u2253",
+        "Fade candidates",
+        "Where the model disagrees with the market strongly enough to fade.",
+        "Where does the model strongly disagree with the market in a way that suggests fading the posted line?",
+    ),
+    (
+        "\u25cf",
+        "Slate overview",
+        "High-level analytics narrative for tonight\u2019s full slate.",
+        "Give me a high-level narrative overview of tonight\u2019s slate from an analytics angle.",
+    ),
+]
+
+
+def _chatbot_grounding(roster: dict, api_key: str) -> dict[str, Any]:
+    """Assemble the grounding payload from current app state."""
+    bundle = None
+    edge_df = pd.DataFrame()
+    projections: dict[str, pd.DataFrame] = {}
+    try:
+        bundle = _bundle_for_ui()
+    except Exception:
+        bundle = None
+    try:
+        edge_df = _build_edge_board(roster, api_key)
+    except Exception:
+        edge_df = pd.DataFrame()
+    if bundle is not None and roster:
+        store = _store()
+        modeling_df = _modeling_frame(_roster_key())
+        for player in list(roster.keys())[:8]:
+            try:
+                proj = project_next_game(
+                    player,
+                    bundle=bundle,
+                    store=store,
+                    modeling_df=modeling_df,
+                )
+                if isinstance(proj, pd.DataFrame) and not proj.empty:
+                    projections[player] = proj
+            except Exception:
+                continue
+    return build_grounding_payload(
+        roster=roster,
+        bundle=bundle,
+        edge_df=edge_df if not edge_df.empty else None,
+        projections=projections or None,
+    )
+
+
+def _scout_chart_figure(spec: dict) -> Any:
+    """Build a Plotly figure from a validated Hooplytics Scout chart spec."""
+    import plotly.graph_objects as go
+    from hooplytics.web.styles import (
+        COLOR_ACCENT,
+        COLOR_AXIS,
+        COLOR_GRID,
+        COLOR_LESS,
+        COLOR_MORE,
+    )
+
+    ctype = spec["type"]
+    x = spec["x"]
+    y = spec["y"]
+    diverging = spec.get("diverging", False)
+
+    if diverging:
+        colors = [COLOR_MORE if v >= 0 else COLOR_LESS for v in y]
+    else:
+        colors = [COLOR_ACCENT] * len(y)
+
+    fig = go.Figure()
+    if ctype == "hbar":
+        fig.add_trace(go.Bar(
+            x=y, y=x, orientation="h",
+            marker=dict(color=colors, line=dict(width=0)),
+            text=[f"{v:+.2f}" if diverging else f"{v:.2f}" for v in y],
+            textposition="outside",
+            cliponaxis=False,
+        ))
+        fig.update_yaxes(autorange="reversed")
+    elif ctype == "bar":
+        fig.add_trace(go.Bar(
+            x=x, y=y,
+            marker=dict(color=colors, line=dict(width=0)),
+            text=[f"{v:+.2f}" if diverging else f"{v:.2f}" for v in y],
+            textposition="outside",
+            cliponaxis=False,
+        ))
+    elif ctype == "line":
+        fig.add_trace(go.Scatter(
+            x=x, y=y, mode="lines+markers",
+            line=dict(color=COLOR_ACCENT, width=2.4),
+            marker=dict(size=7, color=COLOR_ACCENT),
+        ))
+    else:  # scatter
+        fig.add_trace(go.Scatter(
+            x=x, y=y, mode="markers",
+            marker=dict(size=10, color=colors if diverging else COLOR_ACCENT),
+        ))
+
+    if diverging:
+        fig.add_hline(y=0, line=dict(color=COLOR_AXIS, width=1, dash="dot"))
+
+    height = max(220, min(420, 38 * len(x) + 120)) if ctype == "hbar" else 320
+    fig.update_layout(
+        title=dict(text=spec.get("title", ""), x=0.0, xanchor="left", font=dict(size=14)),
+        showlegend=False,
+        height=height,
+        margin=dict(t=44, b=36, l=12, r=12),
+        xaxis=dict(title=spec.get("x_label", "") or None, gridcolor=COLOR_GRID),
+        yaxis=dict(title=spec.get("y_label", "") or None, gridcolor=COLOR_GRID),
+    )
+    return fig
+
+
+def _render_chat_message(role: str, body: str, evidence: list[str] | None = None) -> None:
+    with st.chat_message(role):
+        if role == "assistant":
+            segments = parse_chart_blocks(body or "")
+            rendered_any = False
+            for i, seg in enumerate(segments):
+                if seg["kind"] == "text":
+                    text = str(seg.get("content", "")).strip()
+                    if text:
+                        st.markdown(text)
+                        rendered_any = True
+                else:
+                    try:
+                        fig = _scout_chart_figure(seg["spec"])
+                        st.plotly_chart(
+                            fig,
+                            width="stretch",
+                            config={"displayModeBar": False},
+                            key=f"scout_chart_{role}_{id(body)}_{i}",
+                        )
+                        rendered_any = True
+                    except Exception:
+                        # Never let a malformed chart break the message render.
+                        st.markdown(
+                            f"_(chart could not be rendered: `{seg['spec'].get('title','')}`)_"
+                        )
+                        rendered_any = True
+            if not rendered_any:
+                st.markdown("_[No response content was returned by the model.]_")
+        else:
+            st.markdown(body or "")
+        if evidence:
+            st.markdown(
+                '<div class="hl-chat-evidence">'
+                + "".join(chip(c) for c in evidence)
+                + "</div>",
+                unsafe_allow_html=True,
+            )
+
+
+def page_chatbot(roster: dict, api_key: str) -> None:
+    openai_api_key = (
+        (st.session_state.get("session_openai_api_key") or "").strip()
+        or _deployment_openai_api_key()
+    )
+
+    if not openai_api_key:
+        # ── Beautiful landing state ──────────────────────────────────────────
+        st.markdown(
+            '<div class="hl-scout-landing">'
+            '<div class="hl-scout-landing-mark">HS</div>'
+            '<h2>Hooplytics Scout</h2>'
+            '<p class="hl-scout-landing-sub">Your grounded NBA analytics assistant \u2014 '
+            "anchored to live roster data, model projections, and the live edge board. "
+            "Ask about pick confidence, player form, model quality, and more.</p>"
+            '<div class="hl-scout-steps">'
+            '<div class="hl-scout-step">'
+            '<div class="hl-scout-step-num">1</div>'
+            '<div class="hl-scout-step-text">Get an API key at '
+            "<strong>platform.openai.com/api-keys</strong></div>"
+            "</div>"
+            '<div class="hl-scout-step">'
+            '<div class="hl-scout-step-num">2</div>'
+            '<div class="hl-scout-step-text">Paste it in the sidebar under '
+            "<strong>Hooplytics Scout</strong> \u2192 click <strong>Connect</strong></div>"
+            "</div>"
+            '<div class="hl-scout-step">'
+            '<div class="hl-scout-step-num">3</div>'
+            '<div class="hl-scout-step-text">Return here and pick a starter prompt '
+            "or type your own question below</div>"
+            "</div>"
+            "</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        divider()
+        _wc1, _wc2, _wc3 = st.columns(3, gap="medium")
+        with _wc1:
+            insight_card("Edge analysis", "Ranked projection-vs-line gaps by strength and direction.", icon="\u25c6")
+        with _wc2:
+            insight_card("Pick suggestions", "Structured MORE/LESS with Confidence + Risk factors.", icon="\u25c8")
+        with _wc3:
+            insight_card("Model insight", "R\u00b2 quality checks and 5-game player form trends.", icon="\u25cb")
+        return
+
+    connection = _resolve_openai_connection(openai_api_key)
+    if connection is None:
+        err = st.session_state.get("openai_connect_error", "")
+        st.markdown(
+            '<div class="hl-scout-hero" style="border-color:rgba(255,107,107,0.28);'
+            'background:linear-gradient(160deg,rgba(255,107,107,0.07),rgba(255,255,255,0));">'
+            '<div class="hl-scout-hero-eyebrow" style="color:var(--hl-neg);">'
+            "\u26a0 CONNECTION ERROR</div>"
+            '<h2 style="font-size:1.3rem;color:var(--hl-neg);">Could not reach OpenAI</h2>'
+            f"<p>{err or 'Click Connect in the sidebar to retry. Verify your API key has access.'}</p>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    model = st.session_state.get("openai_selected_model", "") or (
+        connection.default_model or ""
+    )
+    if not model:
+        empty_state(
+            "No chat model available",
+            "Your key did not expose any chat-capable models. Try a different key.",
+        )
+        return
+
+    payload = _chatbot_grounding(roster, api_key)
+    chips = evidence_chips(payload)
+    mode_label = "Strict" if st.session_state.get("chat_strict_grounded") else "Hybrid"
+
+    # ── Hero banner ──────────────────────────────────────────────────────────
+    st.markdown(
+        '<div class="hl-scout-hero">'
+        '<div class="hl-scout-hero-eyebrow">'
+        '<span class="hl-scout-pulse"></span>HOOPLYTICS SCOUT \u00b7 AI CONNECTED'
+        "</div>"
+        "<h2>What can I analyze for you?</h2>"
+        "<p>Grounded on your roster, model metrics, projections, and live edge data. "
+        "General reasoning is explicitly labeled as such.</p>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Status bar ───────────────────────────────────────────────────────────
+    model_display = (model[:35] + "\u2026") if len(model) > 36 else model
+    chips_html = ""
+    if chips:
+        for _c in chips:
+            chips_html += (
+                '<span class="hl-scout-status-sep"></span>'
+                f'<span class="hl-scout-status-val">{_c}</span>'
+            )
+    st.markdown(
+        f'<div class="hl-scout-status">'
+        f'<span class="hl-scout-status-lbl">Model</span>'
+        f'<span class="hl-scout-status-val">{model_display}</span>'
+        f'<span class="hl-scout-status-sep"></span>'
+        f'<span class="hl-scout-status-lbl">Mode</span>'
+        f'<span class="hl-scout-status-val">{mode_label}</span>'
+        f"{chips_html}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Chat area ────────────────────────────────────────────────────────────
+    history: list[dict[str, Any]] = st.session_state.chat_history
+    if history:
+        _, _ctrl = st.columns([6, 1])
+        with _ctrl:
+            if st.button("↺ Clear", key="clear_chat_btn"):
+                st.session_state.chat_history = []
+                st.session_state.chat_pending = ""
+                st.rerun()
+        for turn in history:
+            _render_chat_message(
+                turn.get("role", "user"),
+                turn.get("content", ""),
+                turn.get("evidence") or None,
+            )
+    else:
+        st.markdown(
+            '<p class="hl-scout-starters-label">Suggested prompts</p>',
+            unsafe_allow_html=True,
+        )
+        _sc1, _sc2, _sc3 = st.columns(3, gap="medium")
+        _sc_cols = [_sc1, _sc2, _sc3]
+        for _si, (_icon, _title, _desc, _prompt) in enumerate(_CHAT_STARTERS):
+            with _sc_cols[_si % 3]:
+                with st.container(border=True):
+                    st.markdown(
+                        f'<div class="hl-scout-sta-icon">{_icon}</div>'
+                        f'<div class="hl-scout-sta-title">{_title}</div>'
+                        f'<div class="hl-scout-sta-desc">{_desc}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    if st.button("Ask this \u2192", key=f"chat_starter_{_si}", width="stretch"):
+                        st.session_state.chat_pending = _prompt
+                        st.rerun()
+        st.markdown("<br>", unsafe_allow_html=True)
+        with st.expander("How grounding works", expanded=False):
+            st.markdown(
+                "Local roster, model metrics, projections, and live edge rows are sent as "
+                "authoritative context. Answers cite those values directly; anything beyond "
+                "them is labeled **General context**. Pick suggestions include "
+                "**What local data says**, **Confidence**, and **Risk factors** sections."
+            )
+
+    # ── Input ────────────────────────────────────────────────────────────────
+    user_msg = st.chat_input("Ask Hooplytics Scout\u2026")
+    effective_msg = user_msg or st.session_state.get("chat_pending", "")
+    if effective_msg:
+        st.session_state.chat_pending = ""
+        history.append({"role": "user", "content": effective_msg})
+        try:
+            with st.spinner("Thinking\u2026"):
+                reply = chat_complete(
+                    connection=connection,
+                    model=model,
+                    user_message=effective_msg,
+                    grounding_payload=payload,
+                    history=history[:-1],
+                    strict_grounded=bool(st.session_state.get("chat_strict_grounded")),
+                )
+        except Exception as exc:
+            history.append(
+                {
+                    "role": "assistant",
+                    "content": f"OpenAI error: {exc}",
+                    "evidence": [],
+                }
+            )
+        else:
+            history.append(
+                {"role": "assistant", "content": reply, "evidence": chips}
+            )
+        st.session_state.chat_history = history
+        st.rerun()
+
+
 # Page registry ───────────────────────────────────────────────────────────────
 PAGES = {
     "Home":                page_home,
@@ -2478,12 +3075,13 @@ PAGES = {
     "Compare players":     page_compare,
     "Player Line Lab":     page_scenario,
     "Model diagnostics":   page_diagnostics,
+    "Hooplytics Scout":    page_chatbot,
 }
 
 
 def main() -> None:
     _init_state()
-    page, api_key = _render_sidebar()
+    page, api_key, _openai_api_key = _render_sidebar()
     PAGES[page](st.session_state.roster, api_key)
 
 

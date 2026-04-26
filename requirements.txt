@@ -9,3 +9,4 @@ requests>=2.32
 plotly>=5.24
 rapidfuzz>=3.9
 streamlit>=1.36
+openai>=1.40

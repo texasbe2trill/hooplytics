@@ -37,6 +37,7 @@ dependencies = [
 [project.optional-dependencies]
 web = [
     "streamlit>=1.36",
+    "openai>=1.40",
 ]
 notebook = [
     "matplotlib>=3.9",
@@ -56,6 +57,7 @@ all = [
 [project.scripts]
 hooplytics = "hooplytics.cli:main"
 hooplytics-web = "hooplytics.web.launcher:main"
+hooplytics-train-bundle = "hooplytics.train_bundle:main"
 
 [project.urls]
 Homepage = "https://github.com/texasbe2trill/hooplytics"

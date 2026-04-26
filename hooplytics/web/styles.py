@@ -193,6 +193,19 @@ h1, h2, h3, h4, h5 {{
   font-size: 1.02rem;
   max-width: 56ch;
 }}
+.hl-home-status {{
+  margin-top: 0.9rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.34rem 0.62rem;
+  border-radius: 999px;
+  border: 1px solid var(--hl-hairline);
+  background: rgba(255,255,255,0.02);
+  font-size: 0.74rem;
+  letter-spacing: 0.08em;
+  color: var(--hl-ink-muted);
+}}
 
 /* Generic page hero (non-Home) */
 .hl-page-hero {{
@@ -398,6 +411,203 @@ header[data-testid="stHeader"] {{ background: transparent; }}
    browsers don't show the native tooltip when users hover empty page areas. */
 iframe[title="streamlitApp"] {{ pointer-events: auto; }}
 iframe[title="streamlitApp"]::before {{ content: ""; }}
+
+/* Chatbot ─────────────────────────────────────────────────────────────────── */
+
+/* Scout hero banner (connected state) */
+.hl-scout-hero {{
+  position: relative; overflow: hidden;
+  padding: 2rem 2rem 1.65rem;
+  border-radius: 18px;
+  border: 1px solid rgba(255,122,24,0.22);
+  background:
+    radial-gradient(700px 220px at 0% 60%, rgba(255,122,24,0.11), transparent 65%),
+    radial-gradient(500px 200px at 100% 30%, rgba(92,184,255,0.07), transparent 60%),
+    linear-gradient(160deg, rgba(255,255,255,0.025), rgba(255,255,255,0.005));
+  margin-bottom: 1.25rem;
+}}
+.hl-scout-hero::before {{
+  content: "";
+  position: absolute; top: 0; left: 0; right: 0; height: 1px;
+  background: linear-gradient(90deg, transparent 5%,
+    rgba(255,122,24,0.55) 38%, rgba(92,184,255,0.35) 70%, transparent 95%);
+}}
+.hl-scout-hero-eyebrow {{
+  display: flex; align-items: center; gap: 0.5rem;
+  font-size: 0.67rem; font-weight: 700; letter-spacing: 0.22em;
+  text-transform: uppercase; color: var(--hl-orange); margin-bottom: 0.55rem;
+}}
+.hl-scout-pulse {{
+  display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--hl-orange);
+  animation: hl-scout-pulse 2.4s ease-in-out infinite;
+}}
+@keyframes hl-scout-pulse {{
+  0%, 100% {{ box-shadow: 0 0 0 0 rgba(255,122,24,0.6); }}
+  55% {{ box-shadow: 0 0 0 6px rgba(255,122,24,0); }}
+}}
+.hl-scout-hero h2 {{
+  font-size: 1.55rem; font-weight: 800; letter-spacing: -0.02em;
+  color: var(--hl-ink); margin: 0 0 0.35rem;
+}}
+.hl-scout-hero p {{
+  color: var(--hl-ink-muted); font-size: 0.92rem; max-width: 62ch; margin: 0;
+}}
+
+/* Status bar */
+.hl-scout-status {{
+  display: flex; flex-wrap: wrap; align-items: center;
+  padding: 0.55rem 0.9rem;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--hl-hairline);
+  margin-bottom: 1.25rem;
+  gap: 0 0;
+}}
+.hl-scout-status-sep {{
+  width: 1px; height: 14px;
+  background: rgba(255,255,255,0.09);
+  display: inline-block; margin: 0 0.7rem; flex-shrink: 0;
+}}
+.hl-scout-status-lbl {{
+  color: var(--hl-ink-quiet); letter-spacing: 0.1em;
+  text-transform: uppercase; font-size: 0.66rem; font-weight: 700;
+}}
+.hl-scout-status-val {{
+  color: var(--hl-ink); font-weight: 600; font-size: 0.82rem;
+  font-feature-settings: "tnum"; margin-left: 0.3rem;
+}}
+
+/* Starters heading */
+.hl-scout-starters-label {{
+  font-size: 0.7rem; font-weight: 700; letter-spacing: 0.22em;
+  text-transform: uppercase; color: var(--hl-ink-quiet);
+  margin: 0.1rem 0 0.9rem;
+}}
+
+/* Bordered container cards (st.container(border=True)) */
+[data-testid$="BorderWrapper"] {{
+  border-radius: 14px !important;
+  border-color: rgba(255,255,255,0.07) !important;
+  transition: border-color 130ms ease, background-color 130ms ease;
+}}
+[data-testid$="BorderWrapper"]:hover {{
+  border-color: rgba(255,122,24,0.38) !important;
+  background-color: rgba(255,122,24,0.025) !important;
+}}
+
+/* "Ask this →" buttons inside starter cards */
+[data-testid$="BorderWrapper"] [data-testid="stBaseButton-secondary"] {{
+  background: transparent !important;
+  border: none !important;
+  color: var(--hl-orange) !important;
+  font-size: 0.74rem !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.1em !important;
+  text-transform: uppercase !important;
+  padding-top: 0.15rem !important;
+  padding-bottom: 0.15rem !important;
+}}
+[data-testid$="BorderWrapper"] [data-testid="stBaseButton-secondary"]:hover {{
+  background: rgba(255,122,24,0.1) !important;
+  border-radius: 6px !important;
+}}
+
+/* Starter card content elements */
+.hl-scout-sta-icon {{
+  font-size: 1.3rem; color: var(--hl-orange);
+  margin-bottom: 0.3rem; line-height: 1;
+}}
+.hl-scout-sta-title {{
+  font-size: 0.9rem; font-weight: 700; color: var(--hl-ink); margin-bottom: 0.2rem;
+}}
+.hl-scout-sta-desc {{
+  font-size: 0.76rem; color: var(--hl-ink-quiet); line-height: 1.35; margin-bottom: 0.45rem;
+}}
+
+/* Native chat messages (st.chat_message) */
+[data-testid="stChatMessage"] {{
+  border: 1px solid var(--hl-hairline) !important;
+  border-radius: 14px !important;
+  padding: 0.85rem 1rem !important;
+  margin: 0.45rem 0 !important;
+  background: linear-gradient(160deg, rgba(255,255,255,0.02), rgba(255,255,255,0)) !important;
+  gap: 0.8rem !important;
+}}
+[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {{
+  border-color: rgba(92,184,255,0.2) !important;
+  background: linear-gradient(160deg, rgba(92,184,255,0.065), rgba(255,255,255,0)) !important;
+}}
+[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) {{
+  border-color: rgba(255,122,24,0.18) !important;
+  background: linear-gradient(160deg, rgba(255,122,24,0.055), rgba(255,255,255,0)) !important;
+}}
+[data-testid="chatAvatarIcon-user"],
+[data-testid="chatAvatarIcon-user"] svg {{
+  background: rgba(92,184,255,0.14) !important;
+  color: #5cb8ff !important;
+  border: 1px solid rgba(92,184,255,0.28) !important;
+  border-radius: 8px !important;
+  box-shadow: 0 2px 8px rgba(92,184,255,0.1) !important;
+}}
+[data-testid="chatAvatarIcon-assistant"],
+[data-testid="chatAvatarIcon-assistant"] svg {{
+  background: rgba(255,122,24,0.14) !important;
+  color: var(--hl-orange) !important;
+  border: 1px solid rgba(255,122,24,0.28) !important;
+  border-radius: 8px !important;
+  box-shadow: 0 2px 8px rgba(255,122,24,0.12) !important;
+}}
+
+/* Evidence chips row */
+.hl-chat-evidence {{
+  display: flex; flex-wrap: wrap; gap: 0.3rem;
+  margin-top: 0.7rem; padding-top: 0.65rem;
+  border-top: 1px dashed rgba(255,255,255,0.07);
+}}
+.hl-chat-evidence .hl-chip {{ font-size: 0.68rem; }}
+
+/* Scout landing page (no key yet) */
+.hl-scout-landing {{
+  display: flex; flex-direction: column; align-items: center;
+  text-align: center; padding: 2.5rem 1rem 1.5rem;
+}}
+.hl-scout-landing-mark {{
+  width: 60px; height: 60px; border-radius: 18px;
+  background: linear-gradient(135deg, var(--hl-orange), var(--hl-orange-deep));
+  box-shadow: 0 0 0 1px rgba(255,122,24,0.3), 0 16px 40px rgba(255,122,24,0.22);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1rem; font-weight: 900; color: white; letter-spacing: 0.01em;
+  margin-bottom: 1.3rem;
+}}
+.hl-scout-landing h2 {{
+  font-size: clamp(1.9rem, 3.5vw, 2.6rem); font-weight: 800; letter-spacing: -0.025em;
+  margin: 0 0 0.7rem;
+  background: linear-gradient(120deg, #ffffff 10%, #ffd9b8 55%, var(--hl-orange) 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}}
+.hl-scout-landing-sub {{
+  color: var(--hl-ink-muted); font-size: 1rem; max-width: 50ch;
+  margin: 0; line-height: 1.55;
+}}
+.hl-scout-steps {{
+  display: flex; flex-direction: column; gap: 0.7rem;
+  max-width: 38ch; margin: 2rem auto 0; text-align: left;
+}}
+.hl-scout-step {{
+  display: flex; align-items: flex-start; gap: 0.8rem;
+}}
+.hl-scout-step-num {{
+  width: 26px; height: 26px; border-radius: 8px; flex-shrink: 0;
+  background: linear-gradient(135deg, var(--hl-orange), var(--hl-orange-deep));
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.72rem; font-weight: 800; color: white;
+  box-shadow: 0 4px 10px rgba(255,122,24,0.22);
+}}
+.hl-scout-step-text {{
+  font-size: 0.88rem; color: var(--hl-ink-muted); padding-top: 0.18rem; line-height: 1.45;
+}}
+.hl-scout-step-text strong {{ color: var(--hl-ink); font-weight: 600; }}
 
 /* Tighten the default Streamlit block container so cards align with hero edges. */
 .block-container {{ padding-top: 1.4rem; padding-bottom: 3rem; }}

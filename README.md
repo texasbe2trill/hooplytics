@@ -169,7 +169,7 @@ hooplytics decisions "Victor Wembanyama"
 
 ## 🖼️ App Preview
 
-The Streamlit app ships with **six** purpose-built pages, each focused on a different analytics workflow.
+The Streamlit app ships with **seven** purpose-built pages, each focused on a different analytics workflow.
 
 <table>
 <tr>
@@ -223,6 +223,21 @@ Side-by-side form, distributions, profile shape, and game logs.
 
 #### 🔬 Model Diagnostics
 Held-out model quality, ranking, residuals, and feature drivers.
+
+</td>
+</tr>
+<tr>
+<td colspan="2" valign="top" align="center">
+
+#### 🤖 Hooplytics Scout
+Bring-your-own-key OpenAI chatbot that is grounded in your local roster, projections, model metrics, and live edge rows. Hybrid mode by default (general NBA reasoning is allowed but explicitly labeled); toggle **Strict grounded** in the sidebar to force answers that only cite local data. Pick suggestions are returned with structured **Confidence** and **Risk factors** sections — never as a guarantee.
+
+**Setup:**
+1. Paste your OpenAI key in the sidebar under *Hooplytics Scout* (or set `OPENAI_API_KEY` in `.env` / Streamlit secrets).
+2. Click **Connect**. Available chat models are fetched from your key and the best GPT-style model is auto-selected.
+3. Open the **Hooplytics Scout** tab and ask a question (e.g. *"Give me a MORE/LESS read on the largest edge tonight, with confidence and risk factors."*).
+
+Your key stays in session memory only — it is never written to disk or printed in logs.
 
 </td>
 </tr>
@@ -348,6 +363,7 @@ Hooplytics ships with a Typer-based CLI that renders to **Rich** tables and pane
 | `hooplytics scenario` | Score a hypothetical box-score JSON payload |
 | `hooplytics lines` | Live line board for the tracked roster, sorted by projection gap |
 | `hooplytics train` | Pre-warm and cache the model bundle |
+| `hooplytics-train-bundle` | Interactive prebuilt bundle trainer with progress bars and R2 validation gates |
 | `hooplytics roster list` | Show the tracked roster |
 | `hooplytics roster add` | Add a player to the tracked roster |
 | `hooplytics roster remove` | Remove a player from the tracked roster |
@@ -376,6 +392,9 @@ hooplytics scenario '{"fgm":8,"fga":15,"fg3m":3,"ftm":4,"min":34,"fg_pct":0.53,"
 # Roster + cache management
 hooplytics roster add "Anthony Edwards"
 hooplytics train
+
+# Build and ship a prebuilt Streamlit bundle (defaults to bundles/race_fast.joblib)
+hooplytics-train-bundle --mode exhaustive --players-source postseason-plus-anchors
 ```
 
 > 🔑 `hooplytics lines` and live-enabled `prop` / `decisions` need `ODDS_API_KEY` (from `.env` or your shell). All commands support `--help`, and most reporting commands support `--json` for scripting.
