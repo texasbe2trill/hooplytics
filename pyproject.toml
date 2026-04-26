@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hooplytics"
-version = "0.1.0"
+version = "0.1.1"
 description = "NBA player analytics workbench — projections, live line context, and model diagnostics via Streamlit, CLI, and Jupyter."
 readme = "README.md"
 requires-python = ">=3.11"
