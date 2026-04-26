@@ -107,6 +107,16 @@ html, body, [class*="stApp"] {{
   color: var(--hl-ink);
 }}
 
+/* Sidebar roster rows: keep player name vertically centered with the X button. */
+[data-testid="stSidebar"] .hl-roster-row {{
+  color: var(--hl-ink);
+  font-size: 0.92rem;
+  padding: 0.15rem 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+
 /* Headings */
 h1, h2, h3, h4, h5 {{
   letter-spacing: -0.01em;
@@ -383,6 +393,18 @@ h1, h2, h3, h4, h5 {{
 /* Header bar tweak */
 header[data-testid="stHeader"] {{ background: transparent; }}
 
+/* Suppress the framework's "streamlitApp" tooltip from leaking through the
+   main content iframe \u2014 strip the title attribute via pointer-events so
+   browsers don't show the native tooltip when users hover empty page areas. */
+iframe[title="streamlitApp"] {{ pointer-events: auto; }}
+iframe[title="streamlitApp"]::before {{ content: ""; }}
+
+/* Tighten the default Streamlit block container so cards align with hero edges. */
+.block-container {{ padding-top: 1.4rem; padding-bottom: 3rem; }}
+
+/* Reduce visual weight of Streamlit's auto-generated heading anchor links. */
+.stMarkdown h1 a, .stMarkdown h2 a, .stMarkdown h3 a {{ display: none; }}
+
 /* Insight + chart cards */
 .hl-insight-card {{
   background: linear-gradient(160deg, rgba(255,122,24,0.05), rgba(255,255,255,0.005));
@@ -498,7 +520,7 @@ header[data-testid="stHeader"] {{ background: transparent; }}
   border: 1px solid var(--hl-hairline);
   border-radius: 18px;
   padding: 1.6rem 1.8rem;
-  margin-bottom: 1.4rem;
+  margin-bottom: 0.85rem;
   overflow: hidden;
 }}
 .hl-dashboard-hero::after {{
@@ -535,16 +557,17 @@ header[data-testid="stHeader"] {{ background: transparent; }}
 /* KPI strip */
 .hl-kpi-strip {{
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: 0.8rem;
-  margin: 0.4rem 0 1.4rem 0;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem;
+  margin: 0 0 1.6rem 0;
 }}
 .hl-kpi-card {{
   background: linear-gradient(160deg, rgba(255,255,255,0.04), rgba(255,255,255,0.01));
   border: 1px solid var(--hl-hairline);
   border-radius: 14px;
   padding: 0.95rem 1.05rem;
-  display: flex; flex-direction: column; gap: 0.25rem;
+  display: flex; flex-direction: column; gap: 0.3rem;
+  min-width: 0;
   transition: border-color 0.18s ease, transform 0.18s ease;
 }}
 .hl-kpi-card:hover {{
@@ -554,21 +577,35 @@ header[data-testid="stHeader"] {{ background: transparent; }}
 .hl-kpi-label {{
   font-size: 0.66rem; font-weight: 700; letter-spacing: 0.16em;
   text-transform: uppercase; color: var(--hl-ink-quiet);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }}
 .hl-kpi-value {{
-  font-size: 1.7rem; font-weight: 700; color: var(--hl-ink);
+  font-size: clamp(1.25rem, 0.9vw + 1rem, 1.7rem);
+  font-weight: 700; color: var(--hl-ink);
   line-height: 1.1;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   font-feature-settings: "tnum"; font-variant-numeric: tabular-nums;
 }}
 .hl-kpi-caption {{
   font-size: 0.78rem; color: var(--hl-ink-quiet); line-height: 1.4;
 }}
 
+/* Meta row (status + timestamp above hero strips) */
+.hl-meta-row {{
+  display: flex; align-items: center; flex-wrap: wrap; gap: 0.85rem;
+  font-size: 0.78rem; letter-spacing: 0.08em;
+  color: var(--hl-ink-muted);
+  margin: 0 0 0.85rem 0;
+}}
+.hl-meta-row .hl-meta-sep {{
+  width: 1px; height: 14px; background: var(--hl-hairline);
+}}
+
 /* Section headers */
 .hl-section-header {{
   display: flex; flex-direction: column; gap: 0.25rem;
-  margin: 1.6rem 0 0.9rem 0;
-  padding-bottom: 0.6rem;
+  margin: 1.8rem 0 1rem 0;
+  padding-bottom: 0.65rem;
   border-bottom: 1px solid var(--hl-hairline);
 }}
 .hl-section-eyebrow {{
@@ -898,6 +935,16 @@ def mini_kpi(label: str, value: str, sub: str | None = None,
 
 def kpi_grid(tiles_html: list[str]) -> None:
     st.markdown(f'<div class="hl-kpi-grid">{"".join(tiles_html)}</div>',
+                unsafe_allow_html=True)
+
+
+def meta_row(items: list[str]) -> None:
+    """Render a thin meta row of small labels separated by hairlines."""
+    if not items:
+        return
+    sep = '<span class="hl-meta-sep"></span>'
+    body = sep.join(f"<span>{item}</span>" for item in items)
+    st.markdown(f'<div class="hl-meta-row">{body}</div>',
                 unsafe_allow_html=True)
 
 

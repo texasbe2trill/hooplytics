@@ -72,6 +72,7 @@ from hooplytics.web.styles import (
     inject_css,
     insight_card,
     kpi_grid,
+    meta_row,
     mini_kpi,
     page_hero,
     pill,
@@ -574,9 +575,11 @@ def _render_sidebar() -> tuple[str, str]:
         st.markdown('<p class="hl-section">Roster</p>', unsafe_allow_html=True)
         roster = st.session_state.roster
         for player in list(roster):
-            cols = st.columns([5, 1])
-            cols[0].markdown(f"<div style='padding-top:0.4rem'>{player}</div>",
-                             unsafe_allow_html=True)
+            cols = st.columns([6, 1], gap="small", vertical_alignment="center")
+            cols[0].markdown(
+                f'<div class="hl-roster-row">{player}</div>',
+                unsafe_allow_html=True,
+            )
             if cols[1].button("×", key=f"rm_{player}", help=f"Remove {player}"):
                 roster.pop(player)
                 st.rerun()
@@ -1209,7 +1212,7 @@ def _render_dashboard_hero(signal_df: pd.DataFrame, *, has_api_key: bool,
         f'<p class="hl-hero-subtitle">Model projections, player form, and live '
         f'line context in one command center.</p>'
         f'<p class="hl-hero-copy">{copy}</p>'
-        f'<div class="hl-status" style="margin-top:0.9rem">{status}</div>'
+        f'<div class="hl-status" style="margin-top:1rem">{status}</div>'
         f'</div>',
         unsafe_allow_html=True,
     )
@@ -1236,6 +1239,14 @@ def _render_kpi_strip(signal_df: pd.DataFrame, *, last_refresh: str) -> None:
     big = float(signal_df["abs_gap"].max())
     avg_proj = float(signal_df["projection"].mean())
 
+    # Render the timestamp as a thin meta row above the strip rather than a
+    # KPI card — it isn't a metric and the long value wraps awkwardly when
+    # squeezed into an 8-card grid.
+    meta_row([
+        f'<span class="hl-mono">UPDATED · {last_refresh.upper()}</span>',
+        f'<span>Refresh from the sidebar to pull new lines</span>',
+    ])
+
     cards = [
         _kpi_card("Live lines analyzed", f"{n_lines:,}",
                   "projections compared against current market lines"),
@@ -1257,8 +1268,6 @@ def _render_kpi_strip(signal_df: pd.DataFrame, *, last_refresh: str) -> None:
                                    "deepest market coverage on a single line"))
         except Exception:
             pass
-    cards.append(_kpi_card("Last updated", last_refresh,
-                           "refresh from the sidebar to pull new lines"))
 
     st.markdown(
         f'<div class="hl-kpi-strip">{"".join(cards)}</div>',
