@@ -229,18 +229,19 @@ Held-out model quality, ranking, residuals, and feature drivers.
 </td>
 </tr>
 <tr>
-<td colspan="2" valign="top" align="center">
-
-#### 🤖 Hooplytics Scout
-Bring-your-own-key OpenAI chatbot that is grounded in your local roster, projections, model metrics, and live edge rows. Hybrid mode by default (general NBA reasoning is allowed but explicitly labeled); toggle **Strict grounded** in the sidebar to force answers that only cite local data. Pick suggestions are returned with structured **Confidence** and **Risk factors** sections — never as a guarantee.
-
-**Setup:**
-1. Paste your OpenAI key in the sidebar under *Hooplytics Scout* (or set `OPENAI_API_KEY` in `.env` / Streamlit secrets).
-2. Click **Connect**. Available chat models are fetched from your key and the best GPT-style model is auto-selected.
-3. Open the **Hooplytics Scout** tab and ask a question (e.g. *"Give me a MORE/LESS read on the largest edge tonight, with confidence and risk factors."*).
-
-Your key stays in session memory only — it is never written to disk or printed in logs.
-
+<td colspan="2" valign="top">
+<h4>🤖 Hooplytics Scout</h4>
+<p>Bring-your-own-key OpenAI chatbot grounded in your local roster, projections, model metrics, and live edge rows. Hybrid mode by default — general NBA reasoning is allowed but explicitly labeled. Toggle <strong>Strict grounded</strong> in the sidebar to force answers that only cite local data. Pick suggestions always include structured <strong>Confidence</strong> and <strong>Risk factors</strong> sections, never a guarantee.</p>
+<table>
+<thead><tr><th align="left">Feature</th><th align="left">Details</th></tr></thead>
+<tbody>
+<tr><td>🔑 <strong>Key setup</strong></td><td>Paste your OpenAI key in the sidebar, or set <code>OPENAI_API_KEY</code> in <code>.env</code> / Streamlit secrets</td></tr>
+<tr><td>🤝 <strong>Connect</strong></td><td>Click <strong>Connect</strong> — available chat models are fetched from your key and the best GPT-style model is auto-selected</td></tr>
+<tr><td>💬 <strong>Ask anything</strong></td><td><em>"Give me a MORE/LESS read on the largest edge tonight, with confidence and risk factors."</em></td></tr>
+<tr><td>🔒 <strong>Grounding modes</strong></td><td><strong>Hybrid</strong> (default): general NBA reasoning labeled as such · <strong>Strict</strong>: only cites local data</td></tr>
+<tr><td>🛡️ <strong>Privacy</strong></td><td>Your key stays in session memory only — never written to disk or printed in logs</td></tr>
+</tbody>
+</table>
 </td>
 </tr>
 <tr>
@@ -249,16 +250,19 @@ Your key stays in session memory only — it is never written to disk or printed
 #### 📑 Roster Report (PDF)
 One-click, print-ready scouting report built with ReportLab — no headless browser required. Pulls directly from the live model bundle, edge board, and (optional) AI scout context.
 
-| Section | What you get |
-| :--- | :--- |
-| 🎨 **Cover** | Branded cover with Players / Live edges / Median R² meta tiles |
-| 📊 **KPI strip** | 6 tiles: Players, Model rows, Live edges, Strong edges, Avg \|edge\|, Median R² |
-| 💬 **Executive summary** | Deterministic callout box + optional AI slate outlook |
-| 🥇 **Signal Spotlight** | Top 3 ranked edges with A/B/C tier badges and MORE/LESS coloring |
-| 📈 **Analytics visuals** | R² lollipop · diverging edge bar · edge histogram · slate summary panel |
-| 🧪 **Model quality** | Table with color-coded **Tier** column (Strong / Solid / Light / Noisy) |
-| 🎯 **Edge board** | Top 14 edges with green/red signed values and side coloring |
-| 👤 **Per-player blocks** | Recent-form pills · projection vs market mini bar chart · projections-vs-line table · data rationale · optional AI context |
+<table>
+<thead><tr><th align="left">Section</th><th align="left">What you get</th></tr></thead>
+<tbody>
+<tr><td>🎨 <strong>Cover</strong></td><td>Branded cover with Players / Live edges / Median R² meta tiles</td></tr>
+<tr><td>📊 <strong>KPI strip</strong></td><td>6 tiles: Players, Model rows, Live edges, Strong edges, Avg |edge|, Median R²</td></tr>
+<tr><td>💬 <strong>Executive summary</strong></td><td>Deterministic callout box + optional AI slate outlook</td></tr>
+<tr><td>🥇 <strong>Signal Spotlight</strong></td><td>Top 3 ranked edges with A/B/C tier badges and MORE/LESS coloring</td></tr>
+<tr><td>📈 <strong>Analytics visuals</strong></td><td>R² lollipop · diverging edge bar · edge histogram · slate summary panel</td></tr>
+<tr><td>🧪 <strong>Model quality</strong></td><td>Table with color-coded Tier column (Strong / Solid / Light / Noisy)</td></tr>
+<tr><td>🎯 <strong>Edge board</strong></td><td>Top 14 edges with green/red signed values and side coloring</td></tr>
+<tr><td>👤 <strong>Per-player blocks</strong></td><td>Recent-form pills · projection vs market mini bar chart · projections-vs-line table · data rationale · optional AI context</td></tr>
+</tbody>
+</table>
 
 Open the **Roster Report** page, click *Generate PDF*, and download.
 
