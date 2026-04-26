@@ -205,6 +205,10 @@ def _default_prebuilt_bundle_path() -> str:
     env_path = os.getenv("HOOPLYTICS_PRETRAINED_BUNDLE", "").strip()
     if env_path and Path(env_path).exists():
         return env_path
+    # Prefer a bundle shipped in the repo (works on Streamlit Cloud cold start).
+    repo_bundle = Path(__file__).resolve().parents[2] / "bundles" / "race_fast.joblib"
+    if repo_bundle.exists():
+        return str(repo_bundle)
     model_dir = Path(".hooplytics_cache/models")
     if not model_dir.exists():
         return ""
