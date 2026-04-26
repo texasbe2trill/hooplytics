@@ -546,11 +546,11 @@ iframe[title="streamlitApp"]::before {{ content: ""; }}
 }}
 .hl-hero-subtitle {{
   font-size: 1rem; color: var(--hl-ink-muted);
-  margin: 0 0 0.95rem 0; max-width: 70ch;
+  margin: 0 0 0.95rem 0;
 }}
 .hl-hero-copy {{
   font-size: 0.92rem; color: var(--hl-ink-quiet);
-  line-height: 1.6; max-width: 78ch;
+  line-height: 1.65;
 }}
 .hl-hero-copy strong {{ color: var(--hl-ink); font-weight: 600; }}
 

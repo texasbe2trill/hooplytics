@@ -269,10 +269,13 @@ def _default_prebuilt_bundle_path() -> str:
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 5)
-def _live_lines(api_key: str, players_key: str, _bust: int = 0) -> pd.DataFrame:
+def _live_lines(api_key: str, players_key: str, _bust: int = 0,
+                _force_refresh: bool = False) -> pd.DataFrame:
     if not api_key:
         return pd.DataFrame(columns=["player", "model", "line", "books", "matchup"])
-    return fetch_live_player_lines(api_key, json.loads(players_key))
+    return fetch_live_player_lines(
+        api_key, json.loads(players_key), force_refresh=_force_refresh
+    )
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 6, max_entries=6)
@@ -459,12 +462,13 @@ def _bundle_for_ui() -> ModelBundle:
 
 # Edge board builder ──────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False, ttl=60 * 5, max_entries=4)
-def _build_edge_board_cached(roster_key: str, api_key: str, _bust: int) -> pd.DataFrame:
+def _build_edge_board_cached(roster_key: str, api_key: str, _bust: int,
+                             _force_refresh: bool = False) -> pd.DataFrame:
     if not api_key:
         return pd.DataFrame()
     roster = json.loads(roster_key)
     players = list(roster)
-    live = _live_lines(api_key, json.dumps(players), _bust)
+    live = _live_lines(api_key, json.dumps(players), _bust, _force_refresh)
     if live.empty:
         return pd.DataFrame()
 
@@ -511,10 +515,14 @@ def _build_edge_board_cached(roster_key: str, api_key: str, _bust: int) -> pd.Da
 
 
 def _build_edge_board(roster: dict, api_key: str) -> pd.DataFrame:
+    # Consume + reset the one-shot force-refresh flag so the upstream daily
+    # odds JSON is re-fetched on this run, then return to disk-cache reads.
+    force = bool(st.session_state.pop("force_refresh_odds", False))
     return _build_edge_board_cached(
         json.dumps({p: list(s) for p, s in sorted(roster.items())}, sort_keys=True),
         api_key,
         int(st.session_state.get("live_bust", 0)),
+        force,
     )
 
 
@@ -582,6 +590,8 @@ def _render_sidebar() -> tuple[str, str]:
             )
             if cols[1].button("×", key=f"rm_{player}", help=f"Remove {player}"):
                 roster.pop(player)
+                st.session_state.live_bust += 1
+                st.session_state.force_refresh_odds = True
                 st.rerun()
 
         all_names = _all_active_players()
@@ -610,6 +620,7 @@ def _render_sidebar() -> tuple[str, str]:
                 for p in list(roster):
                     roster[p] = list(seasons_selected)
                 st.session_state.live_bust += 1
+                st.session_state.force_refresh_odds = True
                 st.rerun()
 
         if st.button("Add", width="stretch") and new_player and new_player.strip():
@@ -621,6 +632,7 @@ def _render_sidebar() -> tuple[str, str]:
                 resolved = PlayerStore.resolve_player_name(new_player) or new_player
                 roster[resolved] = seasons
                 st.session_state.live_bust += 1
+                st.session_state.force_refresh_odds = True
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
@@ -678,6 +690,7 @@ def _render_sidebar() -> tuple[str, str]:
         cols = st.columns(3)
         if cols[0].button("Refresh", width="stretch"):
             st.session_state.live_bust += 1
+            st.session_state.force_refresh_odds = True
             st.rerun()
         if cols[1].button("Clear key", width="stretch"):
             st.session_state.session_odds_api_key = ""
@@ -1910,8 +1923,10 @@ def page_scenario(roster: dict, api_key: str) -> None:
                                  value=1.0, key="lab_tol")
 
     # Live line context
+    _force_lab = bool(st.session_state.pop("force_refresh_odds", False))
     live_df = _live_lines(api_key, json.dumps(list(roster)),
-                          st.session_state.live_bust) if api_key else pd.DataFrame()
+                          st.session_state.live_bust,
+                          _force_lab) if api_key else pd.DataFrame()
     live_line, line_ctx = _line_for(live_df, player, model_name)
 
     c5, c6, c7 = st.columns([1, 1, 1])
