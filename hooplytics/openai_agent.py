@@ -110,16 +110,24 @@ context lacks a needed value, say the data is unavailable instead of guessing.""
 
 # ── Model selection ──────────────────────────────────────────────────────────
 # Ordered preference for auto-selecting a default chat model. Earlier entries
-# win when present in the user's available model list. Filtering also restricts
-# to ids containing "chat" so this list is intentionally chat-family-only.
+# win when present in the user's available model list.
 _PREFERRED_MODEL_PATTERNS: tuple[str, ...] = (
-    r"^gpt-5\.1-chat-latest$",
-    r"^gpt-5-chat-latest$",
-    r"^gpt-4o-chat-latest$",
+    # gpt-5 family (April 2026)
+    r"^gpt-5$",
+    r"^gpt-5-",
+    # gpt-4.1 family (April 2025 flagship)
+    r"^gpt-4\.1$",
+    r"^gpt-4\.1-mini$",
+    r"^gpt-4\.1-nano$",
+    # gpt-4o family
     r"^chatgpt-4o-latest$",
-    r"^gpt-.*-chat-latest$",
-    r"^gpt-.*-chat.*",
-    r"^chatgpt-.*",
+    r"^gpt-4o$",
+    r"^gpt-4o-mini$",
+    # other gpt-4 variants (turbo, etc.)
+    r"^gpt-4-turbo",
+    r"^gpt-4",
+    # legacy fallback
+    r"^gpt-3\.5-turbo",
 )
 
 # Models we never want to surface as a chat default.
@@ -143,13 +151,12 @@ _EXCLUDE_PATTERNS: tuple[str, ...] = (
 
 
 def filter_chat_models(model_ids: Iterable[str]) -> list[str]:
-    """Return only models explicitly designated for the chat endpoint.
+    """Return GPT-family models compatible with the chat completions endpoint.
 
-    Restricted to GPT/chatgpt model IDs whose name contains the substring
-    ``chat`` (case-insensitive) — e.g. ``gpt-5.1-chat-latest``,
-    ``chatgpt-4o-latest``. Other GPT variants (reasoning, instruct, image,
-    etc.) are intentionally excluded because they are not guaranteed to be
-    compatible with ``v1/chat/completions`` for this app's usage.
+    Accepts any ``gpt-`` or ``chatgpt-`` model not matched by the exclusion
+    patterns (embeddings, TTS, image, realtime, instruct, etc.). This includes
+    standard models like ``gpt-4o`` and ``gpt-4.1`` that do not carry the word
+    ``chat`` in their name but are fully compatible with ``v1/chat/completions``.
     """
     excluded = [re.compile(p) for p in _EXCLUDE_PATTERNS]
     out: list[str] = []
@@ -159,8 +166,6 @@ def filter_chat_models(model_ids: Iterable[str]) -> list[str]:
         if any(pat.search(mid) for pat in excluded):
             continue
         if not mid.startswith(("gpt-", "chatgpt-")):
-            continue
-        if "chat" not in mid.lower():
             continue
         out.append(mid)
     # Stable, human-friendly sort: preferred families first, then alpha.
@@ -249,7 +254,7 @@ def _safe_records(df: pd.DataFrame | None, limit: int) -> list[dict[str, Any]]:
         if pd.api.types.is_numeric_dtype(head[col]):
             head[col] = pd.to_numeric(head[col], errors="coerce").round(3)
     head = head.where(pd.notna(head), None)
-    return head.to_dict(orient="records")
+    return [dict(r) for r in head.to_dict(orient="records")]
 
 
 def build_grounding_payload(
@@ -363,7 +368,7 @@ def chat_complete(
     grounding_payload: dict[str, Any] | None = None,
     history: list[dict[str, str]] | None = None,
     strict_grounded: bool = False,
-    max_output_tokens: int = 900,
+    max_output_tokens: int = 1500,
 ) -> str:
     """Run a single chat completion and return the assistant text.
 
@@ -470,7 +475,11 @@ def chat_complete(
         if isinstance(refusal, str) and refusal.strip():
             return refusal.strip()
 
-        return "[No textual response returned by the selected model.]"
+        finish_reason = getattr(choice, "finish_reason", None)
+        if finish_reason == "content_filter":
+            return "(Response blocked by the OpenAI content filter. Try rephrasing your question.)"
+
+        return f"(The model returned no text. finish_reason={finish_reason!r})"
     except Exception as exc:  # pragma: no cover - defensive
         raise RuntimeError(f"Unexpected OpenAI response shape: {exc!r}") from None
 
