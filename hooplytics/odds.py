@@ -228,11 +228,14 @@ def fetch_historical_odds_for_date(
     date_str: str,
     *,
     force_refresh: bool = False,
+    markets: list[str] | None = None,
 ) -> pd.DataFrame:
     """Fetch historical player prop lines for a specific NBA game date.
 
     Queries the Odds API historical event odds endpoint at noon ET on the
-    requested date to capture pregame lines. Results are cached to disk.
+    requested date to capture pregame lines. Results are cached to disk and
+    merged across runs so a partial fetch (e.g. only ``points`` + ``rebounds``)
+    can be filled in later by re-running with the missing markets.
 
     Parameters
     ----------
@@ -242,10 +245,15 @@ def fetch_historical_odds_for_date(
         ISO date string, e.g. ``"2024-01-15"``.
     force_refresh
         Re-fetch even if a cache file exists.
+    markets
+        Optional subset of model names (``"points"``, ``"rebounds"``,
+        ``"assists"``, ``"threepm"``) to fetch. Defaults to all four.
+        Each market costs 10 credits per event, so a 2-market subset
+        cuts API cost in half versus the default.
 
     Returns
     -------
-    DataFrame with columns ``[game_date, player, model, line, books]``.
+    DataFrame with columns ``[game_date, player, model, line, books, …]``.
     Empty on error, no API key, or date before the player-props cutoff.
 
     Notes
@@ -260,14 +268,29 @@ def fetch_historical_odds_for_date(
     if date_str < ODDS_PLAYER_PROPS_CUTOFF:
         return empty
 
+    # Resolve which markets to request (model-name values).
+    all_models = list(ODDS_MARKETS.values())
+    requested_models = [m for m in (markets or all_models) if m in all_models]
+    if not requested_models:
+        return empty
+
     cache_path = _hist_cache_path(date_str)
+    existing_df: pd.DataFrame | None = None
     if cache_path.exists() and not force_refresh:
         try:
             cached = pd.read_json(cache_path, orient="records")
-            # An empty list is a valid cached result (no games that day).
-            return cached if not cached.empty else empty
         except Exception:  # noqa: BLE001
-            pass
+            cached = pd.DataFrame()
+        # An empty cached file is a valid "no games this day" sentinel.
+        if cached.empty:
+            return empty
+        existing_df = cached
+        existing_models = set(cached["model"].unique()) if "model" in cached.columns else set()
+        missing_models = [m for m in requested_models if m not in existing_models]
+        if not missing_models:
+            return cached
+        # Only fetch the markets we don't yet have for this date.
+        requested_models = missing_models
 
     # Query at 18:00 UTC (1 pm ET) — before any NBA tip-off.
     query_ts = f"{date_str}T18:00:00Z"
@@ -307,6 +330,9 @@ def fetch_historical_odds_for_date(
         return empty
 
     # ── Step 2: player prop odds for each event ───────────────────────────
+    # Map model names back to API market keys for the subset request.
+    model_to_api = {v: k for k, v in ODDS_MARKETS.items()}
+    api_markets = [model_to_api[m] for m in requested_models if m in model_to_api]
     rows: list[dict] = []
     for ev in events:
         ev_id = ev.get("id")
@@ -319,7 +345,7 @@ def fetch_historical_odds_for_date(
                     "apiKey": api_key,
                     "date": query_ts,
                     "regions": ODDS_REGIONS,
-                    "markets": ",".join(ODDS_MARKETS),
+                    "markets": ",".join(api_markets),
                     "bookmakers": ",".join(NA_BOOKMAKERS),
                     "oddsFormat": "decimal",
                 },
@@ -338,7 +364,8 @@ def fetch_historical_odds_for_date(
         payload = odds_resp.json()
         event_data = payload.get("data", {}) if isinstance(payload, dict) else {}
 
-        bucket: dict[tuple[str, str], list[float]] = {}
+        # bucket: (player, model) -> {"lines": [...], "over_prices": [...], "under_prices": [...]}
+        bucket: dict[tuple[str, str], dict[str, list[float]]] = {}
         allowed_books = set(NA_BOOKMAKERS)
         for bm in event_data.get("bookmakers", []):
             if bm.get("key", "") not in allowed_books:
@@ -347,28 +374,59 @@ def fetch_historical_odds_for_date(
                 model_name = ODDS_MARKETS.get(market["key"])
                 if model_name is None:
                     continue
-                for o in market.get("outcomes", []):
-                    if o.get("name") != "Over":
+                # Pair Over/Under outcomes per player so we capture both prices.
+                outcomes = market.get("outcomes", [])
+                pair: dict[str, dict[str, dict[str, float]]] = {}
+                for o in outcomes:
+                    side = o.get("name")
+                    if side not in ("Over", "Under"):
                         continue
                     player_name = o.get("description", "")
                     if not player_name:
                         continue
-                    bucket.setdefault((player_name, model_name), []).append(
-                        float(o["point"])
-                    )
+                    pair.setdefault(player_name, {})[side] = {
+                        "point": float(o["point"]),
+                        "price": float(o.get("price", 0.0)) or float("nan"),
+                    }
+                for player_name, sides in pair.items():
+                    over = sides.get("Over")
+                    if over is None:
+                        continue  # need at least the Over to anchor the line
+                    slot = bucket.setdefault((player_name, model_name), {
+                        "lines": [], "over_prices": [], "under_prices": [],
+                    })
+                    slot["lines"].append(over["point"])
+                    slot["over_prices"].append(over["price"])
+                    under = sides.get("Under")
+                    if under is not None:
+                        slot["under_prices"].append(under["price"])
 
-        for (player_name, model_name), pts in bucket.items():
-            rows.append({
+        for (player_name, model_name), agg in bucket.items():
+            lines = agg["lines"]
+            over_prices = [p for p in agg["over_prices"] if p == p and p > 1.0]
+            under_prices = [p for p in agg["under_prices"] if p == p and p > 1.0]
+            row = {
                 "game_date": date_str,
                 "player": player_name,
                 "model": model_name,
-                "line": float(np.median(pts)),
-                "books": len(pts),
-            })
+                "line": float(np.median(lines)),
+                "books": len(lines),
+                "line_std": float(np.std(lines)) if len(lines) > 1 else 0.0,
+                "over_price": float(np.median(over_prices)) if over_prices else float("nan"),
+                "under_price": float(np.median(under_prices)) if under_prices else float("nan"),
+            }
+            rows.append(row)
 
         time.sleep(0.25)  # be kind to the API
 
-    result = pd.DataFrame(rows) if rows else empty
+    new_df = pd.DataFrame(rows) if rows else pd.DataFrame()
+    # Merge with any pre-existing cached rows (different markets fetched earlier).
+    if existing_df is not None and not existing_df.empty:
+        combined = pd.concat([existing_df, new_df], ignore_index=True) if not new_df.empty else existing_df
+        combined = combined.drop_duplicates(subset=["game_date", "player", "model"], keep="last")
+    else:
+        combined = new_df
+    result = combined if not combined.empty else empty
     try:
         result.to_json(cache_path, orient="records")
     except Exception:  # noqa: BLE001
@@ -382,6 +440,7 @@ def ingest_historical_odds(
     *,
     force_refresh: bool = False,
     verbose: bool = False,
+    markets: list[str] | None = None,
 ) -> pd.DataFrame:
     """Fetch and cache historical odds for a list of ISO date strings.
 
@@ -400,6 +459,9 @@ def ingest_historical_odds(
         Print progress.
     """
     frames: list[pd.DataFrame] = []
+    all_models = list(ODDS_MARKETS.values())
+    requested_models = [m for m in (markets or all_models) if m in all_models] or all_models
+    full_set = set(requested_models) == set(all_models)
     for d in dates:
         if d < ODDS_PLAYER_PROPS_CUTOFF:
             continue
@@ -407,15 +469,25 @@ def ingest_historical_odds(
         if cache_path.exists() and not force_refresh:
             try:
                 cached = pd.read_json(cache_path, orient="records")
-                if not cached.empty:
-                    frames.append(cached)
-                    continue
             except Exception:  # noqa: BLE001
-                pass
+                cached = pd.DataFrame()
+            if cached.empty:
+                # Known no-games day — nothing to fetch.
+                continue
+            cached_models = set(cached["model"].unique()) if "model" in cached.columns else set()
+            missing = [m for m in requested_models if m not in cached_models]
+            if not missing:
+                # Already have everything requested for this date.
+                frames.append(cached)
+                continue
+            # Fall through to incremental fetch of the missing markets.
         if verbose:
-            print(f"  Fetching historical odds for {d} …")
+            label = "all markets" if full_set else ",".join(requested_models)
+            print(f"  Fetching historical odds for {d} [{label}] …")
         try:
-            df = fetch_historical_odds_for_date(api_key, d, force_refresh=force_refresh)
+            df = fetch_historical_odds_for_date(
+                api_key, d, force_refresh=force_refresh, markets=requested_models,
+            )
             if not df.empty:
                 frames.append(df)
         except RuntimeError as exc:

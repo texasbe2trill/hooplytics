@@ -77,12 +77,42 @@ MARKET_FEATURES = [
     "market_books_count",
 ]
 
+# Derived market signal — populated when the historical cache has Over/Under
+# prices, per-book line lists, and matching rolling form columns. Models
+# tolerate NaN via their imputer step, so older caches without these columns
+# keep working.
+MARKET_DERIVED_POINTS = [
+    "market_points_over_prob",
+    "market_points_line_std",
+    "market_points_vs_l5",
+    "market_points_vs_l10",
+]
+MARKET_DERIVED_REBOUNDS = [
+    "market_rebounds_over_prob",
+    "market_rebounds_line_std",
+    "market_rebounds_vs_l5",
+    "market_rebounds_vs_l10",
+]
+MARKET_DERIVED_ASSISTS = [
+    "market_assists_over_prob",
+    "market_assists_line_std",
+    "market_assists_vs_l5",
+    "market_assists_vs_l10",
+]
+MARKET_DERIVED_THREEPM = [
+    "market_threepm_over_prob",
+    "market_threepm_line_std",
+]
+MARKET_DERIVED_AGGREGATE = ["market_overround"]
+
 TARGET_FEATURE_GROUPS: dict[str, list[str]] = {
     "points": [
         *MODEL_SPECS["points"]["features"],
         *SCHEDULE_CONTEXT_FEATURES,
         "market_points_line",
         "market_books_count",
+        *MARKET_DERIVED_POINTS,
+        *MARKET_DERIVED_AGGREGATE,
     ],
     "rebounds": [
         *MODEL_SPECS["rebounds"]["features"],
@@ -90,6 +120,8 @@ TARGET_FEATURE_GROUPS: dict[str, list[str]] = {
         *LINEUP_CONTEXT_FEATURES,
         "market_rebounds_line",
         "market_books_count",
+        *MARKET_DERIVED_REBOUNDS,
+        *MARKET_DERIVED_AGGREGATE,
     ],
     "assists": [
         *MODEL_SPECS["assists"]["features"],
@@ -101,6 +133,8 @@ TARGET_FEATURE_GROUPS: dict[str, list[str]] = {
         "assist_opportunity_score",
         "market_assists_line",
         "market_books_count",
+        *MARKET_DERIVED_ASSISTS,
+        *MARKET_DERIVED_AGGREGATE,
     ],
     "turnovers": [
         *MODEL_SPECS["turnovers"]["features"],
@@ -110,6 +144,7 @@ TARGET_FEATURE_GROUPS: dict[str, list[str]] = {
         *ROLE_BASE_FEATURES,
         "turnover_pressure_score",
         "market_books_count",
+        *MARKET_DERIVED_AGGREGATE,
     ],
     "stl_blk": [
         *MODEL_SPECS["stl_blk"]["features"],
@@ -120,6 +155,7 @@ TARGET_FEATURE_GROUPS: dict[str, list[str]] = {
         *ROLE_BASE_FEATURES,
         "stocks_matchup_score",
         "market_books_count",
+        *MARKET_DERIVED_AGGREGATE,
     ],
     "threepm": [
         *MODEL_SPECS["threepm"]["features"],
@@ -127,6 +163,8 @@ TARGET_FEATURE_GROUPS: dict[str, list[str]] = {
         *OPPONENT_CONTEXT_FEATURES,
         "market_threepm_line",
         "market_books_count",
+        *MARKET_DERIVED_THREEPM,
+        *MARKET_DERIVED_AGGREGATE,
     ],
     "pra": [
         *MODEL_SPECS["pra"]["features"],
@@ -137,6 +175,10 @@ TARGET_FEATURE_GROUPS: dict[str, list[str]] = {
         "market_rebounds_line",
         "market_assists_line",
         "market_books_count",
+        *MARKET_DERIVED_POINTS,
+        *MARKET_DERIVED_REBOUNDS,
+        *MARKET_DERIVED_ASSISTS,
+        *MARKET_DERIVED_AGGREGATE,
     ],
     "fantasy_score": [
         *MODEL_SPECS["fantasy_score"]["features"],
@@ -146,6 +188,11 @@ TARGET_FEATURE_GROUPS: dict[str, list[str]] = {
         *LINEUP_CONTEXT_FEATURES,
         *ROLE_BASE_FEATURES,
         *MARKET_FEATURES,
+        *MARKET_DERIVED_POINTS,
+        *MARKET_DERIVED_REBOUNDS,
+        *MARKET_DERIVED_ASSISTS,
+        *MARKET_DERIVED_THREEPM,
+        *MARKET_DERIVED_AGGREGATE,
     ],
 }
 

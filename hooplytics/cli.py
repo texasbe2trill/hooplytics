@@ -281,20 +281,46 @@ def ingest_odds(
     start: str = typer.Option(..., "--start", help="Start date ISO, e.g. 2023-10-01"),
     end: str = typer.Option(..., "--end", help="End date ISO (exclusive), e.g. 2024-06-30"),
     force: bool = typer.Option(False, "--force", help="Re-fetch already-cached dates."),
+    markets: Optional[str] = typer.Option(
+        None,
+        "--markets",
+        help=(
+            "Comma-separated subset of markets to fetch: points,rebounds,assists,threepm. "
+            "Each market costs 10 credits per event, so 2 markets = half price. "
+            "Re-running later with different markets fills in the missing ones."
+        ),
+    ),
 ) -> None:
     """Ingest historical player prop lines from The Odds API into the local cache.
 
     Example: hooplytics ingest-odds --start 2023-10-01 --end 2024-04-15
 
-    NOTE: Requires a paid Odds API plan. Costs ~40 credits per game per date
-    (4 markets × 1 region × 10x historical multiplier).
+    NOTE: Requires a paid Odds API plan. Costs ~10 credits per market per event
+    (default 4 markets × 1 region × 10x historical multiplier = 40 cr/event).
+    Use ``--markets points,rebounds`` to halve the cost.
     """
     import datetime
+    from .constants import ODDS_MARKETS, ODDS_PLAYER_PROPS_CUTOFF
 
     api_key = load_api_key()
     if not api_key:
         err_console.print("[red]ODDS_API_KEY not set in .env or environment.[/red]")
         raise typer.Exit(1)
+
+    market_subset: list[str] | None = None
+    if markets:
+        valid = set(ODDS_MARKETS.values())
+        market_subset = [m.strip() for m in markets.split(",") if m.strip()]
+        bad = [m for m in market_subset if m not in valid]
+        if bad:
+            err_console.print(
+                f"[red]Unknown market(s): {', '.join(bad)}. Valid: {', '.join(sorted(valid))}[/red]"
+            )
+            raise typer.Exit(1)
+        cost = len(market_subset) * 10
+        console.print(
+            f"[dim]Market subset: {', '.join(market_subset)} (~{cost} credits/event)[/dim]"
+        )
 
     try:
         start_dt = datetime.date.fromisoformat(start)
@@ -309,7 +335,6 @@ def ingest_odds(
     ]
 
     console.print(f"[dim]Ingesting odds for {len(dates)} dates ({start} → {end})…[/dim]")
-    from .constants import ODDS_PLAYER_PROPS_CUTOFF
 
     eligible = [d for d in dates if d >= ODDS_PLAYER_PROPS_CUTOFF]
     if len(eligible) < len(dates):
@@ -319,7 +344,9 @@ def ingest_odds(
         )
 
     try:
-        result = ingest_historical_odds(api_key, eligible, force_refresh=force, verbose=True)
+        result = ingest_historical_odds(
+            api_key, eligible, force_refresh=force, verbose=True, markets=market_subset,
+        )
     except RuntimeError as exc:
         err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)

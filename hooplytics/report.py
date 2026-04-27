@@ -16,20 +16,25 @@ Design goals:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
 from typing import Any
 
 import pandas as pd
-from reportlab.graphics.shapes import Circle, Drawing, Line, Rect, String
+from reportlab.graphics.shapes import Circle, Drawing, Line, Rect
+from reportlab.graphics.shapes import String as _RLString
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     BaseDocTemplate,
+    Flowable,
     Frame,
     KeepTogether,
     NextPageTemplate,
@@ -40,6 +45,115 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
+
+
+# ── Font registration ──────────────────────────────────────────────────────
+# Standard PDF Type-1 fonts (Helvetica) only cover WinAnsi 8-bit chars, which
+# turns characters like →, ć, and certain dashes into "tofu" boxes. We try a
+# few common system TrueType fonts that ship with broad Unicode coverage so
+# names like "Nurkić", arrows, and curly punctuation render cleanly. If none
+# is available we silently fall back to Helvetica + an ASCII substitution
+# pass in :func:`_safe_text`.
+_TTF_CANDIDATES: tuple[tuple[str, str, str], ...] = (
+    # macOS — Helvetica is .ttc and reportlab can't load it directly. Use
+    # Arial / Arial Unicode / DejaVu when present.
+    ("HoopArial", "Arial.ttf", "Arial Bold.ttf"),
+    ("HoopArial", "Arial Unicode.ttf", "Arial Unicode.ttf"),
+    ("HoopArial", "DejaVuSans.ttf", "DejaVuSans-Bold.ttf"),
+    # Linux — DejaVu is the default on Debian/Ubuntu.
+    ("HoopArial", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+    # Windows
+    ("HoopArial", "C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/arialbd.ttf"),
+)
+_FONT_SEARCH_DIRS = (
+    "/Library/Fonts",
+    "/System/Library/Fonts",
+    "/System/Library/Fonts/Supplemental",
+    os.path.expanduser("~/Library/Fonts"),
+    "/usr/share/fonts",
+    "/usr/share/fonts/truetype",
+)
+
+
+def _resolve_font_path(name: str) -> str | None:
+    if os.path.isabs(name) and os.path.exists(name):
+        return name
+    for d in _FONT_SEARCH_DIRS:
+        p = os.path.join(d, name)
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def _register_unicode_font() -> tuple[str, str]:
+    """Register a Unicode TrueType font; return (regular, bold) face names."""
+    for family, reg_name, bold_name in _TTF_CANDIDATES:
+        reg_path = _resolve_font_path(reg_name)
+        bold_path = _resolve_font_path(bold_name)
+        if not reg_path:
+            continue
+        try:
+            pdfmetrics.registerFont(TTFont(family, reg_path))
+            bold_face = family
+            if bold_path and bold_path != reg_path:
+                bold_face = f"{family}-Bold"
+                pdfmetrics.registerFont(TTFont(bold_face, bold_path))
+            return family, bold_face
+        except Exception:
+            continue
+    return "Helvetica", "Helvetica-Bold"
+
+
+_BODY_FONT, _BOLD_FONT = _register_unicode_font()
+
+
+# ── Unicode safety net ─────────────────────────────────────────────────────
+# When the registered font is just plain Helvetica we substitute glyphs that
+# WinAnsi cannot render so the report never shows tofu boxes.
+_ASCII_SUBSTITUTIONS: dict[str, str] = {
+    "—": "-",
+    "–": "-",
+    "→": ">",
+    "←": "<",
+    "↑": "^",
+    "↓": "v",
+    "“": '"',
+    "”": '"',
+    "‘": "'",
+    "’": "'",
+    "…": "...",
+    "•": "-",
+    "ć": "c",
+    "Ć": "C",
+    "č": "c",
+    "Č": "C",
+    "š": "s",
+    "Š": "S",
+    "ž": "z",
+    "Ž": "Z",
+    "đ": "d",
+    "Đ": "D",
+    "ñ": "n",
+    "Ñ": "N",
+}
+
+
+def _safe_text(s: Any) -> str:
+    """Return ``s`` with non-WinAnsi glyphs swapped when no Unicode font is set."""
+    text = str(s if s is not None else "")
+    if _BODY_FONT != "Helvetica":
+        return text
+    for src, dst in _ASCII_SUBSTITUTIONS.items():
+        if src in text:
+            text = text.replace(src, dst)
+    return text
+
+
+def String(x, y, text="", **kwargs):
+    """Drop-in replacement for ``reportlab.graphics.shapes.String`` that runs
+    label text through :func:`_safe_text` so chart glyphs match the body."""
+    return _RLString(x, y, _safe_text(text), **kwargs)
 
 
 # ── Brand palette (light/printable variant of the Streamlit theme) ──────────
@@ -59,6 +173,81 @@ GOLD = colors.HexColor("#d4a017")
 WHITE = colors.white
 
 
+# ── Sportsbook abbreviations for compact rendering in tables/panels. ────────
+_BOOK_ABBREV: dict[str, str] = {
+    "draftkings": "DK",
+    "fanduel": "FD",
+    "betmgm": "MGM",
+    "caesars": "CZR",
+    "williamhill_us": "CZR",
+    "betrivers": "BR",
+    "espnbet": "ESPN",
+    "espn bet": "ESPN",
+    "hardrockbet": "HR",
+    "hard rock bet": "HR",
+    "fanatics": "FAN",
+    "bovada": "BOV",
+    "pinnacle": "PIN",
+}
+
+
+def _abbrev_books(book_names: Any) -> str:
+    """Render a list/string of book titles as a compact comma-joined ticker."""
+    if book_names is None:
+        return "—"
+    if isinstance(book_names, (list, tuple, set)):
+        names = [str(n) for n in book_names]
+    else:
+        s = str(book_names).strip()
+        if not s:
+            return "—"
+        names = [n.strip() for n in s.split(",") if n.strip()]
+    if not names:
+        return "—"
+    seen: list[str] = []
+    for n in names:
+        key = n.lower()
+        abbr = _BOOK_ABBREV.get(key)
+        if abbr is None:
+            # Fallback: take initials or first 3 letters.
+            parts = [p for p in n.replace(".", " ").split() if p]
+            if len(parts) >= 2:
+                abbr = "".join(p[0].upper() for p in parts[:3])
+            else:
+                abbr = n[:3].upper()
+        if abbr not in seen:
+            seen.append(abbr)
+    return ", ".join(seen)
+
+
+# ── Bookmark / TOC plumbing ─────────────────────────────────────────────────
+class _AnchorFlowable(Flowable):
+    """Zero-height flowable that registers a clickable anchor + outline entry.
+
+    Each section header drops one of these so the cover-page TOC links can
+    jump directly to that page, and the PDF outline pane mirrors the same
+    structure for sidebar navigation.
+    """
+
+    def __init__(self, key: str, label: str, *, level: int = 0) -> None:
+        super().__init__()
+        self.key = key
+        self.label = label
+        self.level = level
+        self.width = 0
+        self.height = 0
+
+    def draw(self) -> None:  # pragma: no cover - rendering side effect
+        c = self.canv
+        c.bookmarkPage(self.key)
+        try:
+            c.addOutlineEntry(self.label, self.key, self.level, closed=False)
+        except Exception:
+            # Outline entry duplicates would raise; we already bookmarked the
+            # page so navigation still works.
+            pass
+
+
 def _short(text: Any, limit: int = 18) -> str:
     s = str(text or "")
     return s if len(s) <= limit else s[: limit - 1] + "…"
@@ -67,8 +256,8 @@ def _short(text: Any, limit: int = 18) -> str:
 # ── Styles ──────────────────────────────────────────────────────────────────
 def _build_styles() -> dict[str, ParagraphStyle]:
     base = getSampleStyleSheet()["Normal"]
-    body_font = "Helvetica"
-    bold_font = "Helvetica-Bold"
+    body_font = _BODY_FONT
+    bold_font = _BOLD_FONT
 
     return {
         "cover_title": ParagraphStyle(
@@ -151,10 +340,10 @@ def _draw_page_chrome(canvas, doc, meta: _ReportMeta) -> None:
     canvas.rect(0, height - 0.18 * inch, width, 0.02 * inch, stroke=0, fill=1)
 
     # Header text
-    canvas.setFont("Helvetica-Bold", 9)
+    canvas.setFont(_BOLD_FONT, 9)
     canvas.setFillColor(INK_DARK)
     canvas.drawString(0.6 * inch, height - 0.42 * inch, "HOOPLYTICS")
-    canvas.setFont("Helvetica", 8)
+    canvas.setFont(_BODY_FONT, 8)
     canvas.setFillColor(INK_MUTED)
     canvas.drawString(
         0.6 * inch + 1.1 * inch,
@@ -171,7 +360,7 @@ def _draw_page_chrome(canvas, doc, meta: _ReportMeta) -> None:
     canvas.setStrokeColor(PANEL_BORDER)
     canvas.setLineWidth(0.4)
     canvas.line(0.6 * inch, 0.6 * inch, width - 0.6 * inch, 0.6 * inch)
-    canvas.setFont("Helvetica", 7.5)
+    canvas.setFont(_BODY_FONT, 7.5)
     canvas.setFillColor(INK_MUTED)
     canvas.drawCentredString(
         width / 2,
@@ -204,11 +393,11 @@ def _draw_cover_chrome(canvas, doc) -> None:
         width - 0.6 * inch, height - 1.2 * inch,
     )
     # Footer
-    canvas.setFont("Helvetica", 7.5)
+    canvas.setFont(_BODY_FONT, 7.5)
     canvas.setFillColor(INK_MUTED)
     canvas.drawCentredString(
         width / 2, 0.45 * inch,
-        "Hooplytics · Roster Analytics Report",
+        "Hooplytics  │  Roster Analytics Report",
     )
     canvas.restoreState()
 
@@ -239,7 +428,7 @@ def _fmt_signed(v: Any, digits: int = 2) -> str:
 def _para(text: str, style: ParagraphStyle) -> Paragraph:
     """Wrap untrusted text into a Paragraph after escaping XML metacharacters."""
     safe = (
-        str(text)
+        _safe_text(text)
         .replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
@@ -247,12 +436,107 @@ def _para(text: str, style: ParagraphStyle) -> Paragraph:
     return Paragraph(safe, style)
 
 
-def _section_header(title: str, eyebrow: str, styles: dict) -> list:
-    return [
+def _section_header(
+    title: str,
+    eyebrow: str,
+    styles: dict,
+    *,
+    anchor: str | None = None,
+) -> list:
+    head: list = []
+    if anchor:
+        head.append(_AnchorFlowable(anchor, title, level=0))
+    head.extend([
         _para(eyebrow.upper(), styles["eyebrow"]),
         _para(title, styles["h1"]),
         Spacer(1, 4),
+    ])
+    return head
+
+
+def _toc_flowables(
+    items: list[tuple],
+    styles: dict,
+) -> list:
+    """Render a clickable table of contents.
+
+    ``items`` is a list of either ``(label, anchor)`` for top-level sections
+    or ``(label, anchor, "sub")`` for indented sub-items (e.g. per-player rows
+    nested under "Per-player breakdown"). Top-level rows carry a numeric chip;
+    sub-items render as quiet chevron rows with no number and lighter type.
+    """
+    if not items:
+        return []
+
+    flow: list = [
+        _para("CONTENTS", styles["eyebrow"]),
+        Spacer(1, 6),
     ]
+
+    rows: list[list[Any]] = []
+    is_sub_flags: list[bool] = []
+    section_idx = 0
+    for entry in items:
+        is_sub = len(entry) >= 3 and entry[2] == "sub"
+        label, anchor = entry[0], entry[1]
+        if is_sub:
+            # Indented chevron sub-row — no number, no JUMP affordance.
+            left = Paragraph(
+                f'<link href="#{anchor}" color="#6b7686">'
+                f'&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'
+                f'<font size="9" color="#ff7a18">›</font>'
+                f'&nbsp;&nbsp;<font size="9.5" color="#3a4250">{label}</font>'
+                f'</link>',
+                styles["body"],
+            )
+            right = Paragraph("", styles["body"])
+        else:
+            section_idx += 1
+            num = f"{section_idx:02d}"
+            left = Paragraph(
+                f'<link href="#{anchor}" color="#11151c">'
+                f'<font size="8" color="#ffffff" backColor="#ff7a18">'
+                f'&nbsp;<b>&nbsp;{num}&nbsp;</b>&nbsp;</font>'
+                f'&nbsp;&nbsp;<font size="11" color="#11151c"><b>{label}</b></font>'
+                f'</link>',
+                styles["body"],
+            )
+            right = Paragraph(
+                f'<link href="#{anchor}" color="#cc5a00">'
+                f'<font size="11" color="#cc5a00"><b>›</b></font>'
+                f'</link>',
+                ParagraphStyle(
+                    "toc_jump", parent=styles["body"],
+                    alignment=2,  # right
+                ),
+            )
+        rows.append([left, right])
+        is_sub_flags.append(is_sub)
+
+    table = Table(rows, colWidths=[6.4 * inch, 0.6 * inch])
+    style = [
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 12),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]
+    # Per-row backgrounds: white for main sections, faint panel for sub-items
+    # so the indented player rows visually nest under their parent section.
+    for ri, sub in enumerate(is_sub_flags):
+        if sub:
+            style.append(("BACKGROUND", (0, ri), (-1, ri), PANEL_BG))
+            style.append(("TOPPADDING", (0, ri), (-1, ri), 4))
+            style.append(("BOTTOMPADDING", (0, ri), (-1, ri), 4))
+        else:
+            style.append(("BACKGROUND", (0, ri), (-1, ri), colors.white))
+        # Hairline separator between rows (skip last row).
+        if ri < len(is_sub_flags) - 1:
+            style.append(("LINEBELOW", (0, ri), (-1, ri), 0.4, PANEL_BORDER))
+    style.append(("BOX", (0, 0), (-1, -1), 0.5, PANEL_BORDER))
+    table.setStyle(TableStyle(style))
+    flow.append(table)
+    return flow
 
 
 # ── KPI strip ───────────────────────────────────────────────────────────────
@@ -436,12 +720,12 @@ def _r2_lollipop_chart(metrics: pd.DataFrame) -> Drawing | None:
     height = 2.55 * inch
     drawing = Drawing(width, height)
     drawing.add(String(
-        0, height - 14, "Model R² · accuracy lollipop",
-        fontName="Helvetica-Bold", fontSize=10.5, fillColor=INK_DARK,
+        0, height - 14, "Model R²  │  accuracy lollipop",
+        fontName=_BOLD_FONT, fontSize=10.5, fillColor=INK_DARK,
     ))
     drawing.add(String(
         0, height - 28, "Higher = the model explains more game-to-game variance.",
-        fontName="Helvetica", fontSize=8, fillColor=INK_MUTED,
+        fontName=_BODY_FONT, fontSize=8, fillColor=INK_MUTED,
     ))
 
     plot_x = 0.45 * inch
@@ -466,7 +750,7 @@ def _r2_lollipop_chart(metrics: pd.DataFrame) -> Drawing | None:
         ))
         drawing.add(String(
             plot_x - 4, ty - 3, f"{tick:.1f}",
-            fontName="Helvetica", fontSize=6.5, fillColor=INK_FAINT,
+            fontName=_BODY_FONT, fontSize=6.5, fillColor=INK_FAINT,
             textAnchor="end",
         ))
 
@@ -487,18 +771,18 @@ def _r2_lollipop_chart(metrics: pd.DataFrame) -> Drawing | None:
         drawing.add(Circle(cx, cy, 4.2, fillColor=color, strokeColor=WHITE, strokeWidth=1))
         drawing.add(String(
             cx, cy + 7, f"{r2v:.2f}",
-            fontName="Helvetica-Bold", fontSize=7.5, fillColor=INK_DARK,
+            fontName=_BOLD_FONT, fontSize=7.5, fillColor=INK_DARK,
             textAnchor="middle",
         ))
         drawing.add(String(
             cx, plot_y - 11, _short(row[name_col], 11),
-            fontName="Helvetica", fontSize=7, fillColor=INK_BODY,
+            fontName=_BODY_FONT, fontSize=7, fillColor=INK_BODY,
             textAnchor="middle",
         ))
         if rmse_col is not None and pd.notna(row.get(rmse_col)):
             drawing.add(String(
                 cx, plot_y - 20, f"RMSE {float(row[rmse_col]):.2f}",
-                fontName="Helvetica", fontSize=6, fillColor=INK_FAINT,
+                fontName=_BODY_FONT, fontSize=6, fillColor=INK_FAINT,
                 textAnchor="middle",
             ))
 
@@ -519,7 +803,7 @@ def _diverging_edge_chart(edge_df: pd.DataFrame) -> Drawing | None:
     df = df.sort_values("abs_edge", ascending=False).head(10).iloc[::-1]
 
     labels = [
-        f"{_short(r.get('player', ''), 14)} · {_short(r.get('model', ''), 9)}"
+        f"{_short(r.get('player', ''), 14)}  │  {_short(r.get('model', ''), 9)}"
         for _, r in df.iterrows()
     ]
     values = [float(v) for v in df["edge_num"]]
@@ -529,12 +813,12 @@ def _diverging_edge_chart(edge_df: pd.DataFrame) -> Drawing | None:
     height = 2.85 * inch
     drawing = Drawing(width, height)
     drawing.add(String(
-        0, height - 14, "Edge magnitudes · model vs market",
-        fontName="Helvetica-Bold", fontSize=10.5, fillColor=INK_DARK,
+        0, height - 14, "Edge magnitudes  │  model vs market",
+        fontName=_BOLD_FONT, fontSize=10.5, fillColor=INK_DARK,
     ))
     drawing.add(String(
-        0, height - 28, "Bars to the right = MORE lean · bars to the left = LESS lean.",
-        fontName="Helvetica", fontSize=8, fillColor=INK_MUTED,
+        0, height - 28, "Bars to the right = MORE lean    Bars to the left = LESS lean.",
+        fontName=_BODY_FONT, fontSize=8, fillColor=INK_MUTED,
     ))
 
     plot_x = 1.95 * inch
@@ -560,7 +844,7 @@ def _diverging_edge_chart(edge_df: pd.DataFrame) -> Drawing | None:
         ))
         drawing.add(String(
             tx, plot_y - 10, f"{span * frac:+.1f}",
-            fontName="Helvetica", fontSize=6.5, fillColor=INK_FAINT,
+            fontName=_BODY_FONT, fontSize=6.5, fillColor=INK_FAINT,
             textAnchor="middle",
         ))
 
@@ -585,17 +869,17 @@ def _diverging_edge_chart(edge_df: pd.DataFrame) -> Drawing | None:
         if v >= 0:
             drawing.add(String(
                 x1 + 4, cy - 3, _fmt_signed(v, 2),
-                fontName="Helvetica-Bold", fontSize=7, fillColor=color,
+                fontName=_BOLD_FONT, fontSize=7, fillColor=color,
             ))
         else:
             drawing.add(String(
                 x0 - 4, cy - 3, _fmt_signed(v, 2),
-                fontName="Helvetica-Bold", fontSize=7, fillColor=color,
+                fontName=_BOLD_FONT, fontSize=7, fillColor=color,
                 textAnchor="end",
             ))
         drawing.add(String(
             plot_x - 6, cy - 3, lbl,
-            fontName="Helvetica", fontSize=7.5, fillColor=INK_BODY,
+            fontName=_BODY_FONT, fontSize=7.5, fillColor=INK_BODY,
             textAnchor="end",
         ))
 
@@ -623,11 +907,11 @@ def _edge_distribution_chart(edge_df: pd.DataFrame) -> Drawing | None:
     drawing = Drawing(width, height)
     drawing.add(String(
         0, height - 14, "Edge distribution",
-        fontName="Helvetica-Bold", fontSize=10, fillColor=INK_DARK,
+        fontName=_BOLD_FONT, fontSize=10, fillColor=INK_DARK,
     ))
     drawing.add(String(
         0, height - 26, "How concentrated are the model-vs-line gaps?",
-        fontName="Helvetica", fontSize=7.5, fillColor=INK_MUTED,
+        fontName=_BODY_FONT, fontSize=7.5, fillColor=INK_MUTED,
     ))
 
     plot_x = 0.25 * inch
@@ -654,22 +938,22 @@ def _edge_distribution_chart(edge_df: pd.DataFrame) -> Drawing | None:
         if c:
             drawing.add(String(
                 bx + (bar_w - 2) / 2, plot_y + bh + 2, str(c),
-                fontName="Helvetica-Bold", fontSize=7, fillColor=INK_DARK,
+                fontName=_BOLD_FONT, fontSize=7, fillColor=INK_DARK,
                 textAnchor="middle",
             ))
 
     drawing.add(String(
         plot_x, plot_y - 10, f"{-span:+.1f}",
-        fontName="Helvetica", fontSize=6.5, fillColor=INK_FAINT,
+        fontName=_BODY_FONT, fontSize=6.5, fillColor=INK_FAINT,
     ))
     drawing.add(String(
         plot_x + plot_w / 2, plot_y - 10, "0",
-        fontName="Helvetica", fontSize=6.5, fillColor=INK_FAINT,
+        fontName=_BODY_FONT, fontSize=6.5, fillColor=INK_FAINT,
         textAnchor="middle",
     ))
     drawing.add(String(
         plot_x + plot_w, plot_y - 10, f"{span:+.1f}",
-        fontName="Helvetica", fontSize=6.5, fillColor=INK_FAINT,
+        fontName=_BODY_FONT, fontSize=6.5, fillColor=INK_FAINT,
         textAnchor="end",
     ))
 
@@ -775,11 +1059,11 @@ def _player_minichart(
     drawing = Drawing(width, height)
     drawing.add(String(
         0, height - 13, "Model projection vs posted line",
-        fontName="Helvetica-Bold", fontSize=9.5, fillColor=INK_DARK,
+        fontName=_BOLD_FONT, fontSize=9.5, fillColor=INK_DARK,
     ))
     drawing.add(String(
-        0, height - 24, "Orange = model · Grey = market line.",
-        fontName="Helvetica", fontSize=7.5, fillColor=INK_MUTED,
+        0, height - 24, "Orange = model    Grey = market line.",
+        fontName=_BODY_FONT, fontSize=7.5, fillColor=INK_MUTED,
     ))
 
     plot_x = 0.2 * inch
@@ -811,12 +1095,12 @@ def _player_minichart(
         edge_color = POS_GREEN if edge_v > 0 else (NEG_RED if edge_v < 0 else INK_BODY)
         drawing.add(String(
             cx, plot_y + max(h_pred, h_line) + 3, _fmt_signed(edge_v, 2),
-            fontName="Helvetica-Bold", fontSize=7, fillColor=edge_color,
+            fontName=_BOLD_FONT, fontSize=7, fillColor=edge_color,
             textAnchor="middle",
         ))
         drawing.add(String(
             cx, plot_y - 10, _short(name, 10),
-            fontName="Helvetica", fontSize=6.8, fillColor=INK_BODY,
+            fontName=_BODY_FONT, fontSize=6.8, fillColor=INK_BODY,
             textAnchor="middle",
         ))
 
@@ -824,13 +1108,433 @@ def _player_minichart(
 
 
 # ── Section assemblers ──────────────────────────────────────────────────────
+def _conviction_leaderboard(
+    edge_df: pd.DataFrame,
+    styles: dict,
+    *,
+    top_n: int = 10,
+) -> list | None:
+    """Replacement for the old edge-vs-books scatter.
+
+    A ranked leaderboard of the highest-conviction signals. Each row shows:
+    a numbered rank chip, the player + market, a horizontal bar whose length
+    encodes ``|edge|``, the signed edge value, and a "books" pill badge.
+    Sorted by a composite conviction score ``|edge| * sqrt(books)`` so that
+    deep-market signals out-rank shallow ones at the same edge.
+    """
+    if not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
+        return None
+    if not {"edge", "books"}.issubset(edge_df.columns):
+        return None
+    df = edge_df.copy()
+    df["edge_n"] = pd.to_numeric(df["edge"], errors="coerce")
+    df["books_n"] = pd.to_numeric(df["books"], errors="coerce")
+    df = df.dropna(subset=["edge_n", "books_n"])
+    if df.empty:
+        return None
+    df["abs_edge"] = df["edge_n"].abs()
+    df["conviction"] = df["abs_edge"] * df["books_n"].clip(lower=1).pow(0.5)
+    df = df.sort_values("conviction", ascending=False).head(top_n).reset_index(drop=True)
+
+    side_col = "side" if "side" in df.columns else ("call" if "call" in df.columns else None)
+    max_abs_edge = max(float(df["abs_edge"].max()), 0.5)
+    max_books = max(int(df["books_n"].max()), 1)
+    bar_full_w = 2.7 * inch  # max bar length in points
+
+    title = Paragraph(
+        "<font size='10.5' color='#11151c'><b>Conviction leaderboard</b></font><br/>"
+        "<font size='8' color='#6b7686'>"
+        "Sorted by |edge| weighted by market depth (deeper books = stronger conviction)."
+        "</font>",
+        styles["body"],
+    )
+
+    rows: list[list[Any]] = [[
+        Paragraph("<font size='7' color='#6b7686'><b>RANK</b></font>", styles["body"]),
+        Paragraph("<font size='7' color='#6b7686'><b>SIGNAL</b></font>", styles["body"]),
+        Paragraph(
+            "<para alignment='center'>"
+            "<font size='7' color='#6b7686'><b>"
+            "&lt;&nbsp; LESS&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;MORE &nbsp;&gt;"
+            "</b></font></para>",
+            styles["body"],
+        ),
+        Paragraph("<font size='7' color='#6b7686'><b>EDGE</b></font>", styles["body"]),
+        Paragraph("<font size='7' color='#6b7686'><b>BOOKS</b></font>", styles["body"]),
+    ]]
+
+    extra: list = []
+    for i, r in df.iterrows():
+        idx = int(i) + 1
+        edge_val = float(r["edge_n"])
+        abs_edge = float(r["abs_edge"])
+        books_n = int(r["books_n"])
+        side = ""
+        if side_col and pd.notna(r.get(side_col)):
+            side = str(r[side_col]).upper().split()[0]
+        if side in ("MORE", "OVER"):
+            color = POS_GREEN
+            side_label = "MORE"
+        elif side in ("LESS", "UNDER"):
+            color = NEG_RED
+            side_label = "LESS"
+        else:
+            color = NEUTRAL_BLUE
+            side_label = "—"
+        hex_color = color.hexval()[2:]
+
+        # Rank chip — numbered tile with conviction-tier shading.
+        if idx <= 3:
+            chip_bg = "#11151c"
+        elif idx <= 6:
+            chip_bg = "#2b3340"
+        else:
+            chip_bg = "#6b7686"
+        rank_cell = Paragraph(
+            f"<font size='10' color='#ffffff' backColor='{chip_bg}'>"
+            f"&nbsp;&nbsp;<b>{idx:>2}</b>&nbsp;&nbsp;</font>",
+            styles["body"],
+        )
+
+        # Signal label: player on top, market+side below.
+        name = _short(str(r.get("player", "")) or "—", 28)
+        market = str(r.get("model", "")) or ""
+        signal_cell = Paragraph(
+            f"<font size='9.5' color='#11151c'><b>{name}</b></font><br/>"
+            f"<font size='7.5' color='#6b7686'>{market.upper()}  "
+            f"<font color='#{hex_color}'><b>{side_label}</b></font></font>",
+            styles["body"],
+        )
+
+        # Horizontal bar — drawn inside a tiny Drawing.
+        # Center-anchored: a vertical mid-axis splits MORE (right, green)
+        # from LESS (left, red), so direction reads at a glance.
+        bar_h = 9.0
+        half_w = bar_full_w / 2.0
+        fill_w = max(6.0, half_w * (abs_edge / max_abs_edge))
+        bar_drawing = Drawing(bar_full_w, bar_h + 4)
+        # Track (faint background spans full width)
+        bar_drawing.add(Rect(
+            0, 2, bar_full_w, bar_h,
+            fillColor=PANEL_BG, strokeColor=None,
+        ))
+        # Filled bar grows from the midline outward in the side's direction.
+        if edge_val >= 0:
+            bar_drawing.add(Rect(
+                half_w, 2, fill_w, bar_h,
+                fillColor=color, strokeColor=None,
+            ))
+        else:
+            bar_drawing.add(Rect(
+                half_w - fill_w, 2, fill_w, bar_h,
+                fillColor=color, strokeColor=None,
+            ))
+        # Center axis tick — thin dark line marking the zero point.
+        bar_drawing.add(Rect(
+            half_w - 0.4, 0, 0.8, bar_h + 4,
+            fillColor=INK_DARK, strokeColor=None,
+        ))
+
+        edge_cell = Paragraph(
+            f"<font size='10' color='#{hex_color}'><b>{_fmt_signed(edge_val, 2)}</b></font>",
+            styles["body"],
+        )
+
+        # Books pill — always solid INK_DARK chip, opacity-tier in the body
+        # rather than the background, so the badge stays visible against
+        # zebra-striped rows.
+        if books_n >= max(6, max_books - 1):
+            pill_bg = "#11151c"
+            pill_fg = "#ffffff"
+        elif books_n >= 4:
+            pill_bg = "#3a4250"
+            pill_fg = "#ffffff"
+        else:
+            pill_bg = "#a8b0bd"
+            pill_fg = "#ffffff"
+        books_cell = Paragraph(
+            f"<font size='8' color='{pill_fg}' backColor='{pill_bg}'>"
+            f"&nbsp;&nbsp;<b>{books_n}</b>&nbsp;&nbsp;</font>",
+            styles["body"],
+        )
+
+        rows.append([rank_cell, signal_cell, bar_drawing, edge_cell, books_cell])
+
+    table = Table(
+        rows,
+        colWidths=[
+            0.55 * inch,
+            2.10 * inch,
+            bar_full_w,
+            0.55 * inch,
+            0.55 * inch,
+        ],
+    )
+    style = [
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (0, -1), "CENTER"),
+        ("ALIGN", (3, 0), (3, -1), "RIGHT"),
+        ("ALIGN", (4, 0), (4, -1), "CENTER"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        # Header row
+        ("LINEBELOW", (0, 0), (-1, 0), 0.5, PANEL_BORDER),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.white),
+    ]
+    # Zebra striping for body rows
+    for ri in range(1, len(rows)):
+        if ri % 2 == 0:
+            style.append(("BACKGROUND", (0, ri), (-1, ri), PANEL_BG))
+    style.extend(extra)
+    table.setStyle(TableStyle(style))
+    return [title, Spacer(1, 6), table]
+
+
+def _edge_confidence_scatter(
+    edge_df: pd.DataFrame,
+) -> tuple[Drawing, list[tuple[int, str, colors.Color]]] | None:
+    """Scatter of |edge| vs market depth (book count).
+
+    Returns the Drawing plus a numbered legend ``(idx, label, color)`` so a
+    caller can render the player names below the plot — the chart itself only
+    shows numbered markers, which keeps every label collision-free no matter
+    how many props share the same coordinates.
+    """
+    if not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
+        return None
+    if not {"edge", "books"}.issubset(edge_df.columns):
+        return None
+    df = edge_df.copy()
+    df["edge_n"] = pd.to_numeric(df["edge"], errors="coerce")
+    df["books_n"] = pd.to_numeric(df["books"], errors="coerce")
+    df = df.dropna(subset=["edge_n", "books_n"])
+    if df.empty:
+        return None
+    df["abs_edge"] = df["edge_n"].abs()
+    df = df.sort_values("abs_edge", ascending=False).reset_index(drop=True)
+
+    width = 7.0 * inch
+    height = 2.4 * inch
+    drawing = Drawing(width, height)
+    drawing.add(String(
+        0, height - 13, "Edge size vs market depth",
+        fontName=_BOLD_FONT, fontSize=10, fillColor=INK_DARK,
+    ))
+    drawing.add(String(
+        0, height - 25,
+        "Numbered markers map to the legend below — top-right = the highest-conviction zone.",
+        fontName=_BODY_FONT, fontSize=8, fillColor=INK_MUTED,
+    ))
+
+    plot_x = 0.6 * inch
+    plot_y = 0.7 * inch
+    plot_w = width - plot_x - 0.25 * inch
+    plot_h = height - 1.2 * inch
+
+    drawing.add(Rect(
+        plot_x, plot_y, plot_w, plot_h,
+        fillColor=PANEL_BG, strokeColor=PANEL_BORDER, strokeWidth=0.4,
+    ))
+
+    max_edge = max(float(df["abs_edge"].max()), 0.5)
+    max_books = max(float(df["books_n"].max()), 3.0)
+
+    # Quadrant guides at the midpoints
+    mid_x = plot_x + plot_w * 0.5
+    mid_y = plot_y + plot_h * 0.5
+    drawing.add(Line(
+        mid_x, plot_y, mid_x, plot_y + plot_h,
+        strokeColor=INK_FAINT, strokeWidth=0.4, strokeDashArray=[2, 3],
+    ))
+    drawing.add(Line(
+        plot_x, mid_y, plot_x + plot_w, mid_y,
+        strokeColor=INK_FAINT, strokeWidth=0.4, strokeDashArray=[2, 3],
+    ))
+    drawing.add(String(
+        plot_x + 6, plot_y + plot_h - 11, "HIGH CONVICTION ZONE >",
+        fontName=_BOLD_FONT, fontSize=6.5, fillColor=INK_FAINT,
+        textAnchor="start",
+    ))
+
+    # Axis labels
+    drawing.add(String(
+        plot_x + plot_w / 2, 8, "|EDGE|  >",
+        fontName=_BOLD_FONT, fontSize=7, fillColor=INK_MUTED,
+        textAnchor="middle",
+    ))
+    drawing.add(String(
+        10, plot_y + plot_h / 2, "BOOKS",
+        fontName=_BOLD_FONT, fontSize=7, fillColor=INK_MUTED,
+        textAnchor="middle",
+    ))
+
+    # Axis ticks (a couple of reference values)
+    for tick_frac in (0.0, 0.5, 1.0):
+        tx = plot_x + plot_w * tick_frac
+        drawing.add(String(
+            tx, plot_y - 10, f"{max_edge * tick_frac:.1f}",
+            fontName=_BODY_FONT, fontSize=6.5, fillColor=INK_MUTED,
+            textAnchor="middle",
+        ))
+        ty = plot_y + plot_h * tick_frac
+        drawing.add(String(
+            plot_x - 4, ty - 2, f"{int(round(max_books * tick_frac))}",
+            fontName=_BODY_FONT, fontSize=6.5, fillColor=INK_MUTED,
+            textAnchor="end",
+        ))
+
+    side_col = "side" if "side" in df.columns else ("call" if "call" in df.columns else None)
+    legend: list[tuple[int, str, colors.Color]] = []
+
+    # Plot every row as a numbered marker; only the top 8 get listed in the
+    # legend so we don't blow the page out.
+    legend_limit = 8
+    placed: list[tuple[float, float, float]] = []  # (x, y, radius)
+    for i, r in df.iterrows():
+        idx = i + 1
+        ax = plot_x + (float(r["abs_edge"]) / max_edge) * plot_w
+        ay = plot_y + (float(r["books_n"]) / max_books) * plot_h
+        side = ""
+        if side_col and pd.notna(r.get(side_col)):
+            side = str(r[side_col]).upper().split()[0]
+        if side in ("MORE", "OVER"):
+            color = POS_GREEN
+        elif side in ("LESS", "UNDER"):
+            color = NEG_RED
+        else:
+            color = NEUTRAL_BLUE
+
+        radius = 7.5 if idx <= legend_limit else 4.0
+
+        # Anti-collision: nudge marker if it would overlap a placed one.
+        # Spiral outward in a small jitter pattern until clear or capped.
+        nudge_steps = 0
+        max_nudges = 24
+        spiral = [
+            (0, 1), (1, 0), (0, -1), (-1, 0),
+            (1, 1), (-1, 1), (-1, -1), (1, -1),
+        ]
+        while nudge_steps < max_nudges:
+            collides = False
+            for (px, py, pr) in placed:
+                min_d = pr + radius + 1.5
+                if (ax - px) ** 2 + (ay - py) ** 2 < min_d * min_d:
+                    collides = True
+                    break
+            if not collides:
+                break
+            dx, dy = spiral[nudge_steps % len(spiral)]
+            step = (radius * 1.6) * (1 + nudge_steps // len(spiral))
+            ax = max(plot_x + radius, min(plot_x + plot_w - radius, ax + dx * step))
+            ay = max(plot_y + radius, min(plot_y + plot_h - radius, ay + dy * step))
+            nudge_steps += 1
+        placed.append((ax, ay, radius))
+
+        drawing.add(Circle(
+            ax, ay, radius,
+            fillColor=color, strokeColor=WHITE, strokeWidth=0.8,
+        ))
+        if idx <= legend_limit:
+            drawing.add(String(
+                ax, ay - 2.6, str(idx),
+                fontName=_BOLD_FONT, fontSize=7.5, fillColor=WHITE,
+                textAnchor="middle",
+            ))
+            name = str(r.get("player", "")) or "—"
+            market = str(r.get("model", "")) or ""
+            label = f"{name}  │  {market}" if market else name
+            legend.append((idx, label, color))
+
+    return drawing, legend
+
+
+def _edge_confidence_legend(
+    legend: list[tuple[int, str, colors.Color]],
+    styles: dict,
+) -> Table | None:
+    """Render the numbered scatter legend as a clean two-column grid."""
+    if not legend:
+        return None
+    # Lay out as two side-by-side columns of items.
+    half = (len(legend) + 1) // 2
+    col_a = legend[:half]
+    col_b = legend[half:]
+
+    def _row(item: tuple[int, str, colors.Color]) -> Paragraph:
+        idx, label, color = item
+        hex_str = color.hexval()[2:] if hasattr(color, "hexval") else "1f9d6c"
+        return Paragraph(
+            f"<font size='8' color='#ffffff' backColor='#{hex_str}'>"
+            f"&nbsp;<b>{idx:>2}</b>&nbsp;</font>"
+            f"&nbsp;&nbsp;<font size='8.5' color='#11151c'>{label}</font>",
+            styles["body"],
+        )
+
+    n_rows = max(len(col_a), len(col_b))
+    rows: list[list[Any]] = []
+    for i in range(n_rows):
+        left = _row(col_a[i]) if i < len(col_a) else Paragraph("", styles["body"])
+        right = _row(col_b[i]) if i < len(col_b) else Paragraph("", styles["body"])
+        rows.append([left, right])
+
+    table = Table(rows, colWidths=[3.5 * inch, 3.5 * inch])
+    table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    return table
+
+
+def _how_to_read_strip(styles: dict) -> Table:
+    """Inline legend explaining the visual grammar of the report."""
+    items = [
+        (POS_GREEN, "MORE / OVER lean"),
+        (NEG_RED, "LESS / UNDER lean"),
+        (BRAND_ORANGE, "Model projection"),
+        (INK_FAINT, "Posted market line"),
+        (NEUTRAL_BLUE, "Neutral signal"),
+    ]
+    cells: list = []
+    for color, label in items:
+        swatch = Table([[Paragraph(
+            f"<font size='8' color='#11151c'>{label}</font>", styles["body"],
+        )]], colWidths=[1.35 * inch])
+        swatch.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), PANEL_BG),
+            ("LINEBEFORE", (0, 0), (0, -1), 3, color),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        cells.append(swatch)
+    head = Paragraph(
+        "<font size='7' color='#6b7686'><b>HOW TO READ THIS REPORT</b></font>",
+        styles["muted"],
+    )
+    legend = Table([cells], colWidths=[1.4 * inch] * len(items))
+    legend.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    return Table([[head], [legend]], colWidths=[7.0 * inch])
+
+
 def _analytics_visuals_flowables(
     *,
     metrics: pd.DataFrame | None,
     edge_df: pd.DataFrame | None,
     styles: dict,
 ) -> list:
-    flow: list = _section_header("Analytics visuals", "Section 02A", styles)
+    flow: list = _section_header("Analytics visuals", "Section 02A", styles, anchor="sec-analytics")
 
     rendered = False
     if isinstance(metrics, pd.DataFrame) and not metrics.empty:
@@ -841,6 +1545,12 @@ def _analytics_visuals_flowables(
             rendered = True
 
     if isinstance(edge_df, pd.DataFrame) and not edge_df.empty:
+        leaderboard = _conviction_leaderboard(edge_df, styles)
+        if leaderboard:
+            flow.extend(leaderboard)
+            flow.append(Spacer(1, 12))
+            rendered = True
+
         chart = _diverging_edge_chart(edge_df)
         if chart is not None:
             flow.append(chart)
@@ -868,6 +1578,513 @@ def _analytics_visuals_flowables(
     return flow
 
 
+# ── Per-player visual building blocks ───────────────────────────────────────
+def _player_form_sparklines(
+    games: pd.DataFrame | None,
+    *,
+    last_n: int = 12,
+    width: float = 7.0 * inch,
+    height: float = 1.35 * inch,
+) -> Drawing | None:
+    """Three small sparklines (PTS / REB / AST) of the player's recent games.
+
+    ``games`` is expected to have columns ``game_date``, ``pts``, ``reb``,
+    ``ast``. Missing columns are skipped. Returns ``None`` if there is not
+    enough data to plot.
+    """
+    if not isinstance(games, pd.DataFrame) or games.empty:
+        return None
+
+    df = games.copy()
+    if "game_date" in df.columns:
+        df["game_date"] = pd.to_datetime(df["game_date"], errors="coerce")
+        df = df.dropna(subset=["game_date"]).sort_values("game_date")
+    df = df.tail(last_n)
+    if len(df) < 3:
+        return None
+
+    panels: list[tuple[str, str, colors.Color]] = [
+        ("PTS", "pts", BRAND_ORANGE),
+        ("REB", "reb", NEUTRAL_BLUE),
+        ("AST", "ast", POS_GREEN),
+    ]
+    panels = [p for p in panels if p[1] in df.columns]
+    if not panels:
+        return None
+
+    drawing = Drawing(width, height)
+    drawing.add(String(
+        0, height - 12, "Recent form  │  last games",
+        fontName=_BOLD_FONT, fontSize=9.5, fillColor=INK_DARK,
+    ))
+    drawing.add(String(
+        0, height - 24, "Trend lines    The dot marks the most recent game.",
+        fontName=_BODY_FONT, fontSize=7.5, fillColor=INK_MUTED,
+    ))
+
+    panel_w = (width - (len(panels) - 1) * 10) / len(panels)
+    plot_y = 0.18 * inch
+    plot_h = height - 0.85 * inch
+
+    for i, (label, col, color) in enumerate(panels):
+        series = pd.to_numeric(df[col], errors="coerce").dropna().tolist()
+        if len(series) < 2:
+            continue
+        x0 = i * (panel_w + 10)
+        # Panel background
+        drawing.add(Rect(
+            x0, plot_y, panel_w, plot_h,
+            fillColor=PANEL_BG, strokeColor=PANEL_BORDER, strokeWidth=0.4,
+        ))
+        # Label + latest value
+        drawing.add(String(
+            x0 + 6, plot_y + plot_h - 11,
+            f"{label}",
+            fontName=_BOLD_FONT, fontSize=8, fillColor=INK_MUTED,
+        ))
+        avg = sum(series) / len(series)
+        last = series[-1]
+        drawing.add(String(
+            x0 + panel_w - 6, plot_y + plot_h - 11,
+            f"avg {avg:.1f}    last {last:.1f}",
+            fontName=_BODY_FONT, fontSize=7, fillColor=INK_MUTED,
+            textAnchor="end",
+        ))
+
+        plot_x0 = x0 + 8
+        plot_x1 = x0 + panel_w - 8
+        plot_y0 = plot_y + 6
+        plot_y1 = plot_y + plot_h - 18
+        lo = min(series)
+        hi = max(series)
+        rng = (hi - lo) or 1.0
+        n = len(series)
+        pts = []
+        for j, v in enumerate(series):
+            px = plot_x0 + (plot_x1 - plot_x0) * (j / max(n - 1, 1))
+            py = plot_y0 + (plot_y1 - plot_y0) * ((v - lo) / rng)
+            pts.append((px, py))
+
+        # Average reference line
+        avg_y = plot_y0 + (plot_y1 - plot_y0) * ((avg - lo) / rng)
+        drawing.add(Line(
+            plot_x0, avg_y, plot_x1, avg_y,
+            strokeColor=INK_FAINT, strokeWidth=0.4, strokeDashArray=[1.5, 2],
+        ))
+
+        # Trend line
+        for j in range(1, len(pts)):
+            drawing.add(Line(
+                pts[j - 1][0], pts[j - 1][1], pts[j][0], pts[j][1],
+                strokeColor=color, strokeWidth=1.4,
+            ))
+        # Dot on most recent point
+        drawing.add(Circle(
+            pts[-1][0], pts[-1][1], 2.6,
+            fillColor=color, strokeColor=WHITE, strokeWidth=0.8,
+        ))
+
+    return drawing
+
+
+def _player_hit_rate_donut(
+    history_df: pd.DataFrame | None,
+    *,
+    diameter: float = 1.25 * inch,
+) -> Drawing | None:
+    """Donut chart showing Over / Under / Push split from resolved history."""
+    if not isinstance(history_df, pd.DataFrame) or history_df.empty:
+        return None
+    if "result" not in history_df.columns:
+        return None
+    counts = (
+        history_df["result"].astype(str).str.lower().value_counts()
+        if not history_df.empty else pd.Series(dtype=int)
+    )
+    overs = int(counts.get("over", 0))
+    unders = int(counts.get("under", 0))
+    pushes = int(counts.get("push", 0))
+    total = overs + unders + pushes
+    if total == 0:
+        return None
+
+    width = 2.75 * inch
+    height = 1.5 * inch
+    drawing = Drawing(width, height)
+    cx = 0.78 * inch
+    cy = height / 2
+    r_outer = diameter / 2
+    r_inner = r_outer * 0.58
+
+    # Render donut as concentric arcs using thin Lines (ReportLab Wedge would
+    # also work but Drawing keeps deps minimal).
+    import math
+    segments = [
+        (overs, POS_GREEN),
+        (unders, NEG_RED),
+        (pushes, INK_FAINT),
+    ]
+    angle = -math.pi / 2  # start at top
+    step_n = 64
+    for count, color in segments:
+        if count <= 0:
+            continue
+        sweep = (count / total) * 2 * math.pi
+        a = angle
+        for s in range(step_n):
+            t0 = a + (sweep * s / step_n)
+            t1 = a + (sweep * (s + 1) / step_n)
+            x0o = cx + r_outer * math.cos(t0)
+            y0o = cy + r_outer * math.sin(t0)
+            x1o = cx + r_outer * math.cos(t1)
+            y1o = cy + r_outer * math.sin(t1)
+            x0i = cx + r_inner * math.cos(t0)
+            y0i = cy + r_inner * math.sin(t0)
+            x1i = cx + r_inner * math.cos(t1)
+            y1i = cy + r_inner * math.sin(t1)
+            from reportlab.graphics.shapes import Polygon
+            drawing.add(Polygon(
+                points=[x0o, y0o, x1o, y1o, x1i, y1i, x0i, y0i],
+                fillColor=color, strokeColor=color, strokeWidth=0.2,
+            ))
+        angle += sweep
+
+    # Center text — Over hit rate
+    over_pct = overs / max(overs + unders, 1) * 100
+    drawing.add(String(
+        cx, cy + 2, f"{over_pct:.0f}%",
+        fontName=_BOLD_FONT, fontSize=14, fillColor=INK_DARK,
+        textAnchor="middle",
+    ))
+    drawing.add(String(
+        cx, cy - 12, "OVER RATE",
+        fontName=_BOLD_FONT, fontSize=6.5, fillColor=INK_MUTED,
+        textAnchor="middle",
+    ))
+
+    # Legend
+    legend_x = cx + r_outer + 0.22 * inch
+    items = [
+        (POS_GREEN, f"Over  {overs}"),
+        (NEG_RED, f"Under  {unders}"),
+    ]
+    if pushes:
+        items.append((INK_FAINT, f"Push  {pushes}"))
+    for j, (clr, lbl) in enumerate(items):
+        ly = cy + 16 - j * 14
+        drawing.add(Rect(
+            legend_x, ly - 4, 8, 8,
+            fillColor=clr, strokeColor=clr,
+        ))
+        drawing.add(String(
+            legend_x + 13, ly - 1, lbl,
+            fontName=_BODY_FONT, fontSize=8, fillColor=INK_BODY,
+        ))
+    return drawing
+
+
+def _risk_chips(
+    *,
+    player: str,
+    edge_df: pd.DataFrame | None,
+    games: pd.DataFrame | None,
+    recent_form: dict[str, float] | None,
+    history_df: pd.DataFrame | None,
+) -> list[tuple[str, colors.Color]]:
+    """Compute small risk / signal chips shown above the per-player rationale."""
+    chips: list[tuple[str, colors.Color]] = []
+
+    # Back-to-back: most recent game within ≤1 day of the prior.
+    if isinstance(games, pd.DataFrame) and "game_date" in games.columns and len(games) >= 2:
+        gd = pd.to_datetime(games["game_date"], errors="coerce").dropna().sort_values()
+        if len(gd) >= 2:
+            gap = (gd.iloc[-1] - gd.iloc[-2]).days
+            if 0 <= gap <= 1:
+                chips.append(("BACK-TO-BACK", NEG_RED))
+            elif gap >= 4:
+                chips.append((f"{int(gap)}-DAY REST", POS_GREEN))
+
+    # Books depth check — thin markets are riskier.
+    if isinstance(edge_df, pd.DataFrame) and not edge_df.empty and "books" in edge_df.columns:
+        sub = edge_df[edge_df.get("player") == player]
+        if not sub.empty:
+            books = pd.to_numeric(sub["books"], errors="coerce").dropna()
+            if not books.empty:
+                if books.max() <= 3:
+                    chips.append(("THIN MARKET", GOLD))
+                elif books.min() >= 6:
+                    chips.append(("DEEP MARKET", NEUTRAL_BLUE))
+
+    # Minutes volatility / availability proxy.
+    if isinstance(games, pd.DataFrame) and "min" in games.columns:
+        m = pd.to_numeric(games["min"], errors="coerce").dropna().tail(5)
+        if not m.empty and m.mean() < 22:
+            chips.append(("LIMITED MIN", GOLD))
+
+    # Form vs season: recent form spike or slump on points.
+    if isinstance(games, pd.DataFrame) and "pts" in games.columns and recent_form:
+        season = pd.to_numeric(games["pts"], errors="coerce").dropna()
+        recent = recent_form.get("pts")
+        if recent is not None and len(season) >= 10:
+            base = float(season.tail(min(len(season), 30)).mean())
+            if base > 0:
+                delta = recent - base
+                if delta >= max(2.0, base * 0.10):
+                    chips.append(("HOT FORM", POS_GREEN))
+                elif delta <= -max(2.0, base * 0.10):
+                    chips.append(("COLD FORM", NEG_RED))
+
+    # Historical Over/Under bias.
+    if isinstance(history_df, pd.DataFrame) and not history_df.empty and "result" in history_df.columns:
+        cnt = history_df["result"].astype(str).str.lower().value_counts()
+        overs = int(cnt.get("over", 0))
+        unders = int(cnt.get("under", 0))
+        total = overs + unders
+        if total >= 4:
+            rate = overs / total
+            if rate >= 0.65:
+                chips.append((f"OVER-BIASED  {rate*100:.0f}%", POS_GREEN))
+            elif rate <= 0.35:
+                chips.append((f"UNDER-BIASED  {(1-rate)*100:.0f}%", NEG_RED))
+
+    return chips
+
+
+def _risk_chip_strip(chips: list[tuple[str, colors.Color]], styles: dict) -> Table | None:
+    if not chips:
+        return None
+    cells: list = []
+    for label, color in chips[:6]:
+        hex_str = color.hexval()[2:] if hasattr(color, "hexval") else "11151c"
+        para = Paragraph(
+            f"<font size='7' color='#ffffff'><b>{label}</b></font>",
+            ParagraphStyle(
+                "chip", parent=styles["body"], leading=10, alignment=TA_CENTER,
+            ),
+        )
+        inner = Table([[para]], colWidths=[1.05 * inch])
+        inner.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), color),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        cells.append(inner)
+    while len(cells) < 6:
+        cells.append(Paragraph("", styles["body"]))
+    strip = Table([cells], colWidths=[1.13 * inch] * 6)
+    strip.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    return strip
+
+
+def _signal_summary_panel(
+    *,
+    player: str,
+    edge_df: pd.DataFrame | None,
+    recent_form: dict[str, float] | None,
+    history_df: pd.DataFrame | None,
+    styles: dict,
+) -> Table | None:
+    """Compact 'Why this signal' panel: top edge + form anchor + hit-rate."""
+    if not (isinstance(edge_df, pd.DataFrame) and not edge_df.empty):
+        return None
+    sub = edge_df[edge_df.get("player") == player].copy()
+    if sub.empty or "edge" not in sub.columns:
+        return None
+    sub["abs_edge"] = pd.to_numeric(sub["edge"], errors="coerce").abs()
+    sub = sub.sort_values("abs_edge", ascending=False)
+    r = sub.iloc[0]
+
+    edge_val = pd.to_numeric(r.get("edge"), errors="coerce")
+    side = str(r.get("call") or r.get("side") or "").upper().split()[0] if (r.get("call") or r.get("side")) else (
+        "MORE" if pd.notna(edge_val) and edge_val > 0 else "LESS"
+    )
+    grade, grade_color = _signal_grade(abs(float(edge_val)) if pd.notna(edge_val) else 0.0)
+    side_color = POS_GREEN if side in ("MORE", "OVER") else NEG_RED
+
+    market = str(r.get("model", "—"))
+    line_v = r.get("posted line", r.get("line"))
+    proj = r.get("model prediction", r.get("projection"))
+    books = r.get("books")
+
+    # Form anchor for the relevant stat
+    stat_key = {
+        "points": "pts", "rebounds": "reb", "assists": "ast",
+        "pra": "pra", "threepm": "fg3m", "fantasy_score": "fantasy_score",
+    }.get(market.lower(), None)
+    form_val = (recent_form or {}).get(stat_key) if stat_key else None
+
+    # Recent O/U record on this market specifically
+    over_rec = "—"
+    if isinstance(history_df, pd.DataFrame) and not history_df.empty and "metric" in history_df.columns:
+        m = history_df[history_df["metric"].astype(str).str.lower() == market.lower()]
+        if not m.empty and "result" in m.columns:
+            cnt = m["result"].astype(str).str.lower().value_counts()
+            o = int(cnt.get("over", 0))
+            u = int(cnt.get("under", 0))
+            if o + u > 0:
+                over_rec = f"{o}-{u}"
+
+    grade_hex = grade_color.hexval()[2:] if hasattr(grade_color, "hexval") else "ff7a18"
+    side_hex = side_color.hexval()[2:] if hasattr(side_color, "hexval") else "1f9d6c"
+
+    head = Paragraph(
+        f"<font size='7.5' color='#cc5a00'><b>WHY THIS SIGNAL "
+        f"&nbsp;│&nbsp; {player.upper()}</b></font><br/>"
+        f"<font size='13' color='#11151c'><b>{_short(market.title(), 24)}</b></font> "
+        f"<font size='9' color='#6b7686'>&nbsp;&nbsp;grade </font>"
+        f"<font size='9' color='#{grade_hex}'><b>{grade.upper()}</b></font>",
+        styles["body"],
+    )
+    book_names_val = r.get("book_names") if "book_names" in r else None
+    books_label = _abbrev_books(book_names_val)
+    if books_label == "—" and pd.notna(books):
+        books_label = f"{int(books)} books"
+    rows = [
+        ("Lean", f"<font color='#{side_hex}'><b>{side}</b></font>"),
+        ("Edge", f"<b>{_fmt_signed(edge_val, 2)}</b>"),
+        ("Posted line", _fmt(line_v, 1)),
+        ("Model proj.", _fmt(proj, 2)),
+        ("Recent form", _fmt(form_val, 1) if form_val is not None else "—"),
+        ("Books", books_label),
+        (f"O/U on {market.lower()}", over_rec),
+    ]
+    body_cells: list[list] = [[
+        Paragraph(
+            f"<font size='7' color='#6b7686'>{lbl.upper()}</font>",
+            styles["muted"],
+        ),
+        Paragraph(
+            f"<font size='9.5' color='#11151c'>{val}</font>",
+            styles["body"],
+        ),
+    ] for lbl, val in rows]
+    body = Table(body_cells, colWidths=[1.45 * inch, 2.45 * inch])
+    body.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("INNERGRID", (0, 0), (-1, -1), 0.25, PANEL_BORDER),
+        ("BOX", (0, 0), (-1, -1), 0.25, PANEL_BORDER),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+
+    panel = Table([[head], [body]], colWidths=[3.95 * inch])
+    panel.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, 0), BRAND_ORANGE_SOFT),
+        ("LINEBELOW", (0, 0), (0, 0), 1.2, BRAND_ORANGE),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (0, 0), 6),
+        ("BOTTOMPADDING", (0, 0), (0, 0), 6),
+        ("TOPPADDING", (0, 1), (-1, 1), 6),
+        ("BOTTOMPADDING", (0, 1), (-1, 1), 4),
+    ]))
+    return panel
+
+
+def _player_history_table(
+    player: str,
+    history_df: pd.DataFrame | None,
+    styles: dict,
+    *,
+    max_rows: int = 10,
+) -> list:
+    """Render a 'historical lines vs actual outcomes' table for a player.
+
+    Expected ``history_df`` columns: ``game_date``, ``metric`` (e.g. 'points'),
+    ``line``, ``actual``, ``result`` (Over/Under/Push), ``margin``. Only the
+    most recent ``max_rows`` games (across markets) are shown to keep the
+    PDF dense without overflowing.
+    """
+    if history_df is None or not isinstance(history_df, pd.DataFrame) or history_df.empty:
+        return []
+
+    df = history_df.copy()
+    if "game_date" in df.columns:
+        df["game_date"] = pd.to_datetime(df["game_date"], errors="coerce")
+        df = df.sort_values("game_date", ascending=False)
+    df = df.head(max_rows)
+    if df.empty:
+        return []
+
+    rows: list[list[Any]] = [
+        ["Date", "Market", "Line", "Actual", "Margin", "Result"]
+    ]
+    style_extra: list = []
+    hits = 0
+    losses = 0
+    for i, (_, r) in enumerate(df.iterrows(), start=1):
+        gd = r.get("game_date")
+        date_str = gd.strftime("%b %d") if pd.notna(gd) else "—"
+        metric = str(r.get("metric", "—")).title()
+        line = _fmt(r.get("line"), 1)
+        actual = _fmt(r.get("actual"), 1)
+        margin = _fmt_signed(r.get("margin"), 1)
+        result = str(r.get("result", "")).title() or "—"
+        rows.append([date_str, metric, line, actual, margin, result])
+        if result.lower() == "over":
+            hits += 1
+            style_extra.append(("TEXTCOLOR", (5, i), (5, i), POS_GREEN))
+            style_extra.append(("FONTNAME", (5, i), (5, i), _BOLD_FONT))
+            style_extra.append(("TEXTCOLOR", (4, i), (4, i), POS_GREEN))
+        elif result.lower() == "under":
+            losses += 1
+            style_extra.append(("TEXTCOLOR", (5, i), (5, i), NEG_RED))
+            style_extra.append(("FONTNAME", (5, i), (5, i), _BOLD_FONT))
+            style_extra.append(("TEXTCOLOR", (4, i), (4, i), NEG_RED))
+        else:
+            style_extra.append(("TEXTCOLOR", (5, i), (5, i), INK_MUTED))
+
+    table = _styled_table(
+        rows,
+        col_widths=[0.7 * inch, 1.1 * inch, 0.7 * inch, 0.75 * inch,
+                    0.85 * inch, 0.7 * inch],
+        align_right_cols=[2, 3, 4],
+        header_bg=NEUTRAL_BLUE,
+    )
+    table.setStyle(TableStyle(style_extra))
+
+    total_resolved = hits + losses
+    summary_bits: list[str] = []
+    if total_resolved:
+        rate = hits / total_resolved * 100.0
+        summary_bits.append(
+            f"Recent Over/Under record: <b>{hits}-{losses}</b> "
+            f"({rate:.0f}% Over)"
+        )
+    if "margin" in df.columns:
+        margins = pd.to_numeric(df["margin"], errors="coerce").dropna()
+        if not margins.empty:
+            summary_bits.append(
+                f"Avg margin vs line: <b>{margins.mean():+.2f}</b>"
+            )
+    summary = "   │   ".join(summary_bits) if summary_bits else (
+        "Resolved outcomes unavailable for this window."
+    )
+
+    return [
+        Spacer(1, 6),
+        Paragraph(
+            f"<font size='7.5' color='#cc5a00'><b>"
+            f"{player.upper()} &nbsp;│&nbsp; HISTORICAL LINES vs OUTCOMES"
+            f"</b></font>",
+            styles["body"],
+        ),
+        Paragraph(summary, styles["body"]),
+        Spacer(1, 3),
+        table,
+    ]
+
+
 def _styled_table(
     data: list[list[Any]],
     col_widths: list[float],
@@ -882,9 +2099,9 @@ def _styled_table(
     cmd = [
         ("BACKGROUND", (0, 0), (-1, 0), header_bg),
         ("TEXTCOLOR", (0, 0), (-1, 0), header_fg),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTNAME", (0, 0), (-1, 0), _BOLD_FONT),
         ("FONTSIZE", (0, 0), (-1, 0), 8.5),
-        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+        ("FONTNAME", (0, 1), (-1, -1), _BODY_FONT),
         ("FONTSIZE", (0, 1), (-1, -1), 8.5),
         ("TEXTCOLOR", (0, 1), (-1, -1), INK_BODY),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
@@ -963,7 +2180,7 @@ def _cover_flowables(
 
     flow: list = [
         Spacer(1, 1.4 * inch),
-        _para("HOOPLYTICS · ROSTER ANALYTICS", styles["cover_eyebrow"]),
+        _para("HOOPLYTICS  │  ROSTER ANALYTICS", styles["cover_eyebrow"]),
         _para("Tonight's Scouting Report.", styles["cover_title"]),
         _para(
             "Decoded edges, model leans, and the loudest signals from your "
@@ -973,10 +2190,10 @@ def _cover_flowables(
         Spacer(1, 0.5 * inch),
         tiles,
         Spacer(1, 0.35 * inch),
-        _para(f"Generated · {meta.generated_at}", styles["cover_tag"]),
-        _para(f"Seasons · {seasons_label}", styles["cover_tag"]),
+        _para(f"Generated  │  {meta.generated_at}", styles["cover_tag"]),
+        _para(f"Seasons  │  {seasons_label}", styles["cover_tag"]),
         _para(
-            "Prose · " + ("AI-augmented (OpenAI)" if meta.has_ai else "data-only"),
+            "Prose  │  " + ("AI-augmented (OpenAI)" if meta.has_ai else "data-only"),
             styles["cover_tag"],
         ),
     ]
@@ -998,6 +2215,233 @@ def _callout_box(text: str, styles: dict, *, accent: colors.Color = BRAND_ORANGE
     return t
 
 
+def _bottom_line_flowables(
+    *,
+    roster: dict[str, list[str]],
+    metrics: pd.DataFrame | None,
+    edge_df: pd.DataFrame | None,
+    styles: dict,
+) -> list:
+    """Bottom-line-up-front (BLUF) panel.
+
+    A scannable, hero-style verdict block that lands BEFORE the executive
+    summary so a reader knows the headline takeaway in three seconds:
+    - the loudest signal (top conviction play),
+    - which way the slate is leaning,
+    - how much to trust the models tonight,
+    - and a watch-out flagging the noisiest market.
+    """
+    # ── Compute the four pillar facts ─────────────────────────────────────
+    top_label = "No live signals yet"
+    top_detail = "Connect odds + run the model to populate the leaderboard."
+    top_color = INK_FAINT
+    top_edge_str = "—"
+
+    lean_label = "BALANCED"
+    lean_detail = "No directional pressure across the slate."
+    lean_color = NEUTRAL_BLUE
+
+    conf_label = "—"
+    conf_detail = "Model metrics unavailable."
+    conf_color = INK_FAINT
+
+    risk_label: str | None = None
+    risk_detail = ""
+    risk_color = NEG_RED
+
+    if isinstance(edge_df, pd.DataFrame) and not edge_df.empty and "edge" in edge_df.columns:
+        df = edge_df.copy()
+        df["edge_n"] = pd.to_numeric(df["edge"], errors="coerce")
+        df["books_n"] = pd.to_numeric(df.get("books"), errors="coerce").fillna(1)
+        df = df.dropna(subset=["edge_n"])
+        if not df.empty:
+            df["abs_edge"] = df["edge_n"].abs()
+            df["conviction"] = df["abs_edge"] * df["books_n"].clip(lower=1).pow(0.5)
+            top = df.sort_values("conviction", ascending=False).iloc[0]
+            top_edge_val = float(top["edge_n"])
+            top_side = str(top.get("side") or top.get("call") or "").upper().split()[0]
+            if not top_side:
+                top_side = "MORE" if top_edge_val > 0 else "LESS"
+            top_color = POS_GREEN if top_side in ("MORE", "OVER") else NEG_RED
+            top_label = _short(str(top.get("player", "—")), 22).upper()
+            top_detail = (
+                f"{str(top.get('model', '')).upper()} {top_side} "
+                f"{_fmt_signed(top_edge_val, 2)} across "
+                f"{int(top['books_n'])} books."
+            )
+            top_edge_str = _fmt_signed(top_edge_val, 2)
+
+            # Slate posture
+            label, pos, neg = _slate_lean_label(edge_df)
+            total = max(pos + neg, 1)
+            if "MORE" in label:
+                lean_label = "MORE-LEANING"
+                lean_color = POS_GREEN
+                lean_detail = f"{pos} of {total} live edges point OVER the line."
+            elif "LESS" in label:
+                lean_label = "LESS-LEANING"
+                lean_color = NEG_RED
+                lean_detail = f"{neg} of {total} live edges point UNDER the line."
+            else:
+                lean_detail = f"{pos} OVER vs {neg} UNDER — no clear directional edge."
+
+            # Risk: flag the loudest contrarian edge with thin market depth.
+            shallow = df[df["books_n"] <= 4].sort_values("abs_edge", ascending=False)
+            if not shallow.empty:
+                r = shallow.iloc[0]
+                risk_label = "WATCH OUT"
+                risk_detail = (
+                    f"{_short(str(r.get('player', '—')), 22)} "
+                    f"{str(r.get('model', '')).upper()} edge "
+                    f"{_fmt_signed(float(r['edge_n']), 2)} sits on only "
+                    f"{int(r['books_n'])} book(s) — thin liquidity, "
+                    f"treat as a tell, not a thesis."
+                )
+
+    # Model confidence
+    if isinstance(metrics, pd.DataFrame) and not metrics.empty:
+        r2_col = next((c for c in ("R²", "r2", "R2") if c in metrics.columns), None)
+        if r2_col is not None:
+            r2 = pd.to_numeric(metrics[r2_col], errors="coerce").dropna()
+            if not r2.empty:
+                med = float(r2.median())
+                if med >= 0.50:
+                    conf_label = f"STRONG · {med:.2f}"
+                    conf_color = POS_GREEN
+                    conf_detail = "Model fit is solid — trust the projections."
+                elif med >= 0.30:
+                    conf_label = f"MIXED · {med:.2f}"
+                    conf_color = GOLD
+                    conf_detail = "Moderate fit — combine with context, not blindly."
+                else:
+                    conf_label = f"NOISY · {med:.2f}"
+                    conf_color = NEG_RED
+                    conf_detail = "Low fit tonight — small edges may be noise."
+
+    # ── Headline strip (dark band) ────────────────────────────────────────
+    eyebrow = Paragraph(
+        "<font size='8' color='#ff7a18'><b>BOTTOM LINE UP FRONT</b></font>",
+        styles["body"],
+    )
+    title_para = Paragraph(
+        f"<font size='16' color='#ffffff'><b>{top_label}</b></font>",
+        styles["body"],
+    )
+    detail_para = Paragraph(
+        f"<font size='10' color='#e1e4ea'>{top_detail}</font>",
+        styles["body"],
+    )
+    left_block = Table(
+        [[eyebrow], [title_para], [detail_para]],
+        colWidths=[5.0 * inch],
+    )
+    left_block.setStyle(TableStyle([
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (0, 0), 4),
+        ("BOTTOMPADDING", (0, 1), (0, 1), 4),
+        ("BOTTOMPADDING", (0, 2), (0, 2), 0),
+    ]))
+
+    chip_eyebrow = Paragraph(
+        "<font size='8' color='#9aa3b2'><b>TOP EDGE</b></font>",
+        styles["body"],
+    )
+    chip_value_color = top_color.hexval()[2:] if top_edge_str != "—" else "9aa3b2"
+    chip_value = Paragraph(
+        f"<font size='24' color='#{chip_value_color}'><b>{top_edge_str}</b></font>",
+        styles["body"],
+    )
+    edge_chip = Table(
+        [[chip_eyebrow], [chip_value]],
+        colWidths=[2.0 * inch],
+    )
+    edge_chip.setStyle(TableStyle([
+        ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (0, 0), 0),
+        ("BOTTOMPADDING", (0, 0), (0, 0), 6),
+        ("TOPPADDING", (0, 1), (0, 1), 0),
+        ("BOTTOMPADDING", (0, 1), (0, 1), 0),
+    ]))
+
+    headline = Table(
+        [[left_block, edge_chip]],
+        colWidths=[5.0 * inch, 2.0 * inch],
+    )
+    headline.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), INK_DARK),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 16),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 16),
+        ("TOPPADDING", (0, 0), (-1, -1), 14),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 14),
+    ]))
+
+    # ── Three insight tiles ───────────────────────────────────────────────
+    def _tile(eyebrow_text: str, label: str, detail: str, accent: colors.Color) -> Table:
+        accent_hex = accent.hexval()[2:]
+        body = Paragraph(
+            f"<font size='7' color='#9aa3b2'><b>{eyebrow_text}</b></font><br/>"
+            f"<font size='12' color='#{accent_hex}'><b>{label}</b></font><br/>"
+            f"<font size='8' color='#2b3340'>{detail}</font>",
+            styles["body"],
+        )
+        t = Table([[body]], colWidths=[2.30 * inch])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+            ("LINEABOVE", (0, 0), (-1, 0), 3, accent),
+            ("BOX", (0, 0), (-1, -1), 0.4, PANEL_BORDER),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 12),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+            ("TOPPADDING", (0, 0), (-1, -1), 10),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ]))
+        return t
+
+    tile_top = _tile("THE PLAY", top_label, top_detail, top_color)
+    tile_lean = _tile("SLATE POSTURE", lean_label, lean_detail, lean_color)
+    tile_conf = _tile("MODEL CONFIDENCE", conf_label, conf_detail, conf_color)
+
+    tiles = Table(
+        [[tile_top, tile_lean, tile_conf]],
+        colWidths=[2.34 * inch, 2.34 * inch, 2.34 * inch],
+    )
+    tiles.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
+
+    flow: list = [headline, Spacer(1, 8), tiles]
+
+    # ── Watch-out risk strip (only when we have a thin-market signal) ─────
+    if risk_label:
+        risk = Table([[Paragraph(
+            f"<font size='7.5' color='#d24545'><b>{risk_label}</b></font>&nbsp;&nbsp;"
+            f"<font size='9' color='#2b3340'>{risk_detail}</font>",
+            styles["body"],
+        )]], colWidths=[7.0 * inch])
+        risk.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fff5f5")),
+            ("LINEBEFORE", (0, 0), (0, -1), 3, risk_color),
+            ("LEFTPADDING", (0, 0), (-1, -1), 12),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ]))
+        flow.extend([Spacer(1, 8), risk])
+
+    flow.append(Spacer(1, 14))
+    return flow
+
+
 def _executive_summary_flowables(
     *,
     roster: dict[str, list[str]],
@@ -1006,7 +2450,7 @@ def _executive_summary_flowables(
     ai_sections: dict[str, Any] | None,
     styles: dict,
 ) -> list:
-    flow: list = _section_header("Executive summary", "Section 01", styles)
+    flow: list = _section_header("Executive summary", "Section 01", styles, anchor="sec-exec")
     flow.append(_callout_box(
         _deterministic_summary_text(roster=roster, metrics=metrics, edge_df=edge_df),
         styles,
@@ -1052,7 +2496,7 @@ def _spotlight_card_flowable(
                      fillColor=grade_color, strokeColor=WHITE, strokeWidth=1))
     badge.add(String(
         badge_w / 2, badge_w / 2 - 4, f"#{rank}",
-        fontName="Helvetica-Bold", fontSize=10, fillColor=WHITE,
+        fontName=_BOLD_FONT, fontSize=10, fillColor=WHITE,
         textAnchor="middle",
     ))
 
@@ -1064,10 +2508,10 @@ def _spotlight_card_flowable(
             f"<br/>"
             f"<font size='8.5' color='#6b7686'>LEAN</font> "
             f"<font size='10' color='{accent_hex}'><b>{side}</b></font>"
-            f"  ·  <font size='8.5' color='#6b7686'>EDGE</font> "
+            f"  │  <font size='8.5' color='#6b7686'>EDGE</font> "
             f"<font size='10' color='{accent_hex}'><b>{_fmt_signed(edge_val, 2)}</b></font><br/>"
             f"<font size='8' color='#6b7686'>"
-            f"Line {_fmt(row.get('posted line', row.get('line')), 1)}  ·  "
+            f"Line {_fmt(row.get('posted line', row.get('line')), 1)}  │  "
             f"Model {_fmt(row.get('model prediction', row.get('projection')), 2)}"
             f"</font>"
         ),
@@ -1098,7 +2542,7 @@ def _spotlight_card_flowable(
 
 
 def _spotlight_flowables(edge_df: pd.DataFrame | None, styles: dict) -> list:
-    flow: list = _section_header("Signal spotlight · top 3", "Section 01A", styles)
+    flow: list = _section_header("Signal spotlight  │  top 3", "Section 01A", styles, anchor="sec-spotlight")
     if edge_df is None or not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
         flow.append(_para("No live signals to spotlight yet.", styles["muted"]))
         return flow
@@ -1136,7 +2580,7 @@ def _spotlight_flowables(edge_df: pd.DataFrame | None, styles: dict) -> list:
 
 # ── Section: model quality ──────────────────────────────────────────────────
 def _model_quality_flowables(metrics: pd.DataFrame | None, styles: dict) -> list:
-    flow: list = _section_header("Model quality", "Section 02", styles)
+    flow: list = _section_header("Model quality", "Section 02", styles, anchor="sec-model-quality")
     if metrics is None or not isinstance(metrics, pd.DataFrame) or metrics.empty:
         flow.append(_para("Model metrics unavailable.", styles["muted"]))
         return flow
@@ -1181,7 +2625,7 @@ def _model_quality_flowables(metrics: pd.DataFrame | None, styles: dict) -> list
     extra: list = []
     for idx, color in tier_indices:
         extra.append(("TEXTCOLOR", (4, idx), (4, idx), color))
-        extra.append(("FONTNAME", (4, idx), (4, idx), "Helvetica-Bold"))
+        extra.append(("FONTNAME", (4, idx), (4, idx), _BOLD_FONT))
     table.setStyle(TableStyle(extra))
     flow.append(table)
     return flow
@@ -1194,7 +2638,7 @@ def _edge_board_flowables(
     *,
     top_n: int = 14,
 ) -> list:
-    flow: list = _section_header("Top edges — model vs market", "Section 03", styles)
+    flow: list = _section_header("Top edges — model vs market", "Section 03", styles, anchor="sec-edges")
     if edge_df is None or not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
         flow.append(_para(
             "No live edges available. Add an Odds API key and fetch lines "
@@ -1214,6 +2658,10 @@ def _edge_board_flowables(
     for _, r in df.iterrows():
         edge_val = r.get("edge")
         side = str(r.get("call") or r.get("side") or "").upper()
+        books_label = _abbrev_books(r.get("book_names")) if "book_names" in r else None
+        if not books_label or books_label == "—":
+            n = r.get("books")
+            books_label = f"{int(n)} books" if pd.notna(n) else "—"
         rows.append([
             str(r.get("player", "—")),
             str(r.get("model", "—")),
@@ -1221,14 +2669,14 @@ def _edge_board_flowables(
             _fmt(r.get("model prediction", r.get("projection")), 2),
             _fmt_signed(edge_val, 2),
             side,
-            str(int(r["books"])) if "books" in r and pd.notna(r["books"]) else "—",
+            books_label,
         ])
 
     table = _styled_table(
         rows,
-        col_widths=[1.7 * inch, 1.3 * inch, 0.7 * inch, 0.95 * inch,
-                    0.75 * inch, 0.65 * inch, 0.6 * inch],
-        align_right_cols=[2, 3, 4, 6],
+        col_widths=[1.5 * inch, 1.05 * inch, 0.6 * inch, 0.85 * inch,
+                    0.65 * inch, 0.55 * inch, 1.45 * inch],
+        align_right_cols=[2, 3, 4],
     )
     extra: list = []
     for i, (_, r) in enumerate(df.iterrows(), start=1):
@@ -1238,14 +2686,14 @@ def _edge_board_flowables(
             ev = 0.0
         color = POS_GREEN if ev > 0 else (NEG_RED if ev < 0 else INK_BODY)
         extra.append(("TEXTCOLOR", (4, i), (4, i), color))
-        extra.append(("FONTNAME", (4, i), (4, i), "Helvetica-Bold"))
+        extra.append(("FONTNAME", (4, i), (4, i), _BOLD_FONT))
         side = str(r.get("call") or r.get("side") or "").upper()
         if side in ("MORE", "OVER"):
             extra.append(("TEXTCOLOR", (5, i), (5, i), POS_GREEN))
-            extra.append(("FONTNAME", (5, i), (5, i), "Helvetica-Bold"))
+            extra.append(("FONTNAME", (5, i), (5, i), _BOLD_FONT))
         elif side in ("LESS", "UNDER"):
             extra.append(("TEXTCOLOR", (5, i), (5, i), NEG_RED))
-            extra.append(("FONTNAME", (5, i), (5, i), "Helvetica-Bold"))
+            extra.append(("FONTNAME", (5, i), (5, i), _BOLD_FONT))
     table.setStyle(TableStyle(extra))
     flow.append(table)
     return flow
@@ -1263,10 +2711,12 @@ def _player_hero_band(player: str, recent_form: dict[str, float] | None, styles:
                 f"<font size='7' color='#fff1e6'><b>{label}</b></font> "
                 f"<font size='10' color='#ffffff'><b>{_fmt(recent_form[key], 1)}</b></font>"
             )
-    form_html = "  ·  ".join(bits) if bits else (
+    form_html = "   │   ".join(bits) if bits else (
         "<font size='9' color='#fff1e6'>No recent-form snapshot.</font>"
     )
 
+    # Left accent strip (deep orange) creates a duotone hero feel.
+    accent_tab = Paragraph("&nbsp;", styles["body"])
     name_para = Paragraph(
         f"<font size='15' color='#ffffff'><b>{_short(player, 32)}</b></font><br/>"
         f"<font size='7.5' color='#fff1e6'><b>RECENT FORM (LAST GAMES)</b></font>",
@@ -1275,15 +2725,19 @@ def _player_hero_band(player: str, recent_form: dict[str, float] | None, styles:
     form_para = Paragraph(form_html, styles["body"])
 
     band = Table(
-        [[name_para, form_para]],
-        colWidths=[2.6 * inch, 4.4 * inch],
+        [[accent_tab, name_para, form_para]],
+        colWidths=[0.18 * inch, 2.92 * inch, 3.9 * inch],
     )
     band.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), BRAND_ORANGE),
+        ("BACKGROUND", (0, 0), (0, 0), BRAND_ORANGE_DEEP),
+        ("BACKGROUND", (1, 0), (-1, -1), BRAND_ORANGE),
         ("LINEBELOW", (0, 0), (-1, -1), 1.5, BRAND_ORANGE_DEEP),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 12),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+        ("ALIGN", (0, 0), (0, 0), "CENTER"),
+        ("LEFTPADDING", (0, 0), (0, 0), 0),
+        ("RIGHTPADDING", (0, 0), (0, 0), 0),
+        ("LEFTPADDING", (1, 0), (-1, -1), 12),
+        ("RIGHTPADDING", (1, 0), (-1, -1), 12),
         ("TOPPADDING", (0, 0), (-1, -1), 10),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
     ]))
@@ -1297,12 +2751,64 @@ def _player_block(
     projection: pd.DataFrame | None,
     recent_form: dict[str, float] | None,
     rationale: str,
+    history: pd.DataFrame | None = None,
+    games: pd.DataFrame | None = None,
     styles: dict,
 ) -> list:
+    slug = "player-" + "".join(
+        ch.lower() if ch.isalnum() else "-" for ch in player
+    ).strip("-")
     flow: list = [
+        _AnchorFlowable(slug, player, level=1),
         _player_hero_band(player, recent_form, styles),
         Spacer(1, 6),
     ]
+
+    # Risk / form chips immediately under the hero band so the user gets
+    # a one-glance read on volatility and edge context.
+    chips = _risk_chips(
+        player=player, edge_df=edge_df, games=games,
+        recent_form=recent_form, history_df=history,
+    )
+    chip_strip = _risk_chip_strip(chips, styles)
+    if chip_strip is not None:
+        flow.append(chip_strip)
+        flow.append(Spacer(1, 6))
+
+    # Visual stack: full-width sparklines first (so all three stats breathe),
+    # then a clean two-column row with the structured "Why this signal" panel
+    # on the left and the Over/Under hit-rate donut on the right.
+    spark = _player_form_sparklines(games)
+    donut = _player_hit_rate_donut(history)
+    signal = _signal_summary_panel(
+        player=player, edge_df=edge_df, recent_form=recent_form,
+        history_df=history, styles=styles,
+    )
+
+    if spark is not None:
+        flow.append(spark)
+        flow.append(Spacer(1, 6))
+
+    if signal is not None and donut is not None:
+        row = Table(
+            [[signal, donut]],
+            colWidths=[4.2 * inch, 2.8 * inch],
+        )
+        row.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        flow.append(row)
+        flow.append(Spacer(1, 6))
+    elif signal is not None:
+        flow.append(signal)
+        flow.append(Spacer(1, 6))
+    elif donut is not None:
+        flow.append(donut)
+        flow.append(Spacer(1, 6))
 
     chart = _player_minichart(projection, edge_df, player) if projection is not None else None
     if chart is not None:
@@ -1362,50 +2868,37 @@ def _player_block(
             if ev is not None:
                 color = POS_GREEN if ev > 0 else (NEG_RED if ev < 0 else INK_BODY)
                 extra.append(("TEXTCOLOR", (4, i), (4, i), color))
-                extra.append(("FONTNAME", (4, i), (4, i), "Helvetica-Bold"))
+                extra.append(("FONTNAME", (4, i), (4, i), _BOLD_FONT))
             side = str(ed.get("side", "")).upper().split()[0] if ed.get("side") else ""
             if side in ("MORE", "OVER"):
                 extra.append(("TEXTCOLOR", (5, i), (5, i), POS_GREEN))
-                extra.append(("FONTNAME", (5, i), (5, i), "Helvetica-Bold"))
+                extra.append(("FONTNAME", (5, i), (5, i), _BOLD_FONT))
             elif side in ("LESS", "UNDER"):
                 extra.append(("TEXTCOLOR", (5, i), (5, i), NEG_RED))
-                extra.append(("FONTNAME", (5, i), (5, i), "Helvetica-Bold"))
+                extra.append(("FONTNAME", (5, i), (5, i), _BOLD_FONT))
         table.setStyle(TableStyle(extra))
-        flow.append(table)
+
+        # Sticky breadcrumb above the projections table — survives a page
+        # break so the reader always knows which player the rows belong to.
+        breadcrumb = Paragraph(
+            f"<font size='7.5' color='#cc5a00'><b>"
+            f"{player.upper()} &nbsp;│&nbsp; MODEL PROJECTIONS"
+            f"</b></font>",
+            styles["body"],
+        )
+        flow.append(KeepTogether([breadcrumb, Spacer(1, 4), table]))
     else:
         flow.append(_para("No model projections available.", styles["muted"]))
 
     flow.append(Spacer(1, 4))
-    flow.append(_para("Data rationale", styles["h3"]))
-    if (
-        projection is not None
-        and isinstance(projection, pd.DataFrame)
-        and not projection.empty
-    ):
-        top_text = "No market-mapped model edge was available for this player."
-        if edge_df is not None and isinstance(edge_df, pd.DataFrame) and not edge_df.empty:
-            sub = edge_df[edge_df["player"] == player].copy()
-            if not sub.empty and "edge" in sub.columns:
-                sub["abs_edge"] = pd.to_numeric(sub["edge"], errors="coerce").abs()
-                sub = sub.sort_values("abs_edge", ascending=False)
-                r = sub.iloc[0]
-                top_text = (
-                    f"Largest gap is {r.get('model', 'metric')} at edge "
-                    f"{_fmt_signed(r.get('edge'), 2)} with posted line "
-                    f"{_fmt(r.get('posted line', r.get('line')), 1)} and model "
-                    f"projection {_fmt(r.get('model prediction', r.get('projection')), 2)}."
-                )
-        flow.append(_para(top_text, styles["body"]))
-    else:
-        flow.append(_para(
-            "Model projections were unavailable for this player in this run.",
-            styles["muted"],
-        ))
-
     if rationale and rationale.strip():
-        flow.append(Spacer(1, 4))
-        flow.append(_para("Context notes (AI)", styles["h3"]))
+        flow.append(_para("Analyst notes", styles["h3"]))
         flow.append(_para(rationale.strip(), styles["body"]))
+
+    history_block = _player_history_table(player, history, styles)
+    if history_block:
+        flow.extend(history_block)
+
     flow.append(Spacer(1, 12))
     return flow
 
@@ -1417,9 +2910,11 @@ def _per_player_flowables(
     projections: dict[str, pd.DataFrame] | None,
     recent_form: dict[str, dict[str, float]] | None,
     ai_sections: dict[str, Any] | None,
+    player_history: dict[str, pd.DataFrame] | None = None,
+    player_games: dict[str, pd.DataFrame] | None = None,
     styles: dict,
 ) -> list:
-    flow: list = _section_header("Per-player breakdown", "Section 04", styles)
+    flow: list = _section_header("Per-player breakdown", "Section 04", styles, anchor="sec-players")
     if not roster:
         flow.append(_para("Roster is empty.", styles["muted"]))
         return flow
@@ -1427,6 +2922,8 @@ def _per_player_flowables(
     ai_players = (ai_sections or {}).get("players") or {}
     projections = projections or {}
     recent_form = recent_form or {}
+    player_history = player_history or {}
+    player_games = player_games or {}
 
     for player in roster.keys():
         block = _player_block(
@@ -1435,6 +2932,8 @@ def _per_player_flowables(
             projection=projections.get(player),
             recent_form=recent_form.get(player),
             rationale=str(ai_players.get(player, "")),
+            history=player_history.get(player),
+            games=player_games.get(player),
             styles=styles,
         )
         # Keep player hero band + first chart together so we don't orphan a name.
@@ -1454,6 +2953,8 @@ def build_pdf_report(
     projections: dict[str, pd.DataFrame] | None = None,
     recent_form: dict[str, dict[str, float]] | None = None,
     ai_sections: dict[str, Any] | None = None,
+    player_history: dict[str, pd.DataFrame] | None = None,
+    player_games: dict[str, pd.DataFrame] | None = None,
 ) -> bytes:
     """Render the report and return the PDF as raw bytes.
 
@@ -1474,10 +2975,15 @@ def build_pdf_report(
     ai_sections
         Dict with keys ``executive_summary``, ``slate_outlook``, ``players``.
         Pass ``None`` to render a data-only report.
+    player_history
+        ``{player: DataFrame}`` with columns ``game_date``, ``metric``,
+        ``line``, ``actual``, ``margin``, ``result`` for the player's recent
+        games where a historical line was available. Used to render a
+        "Historical lines vs outcomes" panel inside each player block.
     """
     styles = _build_styles()
     meta = _ReportMeta(
-        generated_at=datetime.now().strftime("%b %d, %Y · %H:%M"),
+        generated_at=datetime.now().strftime("%b %d, %Y  │  %H:%M"),
         roster_count=len(roster or {}),
         has_ai=bool(ai_sections and (
             ai_sections.get("executive_summary")
@@ -1527,11 +3033,39 @@ def build_pdf_report(
     flow.append(NextPageTemplate("body"))
     flow.append(PageBreak())
 
+    # Clickable Table of Contents — links jump to bookmarked section anchors,
+    # and the same anchors register as PDF outline entries for sidebar nav.
+    toc_items: list[tuple] = [
+        ("Executive summary", "sec-exec"),
+        ("Signal spotlight  │  top 3", "sec-spotlight"),
+        ("Analytics visuals", "sec-analytics"),
+        ("Model quality", "sec-model-quality"),
+        ("Top edges — model vs market", "sec-edges"),
+        ("Per-player breakdown", "sec-players"),
+    ]
+    for player_name in (roster or {}).keys():
+        slug = "player-" + "".join(
+            ch.lower() if ch.isalnum() else "-" for ch in player_name
+        ).strip("-")
+        toc_items.append((player_name, slug, "sub"))
+    flow.append(_AnchorFlowable("toc", "Contents", level=0))
+    flow.extend(_toc_flowables(toc_items, styles))
+    flow.append(PageBreak())
+
     flow.extend(_kpi_strip_flowables(
         roster=roster,
         metrics=bundle_metrics,
         edge_df=edge_df,
         projections=projections,
+        styles=styles,
+    ))
+    flow.append(Spacer(1, 6))
+    flow.append(_how_to_read_strip(styles))
+    flow.append(Spacer(1, 14))
+    flow.extend(_bottom_line_flowables(
+        roster=roster,
+        metrics=bundle_metrics,
+        edge_df=edge_df,
         styles=styles,
     ))
     flow.extend(_executive_summary_flowables(
@@ -1555,6 +3089,8 @@ def build_pdf_report(
         projections=projections,
         recent_form=recent_form,
         ai_sections=ai_sections,
+        player_history=player_history,
+        player_games=player_games,
         styles=styles,
     ))
 

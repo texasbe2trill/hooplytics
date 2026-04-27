@@ -56,7 +56,7 @@ _TRAINING_ANCHOR_PLAYERS: list[str] = [
 ]
 from hooplytics.data import PlayerStore, nba_seasons
 from hooplytics.models import ModelBundle, ensure_models, load_models
-from hooplytics.odds import fetch_live_player_lines
+from hooplytics.odds import fetch_live_player_lines, load_cached_historical_odds
 from hooplytics.openai_agent import (
     OpenAIConnection,
     auto_select_model,
@@ -2969,6 +2969,100 @@ def _recent_form_for(player: str, games: pd.DataFrame, last_n: int = 10) -> dict
     return out
 
 
+# Mapping from Odds API market name to the box-score stat column used to score
+# the line as an Over / Under outcome in the report's "Lines vs Outcomes" panel.
+_HISTORY_MODEL_TO_STAT: dict[str, str] = {
+    "points":   "pts",
+    "rebounds": "reb",
+    "assists":  "ast",
+    "threepm":  "fg3m",
+}
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 30, max_entries=4)
+def _player_history_lines_vs_outcomes(roster_key: str, last_n: int = 10) -> dict[str, pd.DataFrame]:
+    """Build per-player historical lines vs. actual outcomes for the PDF report.
+
+    Joins cached pregame consensus lines (from the historical odds cache) onto
+    each player's actual game-log results and labels each row Over / Under /
+    Push. Returns ``{player: DataFrame}`` with the most recent ``last_n``
+    resolved line/outcome rows per player. Players with no joinable history
+    are omitted.
+    """
+    odds_df = load_cached_historical_odds()
+    if odds_df.empty:
+        return {}
+
+    modeling_df = _modeling_frame(roster_key)
+    if modeling_df.empty or "player" not in modeling_df.columns:
+        return {}
+
+    # Normalize join keys.
+    odds = odds_df.copy()
+    odds["game_date"] = pd.to_datetime(odds["game_date"], errors="coerce").dt.normalize()
+    odds = odds[odds["model"].isin(_HISTORY_MODEL_TO_STAT)]
+
+    games = modeling_df.copy()
+    games["game_date"] = pd.to_datetime(games["game_date"], errors="coerce").dt.normalize()
+
+    # Canonicalize player names so 'Shai Gilgeous-Alexander' matches
+    # 'Shai Gilgeous Alexander' between the two sources.
+    import re as _re
+    def _canon(s: str) -> str:
+        return _re.sub(r"[^a-z]", "", str(s).lower())
+
+    odds["_canon"] = odds["player"].map(_canon)
+    games["_canon"] = games["player"].map(_canon)
+
+    try:
+        roster: dict = json.loads(roster_key)
+    except Exception:
+        roster = {}
+    canon_to_roster = {_canon(p): p for p in roster.keys()}
+
+    out: dict[str, pd.DataFrame] = {}
+    for canon_name, roster_name in canon_to_roster.items():
+        sub_odds = odds[odds["_canon"] == canon_name]
+        sub_games = games[games["_canon"] == canon_name]
+        if sub_odds.empty or sub_games.empty:
+            continue
+
+        rows: list[dict] = []
+        for _, line_row in sub_odds.iterrows():
+            stat_col = _HISTORY_MODEL_TO_STAT[line_row["model"]]
+            if stat_col not in sub_games.columns:
+                continue
+            game = sub_games[sub_games["game_date"] == line_row["game_date"]]
+            if game.empty:
+                continue
+            actual = pd.to_numeric(game[stat_col], errors="coerce").iloc[0]
+            if pd.isna(actual):
+                continue
+            line = float(line_row["line"])
+            margin = float(actual) - line
+            if margin > 0:
+                result = "Over"
+            elif margin < 0:
+                result = "Under"
+            else:
+                result = "Push"
+            rows.append({
+                "game_date": line_row["game_date"],
+                "metric": str(line_row["model"]),
+                "line": line,
+                "actual": float(actual),
+                "margin": margin,
+                "result": result,
+            })
+
+        if not rows:
+            continue
+        df = pd.DataFrame(rows).sort_values("game_date", ascending=False).head(last_n)
+        out[roster_name] = df.reset_index(drop=True)
+
+    return out
+
+
 def page_report(roster: dict, api_key: str) -> None:
     page_hero(
         "Roster Report",
@@ -3068,6 +3162,7 @@ def page_report(roster: dict, api_key: str) -> None:
 
     projections: dict[str, pd.DataFrame] = {}
     recent_form: dict[str, dict[str, float]] = {}
+    player_games: dict[str, pd.DataFrame] = {}
     progress = st.progress(0.0, text="Computing projections…")
     players = list(roster.keys())
     for i, player in enumerate(players, start=1):
@@ -3086,6 +3181,8 @@ def page_report(roster: dict, api_key: str) -> None:
         try:
             games = _player_games(_roster_key(), player)
             recent_form[player] = _recent_form_for(player, games)
+            if isinstance(games, pd.DataFrame) and not games.empty:
+                player_games[player] = games
         except Exception:
             pass
         progress.progress(i / max(len(players), 1), text=f"Projection {i}/{len(players)}…")
@@ -3124,6 +3221,8 @@ def page_report(roster: dict, api_key: str) -> None:
             projections=projections or None,
             recent_form=recent_form or None,
             ai_sections=ai_sections,
+            player_history=_player_history_lines_vs_outcomes(_roster_key()) or None,
+            player_games=player_games or None,
         )
     except Exception as exc:
         st.error(f"PDF generation failed: {exc}")

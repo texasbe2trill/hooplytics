@@ -535,58 +535,84 @@ def parse_chart_blocks(text: str) -> list[dict[str, Any]]:
 
 # ── Report prose generation ──────────────────────────────────────────────────
 _REPORT_SYSTEM_PROMPT = """\
-You are Hooplytics Scout, generating prose for a printable PDF analytics \
-report. Use the LOCAL CONTEXT (roster, model metrics, edges, projections) as \
-authoritative; supplement with general NBA knowledge (matchups, role, injuries, \
-pace, defense) flagged inline as "(general NBA context)" when relevant.
+You are Hooplytics Scout, writing the prose for a printable PDF analytics \
+report that sharp NBA players will trust. The deterministic tables and charts \
+already display every number in detail — your job is to interpret, not list.
 
-Tone: confident, analyst-grade, concise. No hedging filler. No emojis.
-Avoid betting advice language; frame as analytical lean and rationale.
+Voice: direct, confident, opinionated. Sound like a respected NBA analyst on \
+a podcast, not a hedging chatbot. Active verbs. Specific over generic. No \
+filler ("In conclusion", "It is worth noting", "Looking ahead"). No emojis. \
+No betting-advice phrasing — frame everything as analytical lean and \
+rationale.
+
+Use roster, model metrics, edges, and projections from the structured context \
+as your authoritative source. Layer in real NBA reasoning — matchups, \
+defensive schemes, rotations, role changes, rest, injury context — naturally, \
+the way a writer would. Do NOT label or annotate anything as "context", \
+"local context", "general NBA context", "external", "outside reasoning", or \
+similar. Never reveal that you were given structured data. Just write.
+
+Numbers: it's fine to drop one or two specific stats per paragraph if they \
+sharpen a point (e.g., a recent-form average, an R², or a clear edge). Don't \
+list five stats in a row — that duplicates the tables. Round naturally.
 
 Return ONLY a single JSON object — no prose outside the JSON, no markdown \
 fences. Schema:
 {
-  "executive_summary": "2-4 sentence overview of the slate, highlighting the \
-strongest 1-2 model-vs-market disagreements and the overall confidence \
-posture. Plain prose.",
-  "slate_outlook": "1 short paragraph (3-5 sentences) on broader context: \
-recent form trends across the roster, model reliability summary, key risks \
-to watch tonight (rest, injury risk, blowout risk).",
+  "executive_summary": "2-4 sentences setting tonight's slate posture: who's \
+the loudest signal, how confident the models are overall, what to watch.",
+  "slate_outlook": "1 paragraph (3-5 sentences) on the bigger picture: form \
+trends, model reliability, the matchups that swing the night, key risks \
+(rest, injury, blowout potential).",
   "players": {
-    "<Player Name>": "1 short paragraph (3-5 sentences) covering: which \
-model has the largest projection-vs-line gap and the lean (MORE/LESS), the \
-data behind it (projection, recent form, model R²), and 1-2 outside NBA \
-context bullets (matchup, defense, role, rest) flagged as outside reasoning. \
-End with a one-line confidence read (low/medium/high) and a key risk."
+    "<Player Name>": "1 paragraph (3-5 sentences). Lead with the loudest \
+model-vs-line gap and the lean. Back it with concrete recent form or role \
+context. Add one matchup or rotational angle. Close with a confidence read \
+(low / medium / high) and the single biggest risk to the call."
   }
 }
 
 Rules:
-- Do NOT include any exact numeric values in your prose. Do not quote lines,
-  projections, edges, percentages, dates, or counts.
-- Keep the prose qualitative (e.g., "strong edge", "moderate confidence")
-  and leave all numeric reporting to the deterministic report tables.
-- Include EVERY player from the LOCAL CONTEXT roster. If a player has no \
-edge data, write a brief paragraph on recent form and role context only.
+- Include EVERY player from the roster. If a player has no edge data, write a \
+short paragraph on recent form, role, and what to watch tonight.
 - Keep each player paragraph under ~110 words.
 - Do not include any keys other than the schema above.
+- Never write the strings "LOCAL CONTEXT", "(general NBA context)", \
+"(nba context)", "(local context)", "(external)", or "(outside reasoning)". \
+Just write naturally.
 """
 
 
-def _strip_numeric_content(text: str) -> str:
-    """Remove explicit numeric tokens from model prose as a safety net."""
+# Tokens / phrases that occasionally leak from the model into prose despite the
+# prompt. We strip them post-generation so the printed report stays clean.
+_PROSE_LEAK_PATTERNS: tuple[str, ...] = (
+    r"\(\s*general\s+NBA\s+context\s*\)",
+    r"\(\s*nba\s+context\s*\)",
+    r"\(\s*local\s+context\s*\)",
+    r"\(\s*external(?:\s+reasoning)?\s*\)",
+    r"\(\s*outside\s+reasoning\s*\)",
+    r"\(\s*context\s*\)",
+    r"\bLOCAL\s+CONTEXT\b",
+    r"per\s+(?:the|your)\s+local\s+context",
+    r"based\s+on\s+(?:the\s+)?local\s+context",
+    r"according\s+to\s+(?:the\s+)?local\s+context",
+)
+
+
+def _scrub_prose_leaks(text: str) -> str:
+    """Strip prompt-leaked tags and tighten whitespace without gutting numbers."""
     if not text:
         return ""
-    # Remove whole sentences containing digits.
-    parts = re.split(r"(?<=[.!?])\s+", text.strip())
-    kept = [p for p in parts if not re.search(r"\d", p)]
-    out = " ".join(kept).strip()
-    if out:
-        return out
-    # If everything had digits, redact digits instead of returning empty.
-    out = re.sub(r"\d+(?:\.\d+)?", "", text)
-    out = re.sub(r"\s+", " ", out).strip()
-    return out
+    out = text
+    for pat in _PROSE_LEAK_PATTERNS:
+        out = re.sub(pat, "", out, flags=re.IGNORECASE)
+    # Collapse double spaces and stray space-before-punctuation left by removals.
+    out = re.sub(r"\s+([,.;:!?])", r"\1", out)
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    # Remove an empty leading parenthetical like "  ()  ".
+    out = re.sub(r"\(\s*\)", "", out)
+    return out.strip()
 
 
 def generate_report_sections(
@@ -715,11 +741,11 @@ def generate_report_sections(
     if isinstance(players_raw, dict):
         for k, v in players_raw.items():
             if isinstance(k, str) and isinstance(v, str) and v.strip():
-                players[k] = _strip_numeric_content(v.strip())
+                players[k] = _scrub_prose_leaks(v.strip())
 
     return {
-        "executive_summary": _strip_numeric_content(str(parsed.get("executive_summary", "")).strip()),
-        "slate_outlook": _strip_numeric_content(str(parsed.get("slate_outlook", "")).strip()),
+        "executive_summary": _scrub_prose_leaks(str(parsed.get("executive_summary", "")).strip()),
+        "slate_outlook": _scrub_prose_leaks(str(parsed.get("slate_outlook", "")).strip()),
         "players": players,
     }
 
