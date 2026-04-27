@@ -306,14 +306,17 @@ Held-out model quality, ranking, residuals, and feature drivers.
 <td colspan="2" valign="top">
 <h4>📑 Roster Report (PDF)</h4>
 <p>One-click, print-ready scouting report built with ReportLab — no headless browser required. Pulls directly from the live model bundle, edge board, and (optional) AI scout context.</p>
-<p>🎨 <strong>Cover:</strong> Branded cover with Players / Live edges / Median R² meta tiles.</p>
-<p>📊 <strong>KPI strip:</strong> 6 tiles — Players, Model rows, Live edges, Strong edges, Avg |edge|, Median R².</p>
-<p>💬 <strong>Executive summary:</strong> Deterministic callout box + optional AI slate outlook.</p>
-<p>🥇 <strong>Signal Spotlight:</strong> Top 3 ranked edges with A/B/C tier badges and MORE/LESS coloring.</p>
-<p>📈 <strong>Analytics visuals:</strong> R² lollipop · diverging edge bar · edge histogram · slate summary panel.</p>
-<p>🧪 <strong>Model quality:</strong> Color-coded Tier column (Strong / Solid / Light / Noisy).</p>
-<p>🎯 <strong>Edge board:</strong> Top 14 edges with green/red signed values and side coloring.</p>
-<p>👤 <strong>Per-player blocks:</strong> Recent-form pills · projection vs market mini bar chart · projections-vs-line table · data rationale · optional AI context.</p>
+<p>🎨 <strong>Cover:</strong> Branded cover with slate date, player count, live signal count, and median R².</p>
+<p>📊 <strong>KPI strip:</strong> 6 tiles — Players, Model rows, Live signals, Strong signals, Avg |edge|, Median R².</p>
+<p>📌 <strong>Legend strip:</strong> ABOVE / BELOW signal key, confidence tier guide, and volatility chip reference.</p>
+<p>🥇 <strong>Bottom line up front:</strong> Top-ranked signal with player name, stat, projection vs line, confidence chip, and signal direction — the single most actionable read on the slate.</p>
+<p>📋 <strong>Slate brief:</strong> Deterministic slate summary callout + optional AI slate outlook paragraph.</p>
+<p>🔭 <strong>Signal Spotlight:</strong> Top 3 ranked signals with A/B/C tier badges, ABOVE/BELOW coloring, Hit%, and Confidence score.</p>
+<p>📈 <strong>Analytics visuals:</strong> R² lollipop · diverging signal bar · signal distribution histogram · slate summary panel.</p>
+<p>🧪 <strong>Model quality:</strong> Per-stat R², RMSE, MAE, and color-coded Tier column (Strong / Solid / Light / Noisy).</p>
+<p>📐 <strong>Model vs line gaps (Section 06):</strong> Full signal board — projection gaps, signed edges, Hit%, Confidence, ABOVE/BELOW side, and book counts across the roster.</p>
+<p>🧩 <strong>Signal stack (Section 07):</strong> Best Anchor + Differentiator + Secondary Add cards ranked by confidence and edge magnitude, with a correlation cluster warning table to highlight players whose stats move together.</p>
+<p>👤 <strong>Per-player blocks (Section 08):</strong> Recent-form pills · volatility and role stability chips · ABOVE/BELOW bias · projection-vs-line table with Hit% · outcome band (P25 / median / P75) · minutes projection outlook · historical lines table · data rationale · optional AI context.</p>
 <p>Open the <strong>Roster Report</strong> page, click <em>Generate PDF</em>, and download.</p>
 </td>
 </tr>
@@ -402,7 +405,7 @@ A player intelligence workbench is built to make data easier to *explore, explai
 | Area | Highlights |
 | :--- | :--- |
 | 🎛️ **Streamlit dashboard** | Eight purpose-built pages: Home, Player Projection, Analytics Dashboard, Compare Players, Player Line Lab, Model Diagnostics, Hooplytics Scout, Roster Report |
-| 📑 **PDF Roster Report** | One-click ReportLab PDF with branded cover, KPI strip, signal spotlight, R² lollipop, diverging edge bars, distribution histogram, color-coded tier table, and per-player hero blocks with mini bar charts |
+| 📑 **PDF Roster Report** | One-click ReportLab PDF — 8 sections: branded cover, KPI strip, legend, Bottom Line Up Front, slate brief, Signal Spotlight, analytics visuals, model quality table, Model vs Line Gaps board (Hit% + Confidence), Signal Stack with correlation cluster warnings, and per-player blocks with outcome bands, minutes projection, volatility chips, and historical lines |
 | 🤖 **Hooplytics Scout (AI)** | BYO-key OpenAI chatbot grounded in your local roster, projections, edge board, and model metrics — Hybrid or Strict grounded modes, structured Confidence + Risk factors |
 | 📡 **Live line context** | Auto-fetched lines from The Odds API across CLI and dashboard, with session-only BYO-key support in the web app |
 | 🎯 **Edge board** | Slate-wide projection-vs-line gap analysis, signed edges, MORE/LESS calls, and book counts — feeds the dashboard, the AI scout, and the PDF report |

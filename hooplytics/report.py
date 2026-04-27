@@ -384,8 +384,7 @@ def _draw_page_chrome(canvas, doc, meta: _ReportMeta) -> None:
     canvas.drawCentredString(
         width / 2,
         0.42 * inch,
-        "Hooplytics is for statistical analysis and entertainment. "
-        "Not financial or betting advice.",
+        "Hooplytics is for statistical analysis and entertainment purposes only.",
     )
     # Streamlit app attribution (left) and page number (right).
     app_url = "https://hooplytics.streamlit.app/"
@@ -480,6 +479,284 @@ def _para(text: str, style: ParagraphStyle) -> Paragraph:
     return Paragraph(safe, style)
 
 
+# ── Probabilistic decision helpers ─────────────────────────────────────────
+# These power the bettor-facing additions (hit %, confidence score,
+# distribution bands, volatility / role chips, slip builder). All math is
+# deterministic and dependency-free so the report stays drop-in renderable.
+
+def _normal_cdf(z: float) -> float:
+    """Standard normal CDF via math.erf — no scipy needed."""
+    import math
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+
+def _normal_inv(p: float) -> float:
+    """Approximate inverse standard normal (Acklam) for distribution bands."""
+    import math
+    if p <= 0.0:
+        return -float("inf")
+    if p >= 1.0:
+        return float("inf")
+    a = [-3.969683028665376e+01,  2.209460984245205e+02,
+         -2.759285104469687e+02,  1.383577518672690e+02,
+         -3.066479806614716e+01,  2.506628277459239e+00]
+    b = [-5.447609879822406e+01,  1.615858368580409e+02,
+         -1.556989798598866e+02,  6.680131188771972e+01,
+         -1.328068155288572e+01]
+    c = [-7.784894002430293e-03, -3.223964580411365e-01,
+         -2.400758277161838e+00, -2.549732539343734e+00,
+          4.374664141464968e+00,  2.938163982698783e+00]
+    d = [ 7.784695709041462e-03,  3.224671290700398e-01,
+          2.445134137142996e+00,  3.754408661907416e+00]
+    plow = 0.02425
+    phigh = 1.0 - plow
+    if p < plow:
+        q = math.sqrt(-2.0 * math.log(p))
+        return (((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) / \
+               ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1.0)
+    if p > phigh:
+        q = math.sqrt(-2.0 * math.log(1.0 - p))
+        return -(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) / \
+                ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1.0)
+    q = p - 0.5
+    r = q * q
+    return (((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5]) * q / \
+           (((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1.0)
+
+
+def _metric_sigma_lookup(metrics: pd.DataFrame | None) -> dict[str, float]:
+    """Return ``{model_name: rmse}`` for use as the predictive σ."""
+    out: dict[str, float] = {}
+    if metrics is None or not isinstance(metrics, pd.DataFrame) or metrics.empty:
+        return out
+    name_col = next((c for c in ("model", "name") if c in metrics.columns), None)
+    rmse_col = next((c for c in ("RMSE", "rmse") if c in metrics.columns), None)
+    if not name_col or not rmse_col:
+        return out
+    for _, r in metrics.iterrows():
+        try:
+            v = float(r[rmse_col])
+        except (TypeError, ValueError):
+            continue
+        if pd.isna(v) or v <= 0:
+            continue
+        out[str(r[name_col])] = v
+    return out
+
+
+def _hit_probability(
+    projection: Any, line: Any, side: str, sigma: float | None,
+) -> float | None:
+    """P(prop clears) given a normal residual model.
+
+    Side MORE/OVER → P(actual > line); LESS/UNDER → P(actual < line).
+    Returns None when inputs are missing or σ is unknown.
+    """
+    if sigma is None or sigma <= 0:
+        return None
+    try:
+        proj_f = float(projection)
+        line_f = float(line)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(proj_f) or pd.isna(line_f):
+        return None
+    z = (line_f - proj_f) / sigma
+    cdf_below = _normal_cdf(z)
+    s = (side or "").upper().strip().split()[0] if side else ""
+    if s in ("LESS", "UNDER"):
+        return float(cdf_below)
+    if s in ("MORE", "OVER"):
+        return float(1.0 - cdf_below)
+    return float(max(cdf_below, 1.0 - cdf_below))
+
+
+def _confidence_score(
+    edge: Any, sigma: float | None, books: Any,
+) -> int | None:
+    """0-100 composite combining standardized edge and market depth.
+
+    edge_pts: |edge|/σ scaled (caps at 2.5σ → 80 pts).
+    depth_pts: log-scaled book count (caps at 8 books → 20 pts).
+    """
+    import math
+    try:
+        ev = abs(float(edge))
+    except (TypeError, ValueError):
+        return None
+    if sigma is None or sigma <= 0:
+        return None
+    z = min(ev / sigma, 2.5)
+    edge_pts = (z / 2.5) * 80.0
+    try:
+        b = float(books)
+    except (TypeError, ValueError):
+        b = 0.0
+    if pd.isna(b) or b <= 0:
+        depth_pts = 0.0
+    else:
+        depth_pts = (math.log(min(b, 8) + 1) / math.log(9)) * 20.0
+    return int(round(max(0.0, min(100.0, edge_pts + depth_pts))))
+
+
+def _side_display(side: Any) -> str:
+    """Map internal MORE/OVER → ABOVE and LESS/UNDER → BELOW for display.
+
+    Internal data still uses MORE/LESS (PrizePicks lingo) and OVER/UNDER
+    (sportsbook lingo) so all comparison logic stays untouched. This helper
+    only flips the *displayed* label so the report reads as projection
+    analytics rather than sportsbook copy.
+    """
+    s = str(side or "").upper().strip().split()[0] if side else ""
+    if s in ("MORE", "OVER"):
+        return "ABOVE"
+    if s in ("LESS", "UNDER"):
+        return "BELOW"
+    return s or "—"
+
+
+def _fmt_pct(p: float | None) -> str:
+    if p is None:
+        return "—"
+    return f"{p * 100:.0f}%"
+
+
+def _volatility_label(
+    games: pd.DataFrame | None, target_col: str = "pts", n: int = 10,
+) -> tuple[str, "colors.Color"] | None:
+    """Classify a player's recent variance via coefficient of variation."""
+    if games is None or not isinstance(games, pd.DataFrame) or games.empty:
+        return None
+    if target_col not in games.columns:
+        return None
+    s = pd.to_numeric(games[target_col], errors="coerce").dropna().tail(max(n, 5))
+    if len(s) < 5:
+        return None
+    mean = float(s.mean())
+    if mean <= 0:
+        return None
+    cv = float(s.std(ddof=1)) / mean
+    if cv < 0.25:
+        return ("LOW VOL", POS_GREEN)
+    if cv < 0.40:
+        return ("MED VOL", GOLD)
+    return ("HIGH VOL", NEG_RED)
+
+
+def _role_stability_label(
+    games: pd.DataFrame | None, n: int = 10,
+) -> tuple[str, "colors.Color"] | None:
+    """High = stable minutes + shot diet; low = swing role.
+
+    Uses minutes std and FGA std as proxies for usage volatility because
+    explicit usage rate isn't always present in the games frame.
+    """
+    if games is None or not isinstance(games, pd.DataFrame) or games.empty:
+        return None
+    score = 0.0
+    parts = 0
+    if "min" in games.columns:
+        m = pd.to_numeric(games["min"], errors="coerce").dropna().tail(n)
+        if len(m) >= 5 and m.mean() > 0:
+            cv = float(m.std(ddof=1)) / float(m.mean())
+            score += max(0.0, 1.0 - min(cv / 0.30, 1.0))
+            parts += 1
+    if "fga" in games.columns:
+        f = pd.to_numeric(games["fga"], errors="coerce").dropna().tail(n)
+        if len(f) >= 5 and f.mean() > 0:
+            cv = float(f.std(ddof=1)) / float(f.mean())
+            score += max(0.0, 1.0 - min(cv / 0.40, 1.0))
+            parts += 1
+    if parts == 0:
+        return None
+    norm = score / parts
+    if norm >= 0.70:
+        return ("ROLE: HIGH", POS_GREEN)
+    if norm >= 0.45:
+        return ("ROLE: MED", GOLD)
+    return ("ROLE: LOW", NEG_RED)
+
+
+def _minutes_projection(
+    games: pd.DataFrame | None, n: int = 10,
+) -> tuple[float, float, float] | None:
+    """Forward-looking minutes estimate: weighted L3/L5/L10 mean + ±1σ band."""
+    if games is None or not isinstance(games, pd.DataFrame) or games.empty:
+        return None
+    if "min" not in games.columns:
+        return None
+    m = pd.to_numeric(games["min"], errors="coerce").dropna()
+    if len(m) < 3:
+        return None
+    l3 = float(m.tail(3).mean())
+    l5 = float(m.tail(5).mean()) if len(m) >= 5 else l3
+    l10 = float(m.tail(min(len(m), n)).mean())
+    proj = 0.45 * l5 + 0.30 * l3 + 0.25 * l10
+    sd = float(m.tail(min(len(m), n)).std(ddof=1)) if len(m) >= 4 else 0.0
+    lo = max(0.0, proj - sd)
+    hi = proj + sd
+    return (proj, lo, hi)
+
+
+def _distribution_bands(
+    projection: Any, sigma: float | None,
+) -> dict[str, float] | None:
+    """{p25, p50, p75} assuming Normal(projection, σ²)."""
+    if sigma is None or sigma <= 0:
+        return None
+    try:
+        mu = float(projection)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(mu):
+        return None
+    z25 = _normal_inv(0.25)
+    z75 = _normal_inv(0.75)
+    return {"p25": mu + z25 * sigma, "p50": mu, "p75": mu + z75 * sigma}
+
+
+def _correlation_clusters(edge_df: pd.DataFrame | None) -> list[dict]:
+    """Find same-game / same-side prop clusters that hurt parlay independence.
+
+    Fires when ≥2 calls share a matchup AND a directional side (LESS/UNDER
+    together or MORE/OVER together) — these are tempo-correlated and real
+    diversification disappears.
+    """
+    if edge_df is None or not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
+        return []
+    if "matchup" not in edge_df.columns:
+        return []
+    df = edge_df.copy()
+    sides = df.get("call", df.get("side"))
+    if sides is None:
+        return []
+    df["_side"] = sides.astype(str).str.upper().str.split().str[0]
+    df["_dir"] = df["_side"].map(
+        lambda s: "UNDER" if s in ("LESS", "UNDER") else (
+            "OVER" if s in ("MORE", "OVER") else None
+        )
+    )
+    df = df.dropna(subset=["_dir", "matchup"])
+    if df.empty:
+        return []
+    clusters: list[dict] = []
+    for (matchup, direction), grp in df.groupby(["matchup", "_dir"]):
+        # Dedupe players (one player can have multiple props in the same game)
+        # while preserving original order so the warning lists distinct names.
+        raw_players = [str(p) for p in grp.get("player", []).tolist()]
+        unique_players = list(dict.fromkeys(raw_players))
+        if len(unique_players) < 2:
+            continue
+        clusters.append({
+            "matchup": str(matchup),
+            "direction": str(direction),
+            "players": unique_players,
+            "count": int(len(grp)),
+        })
+    clusters.sort(key=lambda c: -c["count"])
+    return clusters
+
+
 def _section_header(
     title: str,
     eyebrow: str,
@@ -535,7 +812,7 @@ def _toc_flowables(
                 "<br/>"
                 "<font size='10' color='#6b7686'>"
                 "Tap any row to jump straight to that section. "
-                "Skim the <b>Quick calls</b> page if you only have a minute."
+                "Skim the <b>Signal summary</b> page if you only have a minute."
                 "</font>",
                 styles["body"],
             )
@@ -714,8 +991,8 @@ def _kpi_strip_flowables(
     cards_spec = [
         ("Players", str(len(roster)), BRAND_ORANGE),
         ("Model rows", str(proj_rows), NEUTRAL_BLUE),
-        ("Live edges", str(edge_count), GOLD),
-        ("Strong edges", str(strong_count), POS_GREEN if strong_count else INK_FAINT),
+        ("Live signals", str(edge_count), GOLD),
+        ("Strong signals", str(strong_count), POS_GREEN if strong_count else INK_FAINT),
         ("Avg |edge|", _fmt(mean_abs_edge, 2) if not pd.isna(mean_abs_edge) else "—", BRAND_ORANGE_DEEP),
         ("Median R²", _fmt(median_r2, 2) if not pd.isna(median_r2) else "—", NEUTRAL_BLUE),
     ]
@@ -741,9 +1018,9 @@ def _slate_lean_label(edge_df: pd.DataFrame | None) -> tuple[str, int, int]:
     pos = int((edges > 0).sum())
     neg = int((edges < 0).sum())
     if pos > neg * 1.4:
-        return "MORE-leaning", pos, neg
+        return "ABOVE-leaning", pos, neg
     if neg > pos * 1.4:
-        return "LESS-leaning", pos, neg
+        return "BELOW-leaning", pos, neg
     return "balanced", pos, neg
 
 
@@ -771,7 +1048,7 @@ def _deterministic_summary_text(
                 idx = r2.idxmax()
                 best_target = f" Best-fit model: {metrics.loc[idx, name_col]} (R²={r2.max():.2f})."
 
-    top_line = "No live edge rows are available."
+    top_line = "No live signal rows are available."
     if isinstance(edge_df, pd.DataFrame) and not edge_df.empty and "edge" in edge_df.columns:
         df = edge_df.copy()
         df["abs_edge"] = pd.to_numeric(df["edge"], errors="coerce").abs()
@@ -788,12 +1065,12 @@ def _deterministic_summary_text(
     lean_phrase = ""
     if edge_n:
         lean_phrase = (
-            f" Slate posture: {lean} ({pos} MORE / {neg} LESS across {edge_n} mapped lines)."
+            f" Slate posture: {lean} ({pos} ABOVE / {neg} BELOW across {edge_n} mapped lines)."
         )
 
     return (
         f"Tracking {players_n} player{'s' if players_n != 1 else ''} with "
-        f"{edge_n} live edge row{'s' if edge_n != 1 else ''} and a median "
+        f"{edge_n} live signal row{'s' if edge_n != 1 else ''} and a median "
         f"model R² of {median_r2_txt}.{best_target}{lean_phrase} {top_line}"
     )
 
@@ -912,11 +1189,11 @@ def _diverging_edge_chart(edge_df: pd.DataFrame) -> Drawing | None:
     height = 2.85 * inch
     drawing = Drawing(width, height)
     drawing.add(String(
-        0, height - 14, "Edge magnitudes  |  model vs market",
+        0, height - 14, "Signal magnitudes  |  model vs line",
         fontName=_BOLD_FONT, fontSize=10.5, fillColor=INK_DARK,
     ))
     drawing.add(String(
-        0, height - 28, "Bars to the right = MORE lean    Bars to the left = LESS lean.",
+        0, height - 28, "Bars to the right = ABOVE-line signal    Bars to the left = BELOW-line signal.",
         fontName=_BODY_FONT, fontSize=8, fillColor=INK_MUTED,
     ))
 
@@ -1005,7 +1282,7 @@ def _edge_distribution_chart(edge_df: pd.DataFrame) -> Drawing | None:
     height = 2.15 * inch
     drawing = Drawing(width, height)
     drawing.add(String(
-        0, height - 14, "Edge distribution",
+        0, height - 14, "Signal distribution",
         fontName=_BOLD_FONT, fontSize=10, fillColor=INK_DARK,
     ))
     drawing.add(String(
@@ -1084,8 +1361,8 @@ def _slate_summary_panel(
 
     rows = [
         ("Slate posture", lean.upper()),
-        ("MORE / LESS leans", f"{pos} / {neg}"),
-        ("Mapped edge rows", str(edge_n)),
+        ("ABOVE / BELOW leans", f"{pos} / {neg}"),
+        ("Mapped signal rows", str(edge_n)),
         ("Avg books per row", _fmt(avg_books, 1) if not pd.isna(avg_books) else "—"),
         ("Most reliable model", best_r2_line),
         ("Noisiest model", worst_r2_line),
@@ -1254,7 +1531,7 @@ def _conviction_leaderboard(
         Paragraph(
             "<para alignment='center'>"
             "<font size='7' color='#6b7686'><b>"
-            "&lt;&nbsp; LESS&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;MORE &nbsp;&gt;"
+            "&lt;&nbsp; BELOW&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;ABOVE &nbsp;&gt;"
             "</b></font></para>",
             styles["body"],
         ),
@@ -1592,8 +1869,8 @@ def _edge_confidence_legend(
 def _how_to_read_strip(styles: dict) -> Table:
     """Inline legend explaining the visual grammar of the report."""
     items = [
-        (POS_GREEN, "MORE / OVER lean"),
-        (NEG_RED, "LESS / UNDER lean"),
+        (POS_GREEN, "ABOVE-LINE signal"),
+        (NEG_RED, "BELOW-LINE signal"),
         (BRAND_ORANGE, "Model projection"),
         (INK_FAINT, "Posted market line"),
         (NEUTRAL_BLUE, "Neutral signal"),
@@ -1946,6 +2223,14 @@ def _risk_chips(
             elif rate <= 0.35:
                 chips.append((f"UNDER-BIASED  {(1-rate)*100:.0f}%", NEG_RED))
 
+    # Volatility + role stability — variance and usage-swing posture.
+    vol = _volatility_label(games)
+    if vol is not None:
+        chips.append(vol)
+    role = _role_stability_label(games)
+    if role is not None:
+        chips.append(role)
+
     return chips
 
 
@@ -2058,7 +2343,7 @@ def _signal_summary_panel(
     if books_label == "—" and pd.notna(books):
         books_label = f"{int(books)} books"
     rows = [
-        ("Lean", f"<font color='#{side_hex}'><b>{side}</b></font>"),
+        ("Signal", f"<font color='#{side_hex}'><b>{_side_display(side)}</b></font>"),
         ("Edge", f"<b>{_fmt_signed(edge_val, 2)}</b>"),
         ("Posted line", _fmt(line_v, 1)),
         ("Model proj.", _fmt(proj, 2)),
@@ -2291,7 +2576,7 @@ def _cover_flowables(
     tiles = Table(
         [[
             _cover_meta_tile("Players", str(meta.roster_count), styles),
-            _cover_meta_tile("Live edges", str(edge_n), styles),
+            _cover_meta_tile("Live signals", str(edge_n), styles),
             _cover_meta_tile("Median R²", median_r2_txt, styles),
         ]],
         colWidths=[1.6 * inch, 1.6 * inch, 1.6 * inch],
@@ -2309,7 +2594,7 @@ def _cover_flowables(
         _para("HOOPLYTICS  |  ROSTER ANALYTICS", styles["cover_eyebrow"]),
         _para("Tonight's Scouting Report.", styles["cover_title"]),
         _para(
-            "Decoded edges, model leans, and the loudest signals from your "
+            "Projection gaps, model leans, and the loudest signals from your "
             "tracked roster — straight off the Hooplytics engine.",
             styles["cover_sub"],
         ),
@@ -2392,9 +2677,12 @@ def _bottom_line_flowables(
             if not top_side:
                 top_side = "MORE" if top_edge_val > 0 else "LESS"
             top_color = POS_GREEN if top_side in ("MORE", "OVER") else NEG_RED
-            top_label = _short(str(top.get("player", "—")), 22).upper()
+            # Use the full player name; the headline Paragraph wraps inside
+            # the 5" left block and auto-shrinks for very long names so we
+            # never render a "SHAI GILGEOUS-ALEXAND..." truncation.
+            top_label = str(top.get("player", "—")).upper()
             top_detail = (
-                f"{str(top.get('model', '')).upper()} {top_side} "
+                f"{str(top.get('model', '')).upper()} {_side_display(top_side)} "
                 f"{_fmt_signed(top_edge_val, 2)} across "
                 f"{int(top['books_n'])} books."
             )
@@ -2407,15 +2695,15 @@ def _bottom_line_flowables(
             label, pos, neg = _slate_lean_label(edge_df)
             total = max(pos + neg, 1)
             if "MORE" in label:
-                lean_label = "MORE-LEANING"
+                lean_label = "ABOVE-LEANING"
                 lean_color = POS_GREEN
-                lean_detail = f"{pos} of {total} live edges point OVER the line."
+                lean_detail = f"{pos} of {total} live signals point ABOVE the line."
             elif "LESS" in label:
-                lean_label = "LESS-LEANING"
+                lean_label = "BELOW-LEANING"
                 lean_color = NEG_RED
-                lean_detail = f"{neg} of {total} live edges point UNDER the line."
+                lean_detail = f"{neg} of {total} live signals point BELOW the line."
             else:
-                lean_detail = f"{pos} OVER vs {neg} UNDER — no clear directional edge."
+                lean_detail = f"{pos} ABOVE vs {neg} BELOW — no clear directional signal."
 
             # Risk: flag the loudest contrarian edge with thin market depth.
             shallow = df[df["books_n"] <= 4].sort_values("abs_edge", ascending=False)
@@ -2455,8 +2743,12 @@ def _bottom_line_flowables(
         "<font size='8' color='#ff7a18'><b>BOTTOM LINE UP FRONT</b></font>",
         styles["body"],
     )
+    # Auto-shrink the headline so long player names (e.g. "SHAI
+    # GILGEOUS-ALEXANDER") fit on a single line inside the 5" left block
+    # instead of getting truncated with an ellipsis.
+    title_size = 16 if len(top_label) <= 18 else (14 if len(top_label) <= 24 else 12)
     title_para = Paragraph(
-        f"<font size='16' color='#ffffff'><b>{top_label}</b></font>",
+        f"<font size='{title_size}' color='#ffffff'><b>{top_label}</b></font>",
         styles["body"],
     )
     detail_para = Paragraph(
@@ -2477,7 +2769,7 @@ def _bottom_line_flowables(
     ]))
 
     chip_eyebrow = Paragraph(
-        "<font size='8' color='#9aa3b2'><b>TOP EDGE</b></font>",
+        "<font size='8' color='#9aa3b2'><b>TOP SIGNAL</b></font>",
         styles["body"],
     )
     chip_value_color = top_color.hexval()[2:] if top_edge_str != "—" else "9aa3b2"
@@ -2597,6 +2889,7 @@ def _quick_calls_flowables(
     edge_df: pd.DataFrame | None,
     recent_form: dict[str, dict[str, float]] | None,
     styles: dict,
+    sigma_lookup: dict[str, float] | None = None,
 ) -> list:
     """At-a-glance call sheet: every more/less call with a one-line why.
 
@@ -2606,10 +2899,10 @@ def _quick_calls_flowables(
     a deterministic one-line rationale (book depth + form delta vs the line).
     """
     flow: list = _section_header(
-        "Quick calls", "Section 01", styles, anchor="sec-quick-calls",
+        "Signal summary", "Section 01", styles, anchor="sec-quick-calls",
     )
     flow.append(_para(
-        "Skim-friendly call sheet \u2014 every more/less lean from the live edge "
+        "Skim-friendly summary \u2014 every above/below-line signal from the live "
         "board, sorted by signal strength.",
         styles["muted"],
     ))
@@ -2617,7 +2910,7 @@ def _quick_calls_flowables(
 
     if edge_df is None or not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
         flow.append(_para(
-            "No live edges yet. Add an Odds API key and refresh lines to "
+            "No live signals yet. Add an Odds API key and refresh lines to "
             "populate this section.",
             styles["muted"],
         ))
@@ -2688,7 +2981,7 @@ def _quick_calls_flowables(
         side_bg = "#e9f7f0" if side in ("MORE", "OVER") else "#fbecec"
 
         pill = Paragraph(
-            f"<font size='8.5' color='{side_color}'><b>{side}</b></font>",
+            f"<font size='8.5' color='{side_color}'><b>{_side_display(side)}</b></font>",
             ParagraphStyle("qc_side", parent=styles["body"], alignment=1),
         )
         pill_tbl = Table([[pill]], colWidths=[0.65 * inch])
@@ -2720,14 +3013,40 @@ def _quick_calls_flowables(
             f"<font size='10' color='{side_color}'><b>{edge_str}</b></font>",
             styles["body"],
         )
+
+        # Probabilistic stats line: HIT% (clears the line) + CONF (composite).
+        sigma = (sigma_lookup or {}).get(str(row.get("model", "")))
+        hit_p = _hit_probability(
+            row.get("model prediction", row.get("projection")),
+            row.get("posted line", row.get("line")),
+            side, sigma,
+        )
+        conf = _confidence_score(edge_val, sigma, row.get("books"))
+        if hit_p is not None or conf is not None:
+            hit_str = _fmt_pct(hit_p)
+            conf_str = f"{conf}/100" if conf is not None else "—"
+            stats_block = Paragraph(
+                f"<font size='8' color='#6b7686'>HIT%</font> "
+                f"<font size='10' color='{side_color}'><b>{hit_str}</b></font>"
+                f"&nbsp;&nbsp;<font size='8' color='#6b7686'>CONF</font> "
+                f"<font size='10' color='#11151c'><b>{conf_str}</b></font>",
+                styles["body"],
+            )
+        else:
+            stats_block = None
+
         why = Paragraph(
             f"<font size='8.5' color='#3a4250'>"
             f"{_safe_text(_one_line_why(row))}</font>",
             styles["body"],
         )
 
+        body_rows: list = [[title], [line_block]]
+        if stats_block is not None:
+            body_rows.append([stats_block])
+        body_rows.append([why])
         body_tbl = Table(
-            [[title], [line_block], [why]],
+            body_rows,
             colWidths=[5.5 * inch],
         )
         body_tbl.setStyle(TableStyle([
@@ -2806,6 +3125,7 @@ def _signal_grade(abs_edge: float) -> tuple[str, colors.Color]:
 
 def _spotlight_card_flowable(
     rank: int, row: pd.Series, styles: dict,
+    sigma_lookup: dict[str, float] | None = None,
 ) -> Table:
     edge_val = float(pd.to_numeric(row.get("edge"), errors="coerce"))
     side = str(row.get("call") or row.get("side") or "").upper() or (
@@ -2815,6 +3135,23 @@ def _spotlight_card_flowable(
     grade, grade_color = _signal_grade(abs_edge)
     side_color = POS_GREEN if side in ("MORE", "OVER") else NEG_RED
     accent_hex = "#1f9d6c" if side in ("MORE", "OVER") else "#d24545"
+
+    sigma = (sigma_lookup or {}).get(str(row.get("model", "")))
+    hit_p = _hit_probability(
+        row.get("model prediction", row.get("projection")),
+        row.get("posted line", row.get("line")), side, sigma,
+    )
+    conf = _confidence_score(edge_val, sigma, row.get("books"))
+    hit_html = ""
+    if hit_p is not None or conf is not None:
+        hit_str = _fmt_pct(hit_p) if hit_p is not None else "—"
+        conf_str = f"{conf}/100" if conf is not None else "—"
+        hit_html = (
+            f"<br/><font size='8' color='#6b7686'>HIT%</font> "
+            f"<font size='10' color='{accent_hex}'><b>{hit_str}</b></font>"
+            f"  |  <font size='8' color='#6b7686'>CONF</font> "
+            f"<font size='10' color='#11151c'><b>{conf_str}</b></font>"
+        )
 
     badge_w = 0.35 * inch
     badge = Drawing(badge_w, 0.35 * inch)
@@ -2832,14 +3169,15 @@ def _spotlight_card_flowable(
             f"<font size='11' color='#11151c'><b>{_short(row.get('player', 'Unknown'), 22)}</b></font><br/>"
             f"<font size='8.5' color='#6b7686'>{_short(row.get('model', 'metric'), 14)}</font><br/>"
             f"<br/>"
-            f"<font size='8.5' color='#6b7686'>LEAN</font> "
-            f"<font size='10' color='{accent_hex}'><b>{side}</b></font>"
+            f"<font size='8.5' color='#6b7686'>SIGNAL</font> "
+            f"<font size='10' color='{accent_hex}'><b>{_side_display(side)}</b></font>"
             f"  |  <font size='8.5' color='#6b7686'>EDGE</font> "
             f"<font size='10' color='{accent_hex}'><b>{_fmt_signed(edge_val, 2)}</b></font><br/>"
             f"<font size='8' color='#6b7686'>"
             f"Line {_fmt(row.get('posted line', row.get('line')), 1)}  |  "
             f"Model {_fmt(row.get('model prediction', row.get('projection')), 2)}"
             f"</font>"
+            f"{hit_html}"
         ),
         ParagraphStyle(
             f"spot_{rank}",
@@ -2867,7 +3205,10 @@ def _spotlight_card_flowable(
     return inner
 
 
-def _spotlight_flowables(edge_df: pd.DataFrame | None, styles: dict) -> list:
+def _spotlight_flowables(
+    edge_df: pd.DataFrame | None, styles: dict,
+    *, sigma_lookup: dict[str, float] | None = None,
+) -> list:
     flow: list = _section_header("Signal spotlight  |  top 3", "Section 03", styles, anchor="sec-spotlight")
     if edge_df is None or not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
         flow.append(_para("No live signals to spotlight yet.", styles["muted"]))
@@ -2885,7 +3226,7 @@ def _spotlight_flowables(edge_df: pd.DataFrame | None, styles: dict) -> list:
         return flow
 
     cards: list = [
-        _spotlight_card_flowable(i + 1, row, styles)
+        _spotlight_card_flowable(i + 1, row, styles, sigma_lookup=sigma_lookup)
         for i, (_, row) in enumerate(top.iterrows())
     ]
     while len(cards) < 3:
@@ -2963,11 +3304,12 @@ def _edge_board_flowables(
     styles: dict,
     *,
     top_n: int = 14,
+    sigma_lookup: dict[str, float] | None = None,
 ) -> list:
-    flow: list = _section_header("Top edges — model vs market", "Section 06", styles, anchor="sec-edges")
+    flow: list = _section_header("Model vs line gaps", "Section 06", styles, anchor="sec-edges")
     if edge_df is None or not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
         flow.append(_para(
-            "No live edges available. Add an Odds API key and fetch lines "
+            "No live signals available. Add an Odds API key and fetch lines "
             "to populate this section.",
             styles["muted"],
         ))
@@ -2979,13 +3321,19 @@ def _edge_board_flowables(
     df = df.sort_values("abs_edge", ascending=False).head(top_n)
 
     rows: list[list[Any]] = [
-        ["Player", "Market", "Line", "Projection", "Edge", "Side", "Books"]
+        ["Player", "Market", "Line", "Proj.", "Edge", "Hit%", "Conf", "Side", "Books"]
     ]
     for _, r in df.iterrows():
         edge_val = r.get("edge")
         side = str(r.get("call") or r.get("side") or "").upper()
+        sigma = (sigma_lookup or {}).get(str(r.get("model", "")))
+        hit_p = _hit_probability(
+            r.get("model prediction", r.get("projection")),
+            r.get("posted line", r.get("line")), side, sigma,
+        )
+        conf = _confidence_score(edge_val, sigma, r.get("books"))
         books_label = (
-            _abbrev_books(r.get("book_names"), max_show=4)
+            _abbrev_books(r.get("book_names"), max_show=3)
             if "book_names" in r else None
         )
         if not books_label or books_label == "—":
@@ -2997,15 +3345,17 @@ def _edge_board_flowables(
             _fmt(r.get("posted line", r.get("line")), 1),
             _fmt(r.get("model prediction", r.get("projection")), 2),
             _fmt_signed(edge_val, 2),
-            side,
+            _fmt_pct(hit_p),
+            f"{conf}" if conf is not None else "—",
+            _side_display(side) if side else "—",
             books_label,
         ])
 
     table = _styled_table(
         rows,
-        col_widths=[1.5 * inch, 1.05 * inch, 0.6 * inch, 0.85 * inch,
-                    0.65 * inch, 0.55 * inch, 1.45 * inch],
-        align_right_cols=[2, 3, 4],
+        col_widths=[1.35 * inch, 0.95 * inch, 0.55 * inch, 0.65 * inch,
+                    0.6 * inch, 0.55 * inch, 0.5 * inch, 0.5 * inch, 1.05 * inch],
+        align_right_cols=[2, 3, 4, 5, 6],
     )
     extra: list = []
     for i, (_, r) in enumerate(df.iterrows(), start=1):
@@ -3018,11 +3368,13 @@ def _edge_board_flowables(
         extra.append(("FONTNAME", (4, i), (4, i), _BOLD_FONT))
         side = str(r.get("call") or r.get("side") or "").upper()
         if side in ("MORE", "OVER"):
+            extra.append(("TEXTCOLOR", (7, i), (7, i), POS_GREEN))
+            extra.append(("FONTNAME", (7, i), (7, i), _BOLD_FONT))
             extra.append(("TEXTCOLOR", (5, i), (5, i), POS_GREEN))
-            extra.append(("FONTNAME", (5, i), (5, i), _BOLD_FONT))
         elif side in ("LESS", "UNDER"):
+            extra.append(("TEXTCOLOR", (7, i), (7, i), NEG_RED))
+            extra.append(("FONTNAME", (7, i), (7, i), _BOLD_FONT))
             extra.append(("TEXTCOLOR", (5, i), (5, i), NEG_RED))
-            extra.append(("FONTNAME", (5, i), (5, i), _BOLD_FONT))
     table.setStyle(TableStyle(extra))
     flow.append(table)
     return flow
@@ -3084,6 +3436,7 @@ def _player_block(
     prediction: str = "",
     history: pd.DataFrame | None = None,
     games: pd.DataFrame | None = None,
+    sigma_lookup: dict[str, float] | None = None,
     styles: dict,
 ) -> list:
     slug = "player-" + "".join(
@@ -3176,26 +3529,32 @@ def _player_block(
                 }
 
         rows: list[list[Any]] = [
-            ["Model", "Target", "Projection", "Line", "Edge", "Side"]
+            ["Model", "Target", "Projection", "Line", "Edge", "Hit%", "Side"]
         ]
+        sigma_lookup = sigma_lookup or {}
         for _, r in proj.iterrows():
             name = str(r["model"])
             ed = edge_lookup.get(name, {})
             side = str(ed.get("side", "")).upper().split()[0] if ed.get("side") else "—"
+            sig = sigma_lookup.get(name)
+            hit_p = _hit_probability(
+                r.get("prediction"), ed.get("line"), ed.get("side", ""), sig,
+            ) if ed else None
             rows.append([
                 name,
                 str(r.get("target", "—")),
                 _fmt(r["prediction"], 2),
                 _fmt(ed.get("line"), 1) if ed else "—",
                 _fmt_signed(ed.get("edge"), 2) if ed else "—",
-                side,
+                _fmt_pct(hit_p),
+                _side_display(side) if side and side != "—" else "—",
             ])
 
         table = _styled_table(
             rows,
-            col_widths=[1.8 * inch, 1.2 * inch, 0.95 * inch, 0.7 * inch,
-                        0.85 * inch, 0.65 * inch],
-            align_right_cols=[2, 3, 4],
+            col_widths=[1.6 * inch, 1.05 * inch, 0.9 * inch, 0.65 * inch,
+                        0.8 * inch, 0.6 * inch, 0.55 * inch],
+            align_right_cols=[2, 3, 4, 5],
         )
         extra: list = []
         for i, (_, r) in enumerate(proj.iterrows(), start=1):
@@ -3213,9 +3572,13 @@ def _player_block(
             if side in ("MORE", "OVER"):
                 extra.append(("TEXTCOLOR", (5, i), (5, i), POS_GREEN))
                 extra.append(("FONTNAME", (5, i), (5, i), _BOLD_FONT))
+                extra.append(("TEXTCOLOR", (6, i), (6, i), POS_GREEN))
+                extra.append(("FONTNAME", (6, i), (6, i), _BOLD_FONT))
             elif side in ("LESS", "UNDER"):
                 extra.append(("TEXTCOLOR", (5, i), (5, i), NEG_RED))
                 extra.append(("FONTNAME", (5, i), (5, i), _BOLD_FONT))
+                extra.append(("TEXTCOLOR", (6, i), (6, i), NEG_RED))
+                extra.append(("FONTNAME", (6, i), (6, i), _BOLD_FONT))
         table.setStyle(TableStyle(extra))
 
         # Sticky breadcrumb above the projections table — survives a page
@@ -3227,6 +3590,75 @@ def _player_block(
             styles["body"],
         )
         flow.append(KeepTogether([breadcrumb, Spacer(1, 4), table]))
+
+        # Outlook panel: distribution bands (top model) + minutes projection.
+        # Lets the reader see realistic 25/50/75 outcomes and a forward-looking
+        # minutes window without leaving the per-player section.
+        try:
+            top_row = proj.iloc[0]
+            top_name = str(top_row["model"])
+            top_sigma = (sigma_lookup or {}).get(top_name)
+            bands = _distribution_bands(top_row.get("prediction"), top_sigma)
+        except Exception:
+            bands = None
+            top_name = ""
+        mins = _minutes_projection(games)
+        if bands is not None or mins is not None:
+            left_html = ""
+            if bands is not None:
+                left_html = (
+                    f"<font size='7.5' color='#cc5a00'><b>OUTCOME BAND "
+                    f"&middot; {top_name.upper()}</b></font><br/>"
+                    f"<font size='9' color='#11151c'>"
+                    f"P25 <b>{bands['p25']:.1f}</b> &nbsp;"
+                    f"P50 <b>{bands['p50']:.1f}</b> &nbsp;"
+                    f"P75 <b>{bands['p75']:.1f}</b>"
+                    f"</font><br/>"
+                    f"<font size='6.5' color='#6b7480'>"
+                    f"Middle 50% of modeled outcomes</font>"
+                )
+            else:
+                left_html = (
+                    "<font size='7.5' color='#6b7480'><b>OUTCOME BAND</b>"
+                    "</font><br/><font size='8' color='#6b7480'>Insufficient "
+                    "variance estimate.</font>"
+                )
+            if mins is not None:
+                m_proj, m_lo, m_hi = mins
+                right_html = (
+                    f"<font size='7.5' color='#cc5a00'><b>MINUTES PROJECTION"
+                    f"</b></font><br/>"
+                    f"<font size='9' color='#11151c'>"
+                    f"<b>{m_proj:.1f}</b> min &nbsp;"
+                    f"<font size='7' color='#6b7480'>range "
+                    f"{m_lo:.1f}\u2013{m_hi:.1f}</font></font><br/>"
+                    f"<font size='6.5' color='#6b7480'>"
+                    f"Weighted L3/L5/L10 &middot; \u00b11\u03c3 band</font>"
+                )
+            else:
+                right_html = (
+                    "<font size='7.5' color='#6b7480'><b>MINUTES PROJECTION"
+                    "</b></font><br/><font size='8' color='#6b7480'>"
+                    "No minutes history.</font>"
+                )
+            left_p = Paragraph(left_html, styles["body"])
+            right_p = Paragraph(right_html, styles["body"])
+            outlook = Table(
+                [[left_p, right_p]],
+                colWidths=[3.5 * inch, 3.5 * inch],
+            )
+            outlook.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), PANEL_BG),
+                ("BOX", (0, 0), (-1, -1), 0.4, PANEL_BORDER),
+                ("LINEAFTER", (0, 0), (0, -1), 0.4, PANEL_BORDER),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 10),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+                ("TOPPADDING", (0, 0), (-1, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ]))
+            flow.append(Spacer(1, 4))
+            flow.append(outlook)
     else:
         flow.append(_para("No model projections available.", styles["muted"]))
 
@@ -3270,6 +3702,209 @@ def _player_block(
     return flow
 
 
+def _slip_builder_flowables(
+    *,
+    edge_df: pd.DataFrame | None,
+    sigma_lookup: dict[str, float] | None,
+    player_games: dict[str, pd.DataFrame] | None,
+    styles: dict,
+) -> list:
+    """Anchor / Differentiator / Secondary picks plus correlation warnings.
+
+    Designed so a bettor can build a defensible 2-3 leg slip without flipping
+    back through the per-player section. All ranking is deterministic so the
+    same edge_df produces the same slip every render.
+    """
+    flow: list = _section_header(
+        "Signal stack", "Section 07", styles, anchor="sec-slip",
+    )
+    if edge_df is None or not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
+        flow.append(_para(
+            "No signals available to build a stack from.", styles["muted"],
+        ))
+        return flow
+
+    sigma_lookup = sigma_lookup or {}
+    player_games = player_games or {}
+    df = edge_df.copy()
+
+    # Score every row: confidence (primary) + |edge| as tie-breaker.
+    rows: list[dict] = []
+    for _, r in df.iterrows():
+        sig = sigma_lookup.get(str(r.get("model", "")))
+        conf = _confidence_score(r.get("edge"), sig, r.get("books"))
+        try:
+            ev = float(r.get("edge")) if r.get("edge") is not None else 0.0
+        except (TypeError, ValueError):
+            ev = 0.0
+        side_raw = str(r.get("call", r.get("side", ""))).upper().split()
+        side = side_raw[0] if side_raw else ""
+        direction = (
+            "OVER" if side in ("MORE", "OVER")
+            else ("UNDER" if side in ("LESS", "UNDER") else "")
+        )
+        player = str(r.get("player", ""))
+        vol = _volatility_label(player_games.get(player))
+        vol_label = vol[0] if vol else ""
+        rows.append({
+            "player": player,
+            "market": str(r.get("market", r.get("target", ""))),
+            "side": side or "—",
+            "line": r.get("posted line", r.get("line")),
+            "edge": ev,
+            "abs_edge": abs(ev),
+            "conf": conf if conf is not None else 0,
+            "direction": direction,
+            "vol": vol_label,
+        })
+
+    if not rows:
+        flow.append(_para(
+            "Signal stack requires at least one ranked signal.", styles["muted"],
+        ))
+        return flow
+
+    rows.sort(key=lambda d: (-d["conf"], -d["abs_edge"]))
+
+    # Anchor: highest confidence with non-HIGH volatility (fallback to first).
+    anchor = next(
+        (d for d in rows if d["vol"] != "HIGH VOL"), rows[0],
+    )
+    # Differentiator: highest |edge| in the OPPOSITE direction (or any other
+    # player) so we don't double down on the same tempo bucket.
+    diff_candidates = [
+        d for d in rows
+        if d["player"] != anchor["player"]
+        and (not anchor["direction"] or d["direction"] != anchor["direction"])
+    ]
+    if not diff_candidates:
+        diff_candidates = [d for d in rows if d["player"] != anchor["player"]]
+    differentiator = max(diff_candidates, key=lambda d: d["abs_edge"]) if diff_candidates else None
+
+    # Secondary: next-best confidence not already chosen and not same player.
+    chosen_players = {anchor["player"]}
+    if differentiator is not None:
+        chosen_players.add(differentiator["player"])
+    secondary = next(
+        (d for d in rows if d["player"] not in chosen_players), None,
+    )
+
+    def _slip_card(label: str, pick: dict | None, accent_hex: str) -> Table:
+        if pick is None:
+            body_html = (
+                "<font size='8' color='#6b7480'>No qualifying pick.</font>"
+            )
+        else:
+            edge_color = "#0a8f3a" if pick["edge"] > 0 else (
+                "#c0392b" if pick["edge"] < 0 else "#11151c"
+            )
+            line_str = _fmt(pick["line"], 1) if pick["line"] is not None else "—"
+            vol_chip = (
+                f" &nbsp;<font size='6.5' color='#6b7480'>&middot; "
+                f"{pick['vol']}</font>"
+                if pick["vol"] else ""
+            )
+            body_html = (
+                f"<font size='10' color='#11151c'><b>{_safe_text(pick['player'])}</b>"
+                f"</font><br/>"
+                f"<font size='8.5' color='#11151c'>{_safe_text(pick['market'])} "
+                f"<b>{_side_display(pick['side'])}</b> {line_str}</font><br/>"
+                f"<font size='7.5' color='#6b7480'>EDGE "
+                f"<font color='{edge_color}'><b>"
+                f"{_fmt_signed(pick['edge'], 2)}</b></font> &nbsp;"
+                f"&middot; CONF <b>{pick['conf']}/100</b>{vol_chip}</font>"
+            )
+        body = Paragraph(body_html, styles["body"])
+        eyebrow = Paragraph(
+            f"<font size='7' color='{accent_hex}'><b>{label}</b></font>",
+            styles["body"],
+        )
+        card = Table(
+            [[eyebrow], [body]],
+            colWidths=[2.25 * inch],
+        )
+        card.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fff9f2")),
+            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor(accent_hex)),
+            ("LINEBEFORE", (0, 0), (0, -1), 3, colors.HexColor(accent_hex)),
+            ("LEFTPADDING", (0, 0), (-1, -1), 10),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ]))
+        return card
+
+    cards_row = Table(
+        [[
+            _slip_card("BEST ANCHOR", anchor, "#cc5a00"),
+            _slip_card("BEST DIFFERENTIATOR", differentiator, "#0a8f3a"),
+            _slip_card("SECONDARY ADD", secondary, "#3b6fb3"),
+        ]],
+        colWidths=[2.33 * inch, 2.33 * inch, 2.33 * inch],
+    )
+    cards_row.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    flow.append(cards_row)
+    flow.append(Spacer(1, 10))
+
+    # Correlation warnings — clusters of same-game / same-direction picks.
+    clusters = _correlation_clusters(edge_df)
+    if clusters:
+        # Wrap long cells in Paragraphs so they wrap inside the column instead
+        # of overflowing into adjacent cells (the cause of the previous
+        # "Phoenix Suns" overlapping "UNDER" rendering wart).
+        cell_style = ParagraphStyle(
+            "warn_cell", parent=styles["body"], fontSize=8.5, leading=10.5,
+        )
+        warn_rows: list[list[Any]] = [["Matchup", "Direction", "Players", "Legs"]]
+        for c in clusters[:5]:
+            players_txt = ", ".join(c["players"][:4]) + (
+                "\u2026" if len(c["players"]) > 4 else ""
+            )
+            warn_rows.append([
+                Paragraph(_safe_text(c["matchup"]), cell_style),
+                c["direction"],
+                Paragraph(_safe_text(players_txt), cell_style),
+                str(c["count"]),
+            ])
+        warn_table = _styled_table(
+            warn_rows,
+            col_widths=[2.35 * inch, 0.75 * inch, 3.35 * inch, 0.55 * inch],
+            align_right_cols=[3],
+        )
+        warn_eyebrow = Paragraph(
+            "<font size='7.5' color='#c0392b'><b>AVOID STACKING &middot; "
+            "TEMPO-CORRELATED LEGS</b></font>",
+            styles["body"],
+        )
+        warn_note = Paragraph(
+            "<font size='8' color='#6b7480'>These calls share a game and a "
+            "direction \u2014 they\u2019ll mostly hit or miss together, which "
+            "breaks parlay independence. Treat them as a single thesis, not "
+            "separate legs.</font>",
+            styles["body"],
+        )
+        flow.append(KeepTogether([
+            warn_eyebrow, Spacer(1, 4), warn_table, Spacer(1, 4), warn_note,
+        ]))
+    else:
+        ok = Paragraph(
+            "<font size='8' color='#6b7480'>No correlated clusters detected "
+            "\u2014 your top signals are spread across independent games.</font>",
+            styles["body"],
+        )
+        flow.append(ok)
+
+    flow.append(Spacer(1, 8))
+    return flow
+
+
 def _per_player_flowables(
     roster: dict[str, list[str]],
     *,
@@ -3279,9 +3914,10 @@ def _per_player_flowables(
     ai_sections: dict[str, Any] | None,
     player_history: dict[str, pd.DataFrame] | None = None,
     player_games: dict[str, pd.DataFrame] | None = None,
+    sigma_lookup: dict[str, float] | None = None,
     styles: dict,
 ) -> list:
-    flow: list = _section_header("Per-player breakdown", "Section 07", styles, anchor="sec-players")
+    flow: list = _section_header("Per-player breakdown", "Section 08", styles, anchor="sec-players")
     if not roster:
         flow.append(_para("Roster is empty.", styles["muted"]))
         return flow
@@ -3312,6 +3948,7 @@ def _per_player_flowables(
             prediction=p_prediction,
             history=player_history.get(player),
             games=player_games.get(player),
+            sigma_lookup=sigma_lookup,
             styles=styles,
         )
         # Each player block already KeepTogether's its own hero band; flowing
@@ -3452,18 +4089,20 @@ def build_pdf_report(
     # Each top-level row carries a short description so the TOC reads like a
     # glossy magazine front matter rather than a bare hyperlink list.
     toc_items: list[tuple] = [
-        ("Quick calls", "sec-quick-calls",
-         "Skim-friendly call sheet \u2014 every more/less lean ranked."),
+        ("Signal summary", "sec-quick-calls",
+         "Skim-friendly summary \u2014 every above/below-line signal ranked."),
         ("Slate brief", "sec-exec",
          "Loudest signal, slate posture, and AI-augmented context."),
         ("Signal spotlight  |  top 3", "sec-spotlight",
-         "The three biggest model-vs-market gaps tonight."),
+         "The three biggest model-vs-line gaps tonight."),
         ("Analytics visuals", "sec-analytics",
-         "R\u00b2 lollipop, conviction leaderboard, and edge distribution."),
+         "R\u00b2 lollipop, conviction leaderboard, and signal distribution."),
         ("Model quality", "sec-model-quality",
          "Per-model R\u00b2 and RMSE with confidence tiers."),
-        ("Top edges \u2014 model vs market", "sec-edges",
-         "Full ranked table of every callable edge."),
+        ("Model vs line gaps", "sec-edges",
+         "Full ranked table of every model-vs-line signal."),
+        ("Signal stack", "sec-slip",
+         "Anchor, differentiator, and avoid-stack guidance."),
         ("Per-player breakdown", "sec-players",
          "Recent form, predictions, news, and analyst notes."),
     ]
@@ -3492,9 +4131,11 @@ def build_pdf_report(
         edge_df=edge_df,
         styles=styles,
     ))
+    sigma_lookup = _metric_sigma_lookup(bundle_metrics)
     flow.extend(_quick_calls_flowables(
         edge_df=edge_df,
         recent_form=recent_form,
+        sigma_lookup=sigma_lookup,
         styles=styles,
     ))
     flow.extend(_executive_summary_flowables(
@@ -3504,14 +4145,20 @@ def build_pdf_report(
         ai_sections=ai_sections,
         styles=styles,
     ))
-    flow.extend(_spotlight_flowables(edge_df, styles))
+    flow.extend(_spotlight_flowables(edge_df, styles, sigma_lookup=sigma_lookup))
     flow.extend(_analytics_visuals_flowables(
         metrics=bundle_metrics,
         edge_df=edge_df,
         styles=styles,
     ))
     flow.extend(_model_quality_flowables(bundle_metrics, styles))
-    flow.extend(_edge_board_flowables(edge_df, styles))
+    flow.extend(_edge_board_flowables(edge_df, styles, sigma_lookup=sigma_lookup))
+    flow.extend(_slip_builder_flowables(
+        edge_df=edge_df,
+        sigma_lookup=sigma_lookup,
+        player_games=player_games,
+        styles=styles,
+    ))
     flow.extend(_per_player_flowables(
         roster,
         edge_df=edge_df,
@@ -3520,6 +4167,7 @@ def build_pdf_report(
         ai_sections=ai_sections,
         player_history=player_history,
         player_games=player_games,
+        sigma_lookup=sigma_lookup,
         styles=styles,
     ))
 

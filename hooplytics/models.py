@@ -22,11 +22,21 @@ from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegresso
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from .constants import MODEL_CACHE_DIR, MODEL_SPECS
+
+# Targets that are non-negative count-like distributions where Poisson loss
+# typically beats MSE (heteroscedastic, lower bound at zero, often skewed).
+COUNT_LIKE_TARGETS: frozenset[str] = frozenset({"stl_blk", "turnovers", "threepm"})
+
+# Half-life (in days) for the exponential recency weight applied to training
+# rows. Recent games carry more signal because rotations, role, and shot
+# diet drift; ~120d ≈ a third of a season.
+RECENCY_HALF_LIFE_DAYS: float = 120.0
 
 # ── RACE feature groups ─────────────────────────────────────────────────────
 SCHEDULE_CONTEXT_FEATURES = [
@@ -294,12 +304,38 @@ def _make_model(family: str, random_state: int) -> tuple[Pipeline, list[dict[str
     if family == "hgb":
         pipe = Pipeline([
             ("impute", SimpleImputer(strategy="median")),
-            ("model", HistGradientBoostingRegressor(random_state=random_state)),
+            ("model", HistGradientBoostingRegressor(
+                random_state=random_state,
+                early_stopping=True,
+                validation_fraction=0.15,
+                n_iter_no_change=20,
+            )),
         ])
         grid = [
-            {"model__max_depth": 4, "model__learning_rate": 0.05, "model__max_iter": 300},
-            {"model__max_depth": 6, "model__learning_rate": 0.05, "model__max_iter": 400},
-            {"model__max_depth": 8, "model__learning_rate": 0.03, "model__max_iter": 500},
+            {"model__max_depth": 4, "model__learning_rate": 0.05, "model__max_iter": 400},
+            {"model__max_depth": 6, "model__learning_rate": 0.05, "model__max_iter": 500},
+            {"model__max_depth": 8, "model__learning_rate": 0.03, "model__max_iter": 600},
+        ]
+        return pipe, grid
+
+    if family == "hgb_poisson":
+        # Poisson loss for non-negative count targets (stl_blk, turnovers,
+        # threepm). Better likelihood fit than squared error on skewed,
+        # zero-floored distributions.
+        pipe = Pipeline([
+            ("impute", SimpleImputer(strategy="median")),
+            ("model", HistGradientBoostingRegressor(
+                loss="poisson",
+                random_state=random_state,
+                early_stopping=True,
+                validation_fraction=0.15,
+                n_iter_no_change=20,
+            )),
+        ])
+        grid = [
+            {"model__max_depth": 4, "model__learning_rate": 0.05, "model__max_iter": 400},
+            {"model__max_depth": 6, "model__learning_rate": 0.04, "model__max_iter": 500},
+            {"model__max_depth": 8, "model__learning_rate": 0.03, "model__max_iter": 600},
         ]
         return pipe, grid
 
@@ -322,6 +358,7 @@ def _fit_best_family(
     y_val: np.ndarray,
     family: str,
     random_state: int,
+    sample_weight: np.ndarray | None = None,
 ) -> tuple[Any, dict[str, Any], dict[str, float]]:
     # Drop columns that have no observed values in the training data so that
     # SimpleImputer never receives fully-NaN columns (suppresses sklearn warnings
@@ -332,21 +369,77 @@ def _fit_best_family(
 
     pipe, grid = _make_model(family, random_state=random_state)
 
+    # Use a 3-fold expanding-window TimeSeriesSplit for hyperparameter
+    # selection when we have enough data — averaging across folds gives a
+    # far more stable signal than the single train/val split, which was
+    # the main source of noise in the previous RACE bake-off. Falls back
+    # to the original single-split scoring on tiny datasets.
+    use_cv = len(X_train) >= 120
+    n_splits = 3 if use_cv else 0
+    tscv = TimeSeriesSplit(n_splits=n_splits) if use_cv else None
+
+    # KNN doesn't accept sample_weight via the pipeline reliably; skip
+    # weighting for that family. (Currently unused after pruning, kept for
+    # safety in case it is reintroduced.)
+    weights_supported = family != "knn"
+    sw = sample_weight if (weights_supported and sample_weight is not None) else None
+
     best_est = None
     best_params: dict[str, Any] = {}
     best_m = {"MAE": np.inf, "RMSE": np.inf, "R²": -np.inf}
+    best_score: tuple[float, float] = (np.inf, np.inf)
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         for params in grid:
             est = pipe.set_params(**params)
-            est.fit(X_train, y_train)
-            yhat = _prediction_array(est.predict(X_val))
-            m = _metrics(y_val, yhat)
-            if (m["MAE"] < best_m["MAE"]) or (np.isclose(m["MAE"], best_m["MAE"]) and m["RMSE"] < best_m["RMSE"]):
+
+            if tscv is not None:
+                fold_maes: list[float] = []
+                cv_ok = True
+                for tr_idx, te_idx in tscv.split(X_train):
+                    Xtr = X_train.iloc[tr_idx]
+                    ytr = y_train[tr_idx]
+                    Xte = X_train.iloc[te_idx]
+                    yte = y_train[te_idx]
+                    fit_kwargs: dict[str, Any] = {}
+                    if sw is not None:
+                        fit_kwargs["model__sample_weight"] = sw[tr_idx]
+                    try:
+                        est.fit(Xtr, ytr, **fit_kwargs)
+                    except Exception:
+                        cv_ok = False
+                        break
+                    yhat_fold = _prediction_array(est.predict(Xte))
+                    fold_maes.append(float(mean_absolute_error(yte, yhat_fold)))
+                if not cv_ok or not fold_maes:
+                    continue
+                cv_mae = float(np.mean(fold_maes))
+
+                # Refit on all of X_train so the held-out val metrics are
+                # comparable to the previous behavior and we can score the
+                # selected variant downstream.
+                fit_kwargs = {"model__sample_weight": sw} if sw is not None else {}
+                est.fit(X_train, y_train, **fit_kwargs)
+                yhat = _prediction_array(est.predict(X_val))
+                m = _metrics(y_val, yhat)
+                m["CV_MAE"] = cv_mae
+                score = (cv_mae, m["RMSE"])
+            else:
+                fit_kwargs = {"model__sample_weight": sw} if sw is not None else {}
+                try:
+                    est.fit(X_train, y_train, **fit_kwargs)
+                except Exception:
+                    continue
+                yhat = _prediction_array(est.predict(X_val))
+                m = _metrics(y_val, yhat)
+                score = (m["MAE"], m["RMSE"])
+
+            if score < best_score:
                 best_est = est
                 best_params = dict(params)
                 best_m = m
+                best_score = score
 
     if best_est is None:
         dum = DummyRegressor(strategy="mean").fit(X_train, y_train)
@@ -414,6 +507,42 @@ def _split_random(
 
 def _available_features(df: pd.DataFrame, features: list[str]) -> list[str]:
     return [f for f in features if f in df.columns]
+
+
+def _recency_weights(
+    dates: pd.Series | None,
+    *,
+    half_life_days: float = RECENCY_HALF_LIFE_DAYS,
+    n_rows: int,
+) -> np.ndarray | None:
+    """Exponential-decay sample weights so recent games dominate.
+
+    Returns ``None`` if dates are missing/unusable so callers can skip
+    weighting cleanly. Latest game gets weight 1.0; weight halves every
+    ``half_life_days`` going back in time.
+    """
+    if dates is None or n_rows == 0:
+        return None
+    dt = pd.to_datetime(dates, errors="coerce")
+    if dt.isna().all():
+        return None
+    latest = dt.max()
+    age_days = (latest - dt).dt.days.astype("float64").to_numpy()
+    age_days = np.where(np.isnan(age_days), float(np.nanmedian(age_days)) if not np.isnan(age_days).all() else 0.0, age_days)
+    return np.power(0.5, age_days / max(half_life_days, 1.0))
+
+
+def _families_for_target(name: str) -> list[str]:
+    """Curated per-target family list.
+
+    KNN was dropped from the bake-off — on tabular game logs it almost never
+    beat ridge/HGB and inflated training time. Count-like targets get a
+    Poisson-loss HGB candidate which usually outperforms MSE-loss boosters
+    on zero-floored skewed distributions.
+    """
+    if name in COUNT_LIKE_TARGETS:
+        return ["ridge", "hgb", "hgb_poisson"]
+    return ["ridge", "hgb", "rf"]
 
 
 def _fit_eligible_features(
@@ -575,6 +704,18 @@ def train_models(
         y_train = train_df[target].to_numpy()
         y_val = val_df[target].to_numpy()
 
+        # Recency-weight training rows so recent games carry more signal.
+        # Computed once per target — same weights flow through every variant
+        # and every family that supports sample_weight.
+        train_weights = _recency_weights(
+            train_df.get("game_date"),
+            n_rows=len(train_df),
+        )
+        # Poisson loss requires strictly non-negative targets — clip just
+        # in case any synthetic/edge row sneaks in below zero.
+        if (y_train < 0).any():
+            y_train = np.clip(y_train, 0.0, None)
+
         variant_features = _target_variant_features(name, sub)
         if fast_mode:
             # Only evaluate the baseline (lagged) feature set in fast mode.
@@ -592,9 +733,7 @@ def train_models(
             if fast_mode:
                 families = ["ridge"]
             else:
-                families = ["ridge", "rf", "hgb"]
-                if name in {"points", "rebounds", "threepm", "pra"}:
-                    families.append("knn")
+                families = _families_for_target(name)
 
             family_candidates: list[dict[str, Any]] = []
             for fam in families:
@@ -606,6 +745,7 @@ def train_models(
                         y_val,
                         family=fam,
                         random_state=random_state,
+                        sample_weight=train_weights,
                     )
                     family_candidates.append(
                         {
@@ -670,6 +810,12 @@ def train_models(
         # Refit selected model(s) on full target data (train+val) for inference.
         X_full = sub
         y_full = sub[target].to_numpy()
+        if (y_full < 0).any():
+            y_full = np.clip(y_full, 0.0, None)
+        full_weights = _recency_weights(
+            sub.get("game_date"),
+            n_rows=len(sub),
+        )
 
         if blend_use and blend_estimator is not None and blend_metrics is not None:
             refit_components: list[tuple[Any, list[str], float]] = []
@@ -683,6 +829,7 @@ def train_models(
                     y_full,
                     family=fam,
                     random_state=random_state,
+                    sample_weight=full_weights,
                 )
                 w = 1.0 / max(info["metrics"]["MAE"], 1e-6)
                 refit_components.append((est_refit, feats, w))
@@ -713,6 +860,7 @@ def train_models(
                 y_full,
                 family=selected_family,
                 random_state=random_state,
+                sample_weight=full_weights,
             )
             selected_params.update(params_refit)
             final_est = RACERegressor([(est_refit, feats, 1.0)], model_family=selected_family)
@@ -821,7 +969,7 @@ def ensure_models(
     """Load a cached RACE bundle matching ``player_data``, or train + save one."""
     players = sorted(player_data["player"].dropna().unique().tolist()) if "player" in player_data.columns else []
     seasons = sorted(player_data["season"].dropna().unique().tolist()) if "season" in player_data.columns else []
-    spec_version = "race-v1-fast" if fast_mode else "race-v1"
+    spec_version = "race-v2-fast" if fast_mode else "race-v2"
     key = _bundle_hash(players, seasons, spec_version=spec_version)
     cache_path = Path(cache_dir) / f"models_{key}.joblib"
 
