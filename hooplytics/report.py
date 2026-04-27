@@ -49,16 +49,16 @@ from reportlab.platypus import (
 
 # ── Font registration ──────────────────────────────────────────────────────
 # Standard PDF Type-1 fonts (Helvetica) only cover WinAnsi 8-bit chars, which
-# turns characters like →, ć, and certain dashes into "tofu" boxes. We try a
+# turns characters like >, ć, and certain dashes into "tofu" boxes. We try a
 # few common system TrueType fonts that ship with broad Unicode coverage so
 # names like "Nurkić", arrows, and curly punctuation render cleanly. If none
 # is available we silently fall back to Helvetica + an ASCII substitution
 # pass in :func:`_safe_text`.
 _TTF_CANDIDATES: tuple[tuple[str, str, str], ...] = (
-    # macOS — Helvetica is .ttc and reportlab can't load it directly. Use
-    # Arial / Arial Unicode / DejaVu when present.
-    ("HoopArial", "Arial.ttf", "Arial Bold.ttf"),
+    # macOS — Helvetica is .ttc and reportlab can't load it directly. Prefer
+    # Arial Unicode for broad glyph coverage, then fall back to Arial / DejaVu.
     ("HoopArial", "Arial Unicode.ttf", "Arial Unicode.ttf"),
+    ("HoopArial", "Arial.ttf", "Arial Bold.ttf"),
     ("HoopArial", "DejaVuSans.ttf", "DejaVuSans-Bold.ttf"),
     # Linux — DejaVu is the default on Debian/Ubuntu.
     ("HoopArial", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -109,41 +109,45 @@ _BODY_FONT, _BOLD_FONT = _register_unicode_font()
 
 
 # ── Unicode safety net ─────────────────────────────────────────────────────
-# When the registered font is just plain Helvetica we substitute glyphs that
-# WinAnsi cannot render so the report never shows tofu boxes.
+# Some macOS / Linux fonts render specific Unicode glyphs as tofu boxes even
+# though the TTF claims to support them. To guarantee a beautiful report on
+# every machine we strip the most fragile characters down to ASCII at render
+# time, regardless of which font registered.
 _ASCII_SUBSTITUTIONS: dict[str, str] = {
-    "—": "-",
-    "–": "-",
-    "→": ">",
-    "←": "<",
-    "↑": "^",
-    "↓": "v",
-    "“": '"',
-    "”": '"',
-    "‘": "'",
-    "’": "'",
-    "…": "...",
-    "•": "-",
-    "ć": "c",
-    "Ć": "C",
-    "č": "c",
-    "Č": "C",
-    "š": "s",
-    "Š": "S",
-    "ž": "z",
-    "Ž": "Z",
-    "đ": "d",
-    "Đ": "D",
-    "ñ": "n",
-    "Ñ": "N",
+    "\u2014": "-",     # — em dash
+    "\u2013": "-",     # – en dash
+    "\u2192": ">",     # → rightwards arrow
+    "\u2190": "<",     # ← leftwards arrow
+    "\u2191": "^",     # ↑ upwards arrow
+    "\u2193": "v",     # ↓ downwards arrow
+    "\u201c": '"',     # “ left double quote
+    "\u201d": '"',     # ” right double quote
+    "\u2018": "'",     # ‘ left single quote
+    "\u2019": "'",     # ’ right single quote
+    "\u2026": "...",   # … horizontal ellipsis
+    "\u2022": "-",     # • bullet
+    "\u2502": "|",     # │ box-drawings light vertical
+    "\u2500": "-",     # ─ box-drawings light horizontal
+    "\u203a": ">",     # › single right angle quote
+    "\u2039": "<",     # ‹ single left angle quote
+    "\u00b7": "|",     # · middle dot (renders as tofu in some Arial builds)
+    "\u2264": "<=",    # ≤ less-than-or-equal
+    "\u25a0": "",      # ■ black square (defensive)
+    "\u25aa": "",      # ▪ black small square
+    # Latin Extended-A diacritics — Arial WinAnsi lacks these.
+    "\u0107": "c", "\u0106": "C",   # ć Ć
+    "\u010d": "c", "\u010c": "C",   # č Č
+    "\u0161": "s", "\u0160": "S",   # š Š
+    "\u017e": "z", "\u017d": "Z",   # ž Ž
+    "\u0111": "d", "\u0110": "D",   # đ Đ
+    "\u00f1": "n", "\u00d1": "N",   # ñ Ñ
 }
 
 
 def _safe_text(s: Any) -> str:
-    """Return ``s`` with non-WinAnsi glyphs swapped when no Unicode font is set."""
+    """Return ``s`` with fragile glyphs swapped to ASCII so the PDF never
+    shows tofu/■ boxes regardless of which font ReportLab loaded."""
     text = str(s if s is not None else "")
-    if _BODY_FONT != "Helvetica":
-        return text
     for src, dst in _ASCII_SUBSTITUTIONS.items():
         if src in text:
             text = text.replace(src, dst)
@@ -250,7 +254,7 @@ class _AnchorFlowable(Flowable):
 
 def _short(text: Any, limit: int = 18) -> str:
     s = str(text or "")
-    return s if len(s) <= limit else s[: limit - 1] + "…"
+    return s if len(s) <= limit else s[: limit - 1] + "..."
 
 
 # ── Styles ──────────────────────────────────────────────────────────────────
@@ -397,7 +401,7 @@ def _draw_cover_chrome(canvas, doc) -> None:
     canvas.setFillColor(INK_MUTED)
     canvas.drawCentredString(
         width / 2, 0.45 * inch,
-        "Hooplytics  │  Roster Analytics Report",
+        "Hooplytics  |  Roster Analytics Report",
     )
     canvas.restoreState()
 
@@ -484,7 +488,7 @@ def _toc_flowables(
             left = Paragraph(
                 f'<link href="#{anchor}" color="#6b7686">'
                 f'&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'
-                f'<font size="9" color="#ff7a18">›</font>'
+                f'<font size="9" color="#ff7a18">></font>'
                 f'&nbsp;&nbsp;<font size="9.5" color="#3a4250">{label}</font>'
                 f'</link>',
                 styles["body"],
@@ -503,7 +507,7 @@ def _toc_flowables(
             )
             right = Paragraph(
                 f'<link href="#{anchor}" color="#cc5a00">'
-                f'<font size="11" color="#cc5a00"><b>›</b></font>'
+                f'<font size="11" color="#cc5a00"><b>></b></font>'
                 f'</link>',
                 ParagraphStyle(
                     "toc_jump", parent=styles["body"],
@@ -720,7 +724,7 @@ def _r2_lollipop_chart(metrics: pd.DataFrame) -> Drawing | None:
     height = 2.55 * inch
     drawing = Drawing(width, height)
     drawing.add(String(
-        0, height - 14, "Model R²  │  accuracy lollipop",
+        0, height - 14, "Model R²  |  accuracy lollipop",
         fontName=_BOLD_FONT, fontSize=10.5, fillColor=INK_DARK,
     ))
     drawing.add(String(
@@ -803,7 +807,7 @@ def _diverging_edge_chart(edge_df: pd.DataFrame) -> Drawing | None:
     df = df.sort_values("abs_edge", ascending=False).head(10).iloc[::-1]
 
     labels = [
-        f"{_short(r.get('player', ''), 14)}  │  {_short(r.get('model', ''), 9)}"
+        f"{_short(r.get('player', ''), 14)}  |  {_short(r.get('model', ''), 9)}"
         for _, r in df.iterrows()
     ]
     values = [float(v) for v in df["edge_num"]]
@@ -813,7 +817,7 @@ def _diverging_edge_chart(edge_df: pd.DataFrame) -> Drawing | None:
     height = 2.85 * inch
     drawing = Drawing(width, height)
     drawing.add(String(
-        0, height - 14, "Edge magnitudes  │  model vs market",
+        0, height - 14, "Edge magnitudes  |  model vs market",
         fontName=_BOLD_FONT, fontSize=10.5, fillColor=INK_DARK,
     ))
     drawing.add(String(
@@ -1444,7 +1448,7 @@ def _edge_confidence_scatter(
             ))
             name = str(r.get("player", "")) or "—"
             market = str(r.get("model", "")) or ""
-            label = f"{name}  │  {market}" if market else name
+            label = f"{name}  |  {market}" if market else name
             legend.append((idx, label, color))
 
     return drawing, legend
@@ -1614,7 +1618,7 @@ def _player_form_sparklines(
 
     drawing = Drawing(width, height)
     drawing.add(String(
-        0, height - 12, "Recent form  │  last games",
+        0, height - 12, "Recent form  |  last games",
         fontName=_BOLD_FONT, fontSize=9.5, fillColor=INK_DARK,
     ))
     drawing.add(String(
@@ -1794,7 +1798,7 @@ def _risk_chips(
     """Compute small risk / signal chips shown above the per-player rationale."""
     chips: list[tuple[str, colors.Color]] = []
 
-    # Back-to-back: most recent game within ≤1 day of the prior.
+    # Back-to-back: most recent game within <=1 day of the prior.
     if isinstance(games, pd.DataFrame) and "game_date" in games.columns and len(games) >= 2:
         gd = pd.to_datetime(games["game_date"], errors="coerce").dropna().sort_values()
         if len(gd) >= 2:
@@ -1937,7 +1941,7 @@ def _signal_summary_panel(
 
     head = Paragraph(
         f"<font size='7.5' color='#cc5a00'><b>WHY THIS SIGNAL "
-        f"&nbsp;│&nbsp; {player.upper()}</b></font><br/>"
+        f"&nbsp;|&nbsp; {player.upper()}</b></font><br/>"
         f"<font size='13' color='#11151c'><b>{_short(market.title(), 24)}</b></font> "
         f"<font size='9' color='#6b7686'>&nbsp;&nbsp;grade </font>"
         f"<font size='9' color='#{grade_hex}'><b>{grade.upper()}</b></font>",
@@ -2067,7 +2071,7 @@ def _player_history_table(
             summary_bits.append(
                 f"Avg margin vs line: <b>{margins.mean():+.2f}</b>"
             )
-    summary = "   │   ".join(summary_bits) if summary_bits else (
+    summary = "   |   ".join(summary_bits) if summary_bits else (
         "Resolved outcomes unavailable for this window."
     )
 
@@ -2075,7 +2079,7 @@ def _player_history_table(
         Spacer(1, 6),
         Paragraph(
             f"<font size='7.5' color='#cc5a00'><b>"
-            f"{player.upper()} &nbsp;│&nbsp; HISTORICAL LINES vs OUTCOMES"
+            f"{player.upper()} &nbsp;|&nbsp; HISTORICAL LINES vs OUTCOMES"
             f"</b></font>",
             styles["body"],
         ),
@@ -2180,7 +2184,7 @@ def _cover_flowables(
 
     flow: list = [
         Spacer(1, 1.4 * inch),
-        _para("HOOPLYTICS  │  ROSTER ANALYTICS", styles["cover_eyebrow"]),
+        _para("HOOPLYTICS  |  ROSTER ANALYTICS", styles["cover_eyebrow"]),
         _para("Tonight's Scouting Report.", styles["cover_title"]),
         _para(
             "Decoded edges, model leans, and the loudest signals from your "
@@ -2190,10 +2194,10 @@ def _cover_flowables(
         Spacer(1, 0.5 * inch),
         tiles,
         Spacer(1, 0.35 * inch),
-        _para(f"Generated  │  {meta.generated_at}", styles["cover_tag"]),
-        _para(f"Seasons  │  {seasons_label}", styles["cover_tag"]),
+        _para(f"Generated  |  {meta.generated_at}", styles["cover_tag"]),
+        _para(f"Seasons  |  {seasons_label}", styles["cover_tag"]),
         _para(
-            "Prose  │  " + ("AI-augmented (OpenAI)" if meta.has_ai else "data-only"),
+            "Prose  |  " + ("AI-augmented (OpenAI)" if meta.has_ai else "data-only"),
             styles["cover_tag"],
         ),
     ]
@@ -2306,15 +2310,15 @@ def _bottom_line_flowables(
             if not r2.empty:
                 med = float(r2.median())
                 if med >= 0.50:
-                    conf_label = f"STRONG · {med:.2f}"
+                    conf_label = f"STRONG | {med:.2f}"
                     conf_color = POS_GREEN
                     conf_detail = "Model fit is solid — trust the projections."
                 elif med >= 0.30:
-                    conf_label = f"MIXED · {med:.2f}"
+                    conf_label = f"MIXED | {med:.2f}"
                     conf_color = GOLD
                     conf_detail = "Moderate fit — combine with context, not blindly."
                 else:
-                    conf_label = f"NOISY · {med:.2f}"
+                    conf_label = f"NOISY | {med:.2f}"
                     conf_color = NEG_RED
                     conf_detail = "Low fit tonight — small edges may be noise."
 
@@ -2508,10 +2512,10 @@ def _spotlight_card_flowable(
             f"<br/>"
             f"<font size='8.5' color='#6b7686'>LEAN</font> "
             f"<font size='10' color='{accent_hex}'><b>{side}</b></font>"
-            f"  │  <font size='8.5' color='#6b7686'>EDGE</font> "
+            f"  |  <font size='8.5' color='#6b7686'>EDGE</font> "
             f"<font size='10' color='{accent_hex}'><b>{_fmt_signed(edge_val, 2)}</b></font><br/>"
             f"<font size='8' color='#6b7686'>"
-            f"Line {_fmt(row.get('posted line', row.get('line')), 1)}  │  "
+            f"Line {_fmt(row.get('posted line', row.get('line')), 1)}  |  "
             f"Model {_fmt(row.get('model prediction', row.get('projection')), 2)}"
             f"</font>"
         ),
@@ -2542,7 +2546,7 @@ def _spotlight_card_flowable(
 
 
 def _spotlight_flowables(edge_df: pd.DataFrame | None, styles: dict) -> list:
-    flow: list = _section_header("Signal spotlight  │  top 3", "Section 01A", styles, anchor="sec-spotlight")
+    flow: list = _section_header("Signal spotlight  |  top 3", "Section 01A", styles, anchor="sec-spotlight")
     if edge_df is None or not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
         flow.append(_para("No live signals to spotlight yet.", styles["muted"]))
         return flow
@@ -2711,7 +2715,7 @@ def _player_hero_band(player: str, recent_form: dict[str, float] | None, styles:
                 f"<font size='7' color='#fff1e6'><b>{label}</b></font> "
                 f"<font size='10' color='#ffffff'><b>{_fmt(recent_form[key], 1)}</b></font>"
             )
-    form_html = "   │   ".join(bits) if bits else (
+    form_html = "   |   ".join(bits) if bits else (
         "<font size='9' color='#fff1e6'>No recent-form snapshot.</font>"
     )
 
@@ -2882,7 +2886,7 @@ def _player_block(
         # break so the reader always knows which player the rows belong to.
         breadcrumb = Paragraph(
             f"<font size='7.5' color='#cc5a00'><b>"
-            f"{player.upper()} &nbsp;│&nbsp; MODEL PROJECTIONS"
+            f"{player.upper()} &nbsp;|&nbsp; MODEL PROJECTIONS"
             f"</b></font>",
             styles["body"],
         )
@@ -2982,8 +2986,43 @@ def build_pdf_report(
         "Historical lines vs outcomes" panel inside each player block.
     """
     styles = _build_styles()
+
+    # Sanitize every user-supplied string so fragile glyphs (·, ć, │, ...) can
+    # never reach the PDF as tofu boxes regardless of which font loaded.
+    def _clean_df(df: pd.DataFrame | None) -> pd.DataFrame | None:
+        if df is None or df.empty:
+            return df
+        out = df.copy()
+        for col in out.columns:
+            kind = out[col].dtype.kind
+            # Cover legacy object columns AND pandas 2.x StringDtype/Unicode (kind 'O' or 'U').
+            if kind in ("O", "U") or str(out[col].dtype) in ("string", "str"):
+                out[col] = out[col].map(lambda v: _safe_text(v) if isinstance(v, str) else v)
+        return out
+
+    if roster:
+        roster = {
+            _safe_text(group): [_safe_text(p) for p in players]
+            for group, players in roster.items()
+        }
+    edge_df = _clean_df(edge_df)
+    bundle_metrics = _clean_df(bundle_metrics)
+    if projections:
+        projections = {_safe_text(k): _clean_df(v) for k, v in projections.items()}
+    if recent_form:
+        recent_form = {_safe_text(k): v for k, v in recent_form.items()}
+    if ai_sections:
+        ai_sections = {
+            **ai_sections,
+            "players": {_safe_text(k): v for k, v in (ai_sections.get("players") or {}).items()},
+        }
+    if player_history:
+        player_history = {_safe_text(k): _clean_df(v) for k, v in player_history.items()}
+    if player_games:
+        player_games = {_safe_text(k): _clean_df(v) for k, v in player_games.items()}
+
     meta = _ReportMeta(
-        generated_at=datetime.now().strftime("%b %d, %Y  │  %H:%M"),
+        generated_at=datetime.now().strftime("%b %d, %Y  |  %H:%M"),
         roster_count=len(roster or {}),
         has_ai=bool(ai_sections and (
             ai_sections.get("executive_summary")
@@ -3037,7 +3076,7 @@ def build_pdf_report(
     # and the same anchors register as PDF outline entries for sidebar nav.
     toc_items: list[tuple] = [
         ("Executive summary", "sec-exec"),
-        ("Signal spotlight  │  top 3", "sec-spotlight"),
+        ("Signal spotlight  |  top 3", "sec-spotlight"),
         ("Analytics visuals", "sec-analytics"),
         ("Model quality", "sec-model-quality"),
         ("Top edges — model vs market", "sec-edges"),
