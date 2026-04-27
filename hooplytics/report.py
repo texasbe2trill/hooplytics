@@ -34,6 +34,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     BaseDocTemplate,
+    CondPageBreak,
     Flowable,
     Frame,
     KeepTogether,
@@ -195,10 +196,21 @@ _BOOK_ABBREV: dict[str, str] = {
 }
 
 
-def _abbrev_books(book_names: Any) -> str:
-    """Render a list/string of book titles as a compact comma-joined ticker."""
+def _abbrev_books(book_names: Any, *, max_show: int | None = None) -> str:
+    """Render a list/string of book titles as a compact comma-joined ticker.
+
+    When ``max_show`` is set, anything past that many distinct books is
+    collapsed to a "+N more" tail so a long list (e.g. 8 books) doesn't
+    overflow tight table columns in the report.
+    """
     if book_names is None:
         return "—"
+    # Pandas float NaN sneaks through as a non-None scalar in DataFrame iteration.
+    try:
+        if not isinstance(book_names, (list, tuple, set)) and pd.isna(book_names):
+            return "—"
+    except (TypeError, ValueError):
+        pass
     if isinstance(book_names, (list, tuple, set)):
         names = [str(n) for n in book_names]
     else:
@@ -221,6 +233,9 @@ def _abbrev_books(book_names: Any) -> str:
                 abbr = n[:3].upper()
         if abbr not in seen:
             seen.append(abbr)
+    if max_show is not None and len(seen) > max_show:
+        head = ", ".join(seen[:max_show])
+        return f"{head}, +{len(seen) - max_show} more"
     return ", ".join(seen)
 
 
@@ -447,14 +462,26 @@ def _section_header(
     *,
     anchor: str | None = None,
 ) -> list:
+    """Return the section header flow list.
+
+    The eyebrow + heading pair is wrapped in a ``KeepTogether`` so it can
+    never be orphaned at the bottom of a page (a common formatting wart in
+    earlier renders where "SECTION 04" would dangle on its own).
+    """
     head: list = []
     if anchor:
         head.append(_AnchorFlowable(anchor, title, level=0))
-    head.extend([
+    # Force the next ~1.4" of vertical space to live on the same page as the
+    # header. If less than that remains, ReportLab inserts a page break BEFORE
+    # the eyebrow — which keeps the section title attached to its content
+    # instead of stranding "SECTION 05" at the bottom of a page.
+    head.append(CondPageBreak(1.4 * inch))
+    block = KeepTogether([
         _para(eyebrow.upper(), styles["eyebrow"]),
         _para(title, styles["h1"]),
         Spacer(1, 4),
     ])
+    head.append(block)
     return head
 
 
@@ -1538,7 +1565,7 @@ def _analytics_visuals_flowables(
     edge_df: pd.DataFrame | None,
     styles: dict,
 ) -> list:
-    flow: list = _section_header("Analytics visuals", "Section 02A", styles, anchor="sec-analytics")
+    flow: list = _section_header("Analytics visuals", "Section 03", styles, anchor="sec-analytics")
 
     rendered = False
     if isinstance(metrics, pd.DataFrame) and not metrics.empty:
@@ -1857,22 +1884,27 @@ def _risk_chips(
 def _risk_chip_strip(chips: list[tuple[str, colors.Color]], styles: dict) -> Table | None:
     if not chips:
         return None
+    # Chips render as quiet pills: a colored leading dot + dark label on a
+    # faint panel background. Far less visually loud than the previous
+    # filled buttons that competed with the orange hero band above them.
     cells: list = []
     for label, color in chips[:6]:
         hex_str = color.hexval()[2:] if hasattr(color, "hexval") else "11151c"
         para = Paragraph(
-            f"<font size='7' color='#ffffff'><b>{label}</b></font>",
+            f"<font size='9' color='#{hex_str}'>●</font>"
+            f"&nbsp;&nbsp;<font size='7' color='#11151c'><b>{label}</b></font>",
             ParagraphStyle(
                 "chip", parent=styles["body"], leading=10, alignment=TA_CENTER,
             ),
         )
         inner = Table([[para]], colWidths=[1.05 * inch])
         inner.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), color),
-            ("LEFTPADDING", (0, 0), (-1, -1), 4),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-            ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("BACKGROUND", (0, 0), (-1, -1), PANEL_BG),
+            ("BOX", (0, 0), (-1, -1), 0.4, PANEL_BORDER),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
         ]))
         cells.append(inner)
     while len(cells) < 6:
@@ -1895,8 +1927,14 @@ def _signal_summary_panel(
     recent_form: dict[str, float] | None,
     history_df: pd.DataFrame | None,
     styles: dict,
+    width: float | None = None,
 ) -> Table | None:
-    """Compact 'Why this signal' panel: top edge + form anchor + hit-rate."""
+    """Compact 'Why this signal' panel: top edge + form anchor + hit-rate.
+
+    ``width`` (in points) lets callers expand the panel to full content
+    width when there's no donut paired beside it; defaults to the original
+    3.95" two-column width.
+    """
     if not (isinstance(edge_df, pd.DataFrame) and not edge_df.empty):
         return None
     sub = edge_df[edge_df.get("player") == player].copy()
@@ -1981,7 +2019,23 @@ def _signal_summary_panel(
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
     ]))
 
-    panel = Table([[head], [body]], colWidths=[3.95 * inch])
+    panel_w = width if width is not None else (3.95 * inch)
+    # Re-flow the inner body table to match the outer panel width.
+    if width is not None:
+        label_w = 1.6 * inch
+        value_w = panel_w - label_w - (2 * 8)  # match LEFT/RIGHTPADDING
+        body = Table(body_cells, colWidths=[label_w, value_w])
+        body.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("INNERGRID", (0, 0), (-1, -1), 0.25, PANEL_BORDER),
+            ("BOX", (0, 0), (-1, -1), 0.25, PANEL_BORDER),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+
+    panel = Table([[head], [body]], colWidths=[panel_w])
     panel.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (0, 0), BRAND_ORANGE_SOFT),
         ("LINEBELOW", (0, 0), (0, 0), 1.2, BRAND_ORANGE),
@@ -2240,6 +2294,9 @@ def _bottom_line_flowables(
     top_detail = "Connect odds + run the model to populate the leaderboard."
     top_color = INK_FAINT
     top_edge_str = "—"
+    top_line: Any = None
+    top_proj: Any = None
+    top_market = ""
 
     lean_label = "BALANCED"
     lean_detail = "No directional pressure across the slate."
@@ -2274,6 +2331,9 @@ def _bottom_line_flowables(
                 f"{int(top['books_n'])} books."
             )
             top_edge_str = _fmt_signed(top_edge_val, 2)
+            top_line = top.get("posted line", top.get("line"))
+            top_proj = top.get("model prediction", top.get("projection"))
+            top_market = str(top.get("model", "—")).upper()
 
             # Slate posture
             label, pos, neg = _slate_lean_label(edge_df)
@@ -2407,12 +2467,30 @@ def _bottom_line_flowables(
         ]))
         return t
 
-    tile_top = _tile("THE PLAY", top_label, top_detail, top_color)
+    # MODEL VS LINE — the actionable comparison the headline implies but
+    # never spells out. Replaces the redundant "THE PLAY" tile that just
+    # echoed the headline word-for-word.
+    if top_line is not None and top_proj is not None and top_edge_str != "—":
+        try:
+            line_str = _fmt(top_line, 1)
+            proj_str = _fmt(top_proj, 2)
+            mvl_label = f"{proj_str}  vs  {line_str}"
+            mvl_detail = (
+                f"Model projects {proj_str} on the {top_market.lower()} line of "
+                f"{line_str}."
+            )
+        except Exception:
+            mvl_label = top_edge_str
+            mvl_detail = "Model vs market gap on the loudest edge."
+    else:
+        mvl_label = "—"
+        mvl_detail = "No mapped line available for the loudest edge."
+    tile_play = _tile("MODEL  vs  LINE", mvl_label, mvl_detail, top_color)
     tile_lean = _tile("SLATE POSTURE", lean_label, lean_detail, lean_color)
     tile_conf = _tile("MODEL CONFIDENCE", conf_label, conf_detail, conf_color)
 
     tiles = Table(
-        [[tile_top, tile_lean, tile_conf]],
+        [[tile_play, tile_lean, tile_conf]],
         colWidths=[2.34 * inch, 2.34 * inch, 2.34 * inch],
     )
     tiles.setStyle(TableStyle([
@@ -2546,7 +2624,7 @@ def _spotlight_card_flowable(
 
 
 def _spotlight_flowables(edge_df: pd.DataFrame | None, styles: dict) -> list:
-    flow: list = _section_header("Signal spotlight  |  top 3", "Section 01A", styles, anchor="sec-spotlight")
+    flow: list = _section_header("Signal spotlight  |  top 3", "Section 02", styles, anchor="sec-spotlight")
     if edge_df is None or not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
         flow.append(_para("No live signals to spotlight yet.", styles["muted"]))
         return flow
@@ -2584,7 +2662,7 @@ def _spotlight_flowables(edge_df: pd.DataFrame | None, styles: dict) -> list:
 
 # ── Section: model quality ──────────────────────────────────────────────────
 def _model_quality_flowables(metrics: pd.DataFrame | None, styles: dict) -> list:
-    flow: list = _section_header("Model quality", "Section 02", styles, anchor="sec-model-quality")
+    flow: list = _section_header("Model quality", "Section 04", styles, anchor="sec-model-quality")
     if metrics is None or not isinstance(metrics, pd.DataFrame) or metrics.empty:
         flow.append(_para("Model metrics unavailable.", styles["muted"]))
         return flow
@@ -2642,7 +2720,7 @@ def _edge_board_flowables(
     *,
     top_n: int = 14,
 ) -> list:
-    flow: list = _section_header("Top edges — model vs market", "Section 03", styles, anchor="sec-edges")
+    flow: list = _section_header("Top edges — model vs market", "Section 05", styles, anchor="sec-edges")
     if edge_df is None or not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
         flow.append(_para(
             "No live edges available. Add an Odds API key and fetch lines "
@@ -2662,7 +2740,10 @@ def _edge_board_flowables(
     for _, r in df.iterrows():
         edge_val = r.get("edge")
         side = str(r.get("call") or r.get("side") or "").upper()
-        books_label = _abbrev_books(r.get("book_names")) if "book_names" in r else None
+        books_label = (
+            _abbrev_books(r.get("book_names"), max_show=4)
+            if "book_names" in r else None
+        )
         if not books_label or books_label == "—":
             n = r.get("books")
             books_label = f"{int(n)} books" if pd.notna(n) else "—"
@@ -2762,22 +2843,25 @@ def _player_block(
     slug = "player-" + "".join(
         ch.lower() if ch.isalnum() else "-" for ch in player
     ).strip("-")
-    flow: list = [
-        _AnchorFlowable(slug, player, level=1),
-        _player_hero_band(player, recent_form, styles),
-        Spacer(1, 6),
-    ]
 
-    # Risk / form chips immediately under the hero band so the user gets
-    # a one-glance read on volatility and edge context.
+    # Header cluster: anchor + orange hero band + (optional) chip strip.
+    # Wrapped in KeepTogether so the bright hero band can never be orphaned
+    # at the bottom of a page with the chips/sparklines starting on the
+    # next page (a common eyesore in earlier renders).
     chips = _risk_chips(
         player=player, edge_df=edge_df, games=games,
         recent_form=recent_form, history_df=history,
     )
     chip_strip = _risk_chip_strip(chips, styles)
+    header_cluster: list = [
+        _AnchorFlowable(slug, player, level=1),
+        _player_hero_band(player, recent_form, styles),
+        Spacer(1, 6),
+    ]
     if chip_strip is not None:
-        flow.append(chip_strip)
-        flow.append(Spacer(1, 6))
+        header_cluster.append(chip_strip)
+        header_cluster.append(Spacer(1, 6))
+    flow: list = [KeepTogether(header_cluster)]
 
     # Visual stack: full-width sparklines first (so all three stats breathe),
     # then a clean two-column row with the structured "Why this signal" panel
@@ -2808,7 +2892,13 @@ def _player_block(
         flow.append(row)
         flow.append(Spacer(1, 6))
     elif signal is not None:
-        flow.append(signal)
+        # No donut to pair with — re-render the panel at full content width
+        # so it doesn't float as a narrow column at left.
+        wide_signal = _signal_summary_panel(
+            player=player, edge_df=edge_df, recent_form=recent_form,
+            history_df=history, styles=styles, width=7.0 * inch,
+        )
+        flow.append(wide_signal if wide_signal is not None else signal)
         flow.append(Spacer(1, 6))
     elif donut is not None:
         flow.append(donut)
@@ -2918,7 +3008,7 @@ def _per_player_flowables(
     player_games: dict[str, pd.DataFrame] | None = None,
     styles: dict,
 ) -> list:
-    flow: list = _section_header("Per-player breakdown", "Section 04", styles, anchor="sec-players")
+    flow: list = _section_header("Per-player breakdown", "Section 06", styles, anchor="sec-players")
     if not roster:
         flow.append(_para("Roster is empty.", styles["muted"]))
         return flow
