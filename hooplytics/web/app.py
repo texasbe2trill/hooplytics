@@ -6,7 +6,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -56,7 +56,7 @@ _TRAINING_ANCHOR_PLAYERS: list[str] = [
 ]
 from hooplytics.data import NBADataUnavailable, PlayerStore, nba_seasons
 from hooplytics.models import ModelBundle, ensure_models, load_models
-from hooplytics.odds import fetch_live_player_lines, load_cached_historical_odds
+from hooplytics.odds import fetch_live_player_lines, ingest_historical_odds, load_cached_historical_odds
 from hooplytics.openai_agent import (
     OpenAIConnection,
     auto_select_model,
@@ -3079,6 +3079,42 @@ _HISTORY_MODEL_TO_STAT: dict[str, str] = {
 }
 
 
+def _backfill_recent_historical_odds(
+    api_key: str,
+    *,
+    days: int = 14,
+    markets: list[str] | None = None,
+) -> int:
+    """Best-effort: ensure the past ``days`` of historical player props are on
+    disk so the per-player Lines-vs-Outcomes table can populate.
+
+    Returns the number of dates that were freshly fetched. Silent on failure —
+    the report still renders (just with whatever live snapshots already exist).
+    """
+    if not api_key:
+        return 0
+    try:
+        from hooplytics.constants import ODDS_PLAYER_PROPS_CUTOFF
+        today = date.today()
+        # Skip today (live snapshot covers it) and walk back ``days`` calendar
+        # days. The ingest helper itself skips dates that are already cached.
+        dates = [
+            (today - timedelta(days=i)).isoformat()
+            for i in range(1, days + 1)
+        ]
+        dates = [d for d in dates if d >= ODDS_PLAYER_PROPS_CUTOFF]
+        if not dates:
+            return 0
+        before = sum(1 for _ in _ODDS_CACHE_DIR.joinpath("history").glob("*.json")) \
+            if _ODDS_CACHE_DIR.joinpath("history").exists() else 0
+        ingest_historical_odds(api_key, dates, force_refresh=False, verbose=False, markets=markets)
+        after = sum(1 for _ in _ODDS_CACHE_DIR.joinpath("history").glob("*.json")) \
+            if _ODDS_CACHE_DIR.joinpath("history").exists() else 0
+        return max(0, after - before)
+    except Exception:
+        return 0
+
+
 @st.cache_data(show_spinner=False, ttl=60 * 30, max_entries=4)
 def _player_history_lines_vs_outcomes(roster_key: str, last_n: int = 10) -> dict[str, pd.DataFrame]:
     """Build per-player historical lines vs. actual outcomes for the PDF report.
@@ -3343,6 +3379,21 @@ def page_report(roster: dict, api_key: str) -> None:
     store = _store()
     modeling_df = _modeling_frame(_roster_key())
     seasons = _active_training_seasons() or None
+
+    # Backfill the past 14 days of historical odds so the per-player
+    # Lines-vs-Outcomes table can resolve real Over/Under outcomes for
+    # each rostered player. Best-effort — needs the user's Odds API key,
+    # silent no-op otherwise.
+    if api_key:
+        with st.spinner("Backfilling recent historical odds…"):
+            try:
+                fetched = _backfill_recent_historical_odds(api_key, days=14)
+                if fetched:
+                    # Bust the @st.cache_data on load_cached_historical_odds.
+                    load_cached_historical_odds.clear()
+                    _player_history_lines_vs_outcomes.clear()
+            except Exception:
+                pass
 
     projections: dict[str, pd.DataFrame] = {}
     recent_form: dict[str, dict[str, float]] = {}

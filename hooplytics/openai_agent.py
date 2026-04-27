@@ -686,6 +686,29 @@ def _scrub_prose_leaks(text: str) -> str:
     if not text:
         return ""
     out = text
+    # Normalize troublesome unicode that renders as boxes/tofu in some fonts:
+    # non-breaking hyphen, figure dash, soft hyphen, zero-width joiners,
+    # and the literal box characters the model occasionally emits.
+    _UNICODE_FIX = {
+        "\u00a0": " ",   # NBSP
+        "\u2011": "-",   # non-breaking hyphen
+        "\u2010": "-",   # hyphen
+        "\u2012": "-",   # figure dash
+        "\u2013": "-",   # en dash
+        "\u2014": "—",   # em dash (keep as em dash; supported by report fonts)
+        "\u2212": "-",   # minus sign
+        "\u00ad": "",    # soft hyphen
+        "\u200b": "",    # zero-width space
+        "\u200c": "",    # zero-width non-joiner
+        "\u200d": "",    # zero-width joiner
+        "\ufeff": "",    # BOM
+        "\u25a0": "-",   # black square (tofu)
+        "\u25aa": "-",   # small black square
+        "\u25fc": "-",   # large black square
+        "\u25fe": "-",   # medium small black square
+    }
+    for bad, good in _UNICODE_FIX.items():
+        out = out.replace(bad, good)
     for pat in _PROSE_LEAK_PATTERNS:
         out = re.sub(pat, "", out, flags=re.IGNORECASE)
     # Collapse double spaces and stray space-before-punctuation left by removals.
