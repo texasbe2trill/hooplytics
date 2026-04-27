@@ -237,7 +237,13 @@ class PlayerStore:
             try:
                 cached = pd.read_parquet(cache_path)
                 if set(seasons).issubset(cached["season"].unique()):
-                    return cached[cached["season"].isin(seasons)].copy()
+                    out = cached[cached["season"].isin(seasons)].copy()
+                    # Seed parquets ship ASCII player names (e.g. 'Nikola Jokic')
+                    # but nba_api resolves to the diacritic form ('Nikola Jokić')
+                    # which is what the roster keys on. Normalize to the
+                    # requested name so downstream filters match.
+                    out["player"] = name
+                    return out
             except Exception:
                 # Corrupt or zero-byte cache file; remove and rebuild.
                 try:
@@ -282,6 +288,9 @@ class PlayerStore:
         if not frames:
             return pd.DataFrame()
         out = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["Game_ID", "player"])
+        # Normalize player to the requested (possibly diacritic) form before
+        # persisting so future cache hits match roster keys exactly.
+        out["player"] = name
         out.to_parquet(cache_path, index=False)
         return out[out["season"].isin(seasons)].copy()
 
