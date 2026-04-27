@@ -2706,7 +2706,7 @@ def _quick_calls_flowables(
 
         title = Paragraph(
             f"<font size='10.5' color='#11151c'><b>"
-            f"{_short(row.get('player', '\u2014'), 26)}</b></font>"
+            f"{_short(row.get('player', '—'), 26)}</b></font>"
             f"&nbsp;&nbsp;<font size='9' color='#6b7686'>"
             f"{_short(row.get('model', ''), 14)}</font>",
             styles["body"],
