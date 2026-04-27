@@ -811,6 +811,22 @@ def _render_sidebar() -> tuple[str, str, str]:
                 st.stop()
             try:
                 resolved = PlayerStore.resolve_player_name(new_player) or new_player
+                # Eagerly fetch this player's data so we can surface a clear
+                # error if the NBA stats API is unreachable (common on hosted
+                # environments where data-center IPs are blocked). Without
+                # this guard the user sees a long spinner followed by a
+                # silent "0 game rows" card with no explanation.
+                with st.spinner(f"Loading game logs for {resolved}\u2026"):
+                    seasons_key = json.dumps(sorted(seasons))
+                    rows = _player_modeling_rows(resolved, seasons_key)
+                if rows.empty:
+                    st.error(
+                        f"Couldn't load game logs for **{resolved}**. "
+                        "The NBA stats API may be unreachable from this host "
+                        "(this is common on cloud deployments). Try again later "
+                        "or run Hooplytics locally."
+                    )
+                    st.stop()
                 roster[resolved] = seasons
                 # live_bust invalidates the streamlit cache so the new player is
                 # filtered into the edge board on the next render, reusing the
@@ -1134,9 +1150,12 @@ def page_home(roster: dict, api_key: str) -> None:
     section("Roster", "Your tracked players and the seasons in their training corpus.")
     cmap = player_color_map(list(roster))
     cards = []
+    missing_players: list[str] = []
     for player, seasons in roster.items():
         games = (modeling_df["player"] == player).sum() if "player" in modeling_df.columns else 0
         color = cmap[player]
+        if games == 0:
+            missing_players.append(player)
         cards.append(
             f'<div class="hl-roster-card">'
             f'<div class="hl-roster-name">'
@@ -1148,6 +1167,12 @@ def page_home(roster: dict, api_key: str) -> None:
         )
     st.markdown(f'<div class="hl-roster-grid">{"".join(cards)}</div>',
                 unsafe_allow_html=True)
+    if missing_players:
+        st.warning(
+            "No game rows loaded for: **" + ", ".join(missing_players) + "**. "
+            "The NBA stats API may be unreachable from this host "
+            "(common on cloud deployments). Try again later or run locally."
+        )
 
 
 def _r2_row(name: str, r2: float) -> str:

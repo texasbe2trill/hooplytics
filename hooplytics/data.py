@@ -270,7 +270,7 @@ class PlayerStore:
             try:
                 gl = _pgl.PlayerGameLog(
                     player_id=pid, season=season,
-                    season_type_all_star=season_type, timeout=15,
+                    season_type_all_star=season_type, timeout=8,
                 ).get_data_frames()[0]
             except Exception:  # noqa: BLE001 \u2014 transient network errors
                 return pd.DataFrame()
