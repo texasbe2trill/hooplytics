@@ -387,6 +387,17 @@ def _draw_page_chrome(canvas, doc, meta: _ReportMeta) -> None:
         "Hooplytics is for statistical analysis and entertainment. "
         "Not financial or betting advice.",
     )
+    # Streamlit app attribution (left) and page number (right).
+    app_url = "https://hooplytics.streamlit.app/"
+    canvas.setFillColor(BRAND_ORANGE_DEEP)
+    canvas.drawString(0.6 * inch, 0.28 * inch, app_url)
+    url_w = canvas.stringWidth(app_url, _BODY_FONT, 7.5)
+    canvas.linkURL(
+        app_url,
+        (0.6 * inch, 0.22 * inch, 0.6 * inch + url_w, 0.36 * inch),
+        relative=0,
+    )
+    canvas.setFillColor(INK_MUTED)
     canvas.drawRightString(
         width - 0.6 * inch,
         0.28 * inch,
@@ -415,8 +426,22 @@ def _draw_cover_chrome(canvas, doc) -> None:
     canvas.setFont(_BODY_FONT, 7.5)
     canvas.setFillColor(INK_MUTED)
     canvas.drawCentredString(
-        width / 2, 0.45 * inch,
+        width / 2, 0.55 * inch,
         "Hooplytics  |  Roster Analytics Report",
+    )
+    app_url = "https://hooplytics.streamlit.app/"
+    canvas.setFillColor(BRAND_ORANGE_DEEP)
+    canvas.drawCentredString(width / 2, 0.38 * inch, app_url)
+    url_w = canvas.stringWidth(app_url, _BODY_FONT, 7.5)
+    canvas.linkURL(
+        app_url,
+        (
+            width / 2 - url_w / 2,
+            0.32 * inch,
+            width / 2 + url_w / 2,
+            0.46 * inch,
+        ),
+        relative=0,
     )
     canvas.restoreState()
 

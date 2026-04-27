@@ -564,8 +564,14 @@ def _apply_sidebar_season_select_to_roster() -> None:
             roster[p] = list(seasons_all)
             changed = True
     if changed:
+        # Bumping live_bust invalidates the streamlit cache for _live_lines and
+        # _build_edge_board_cached, so the new roster shape is reflected on the
+        # next render against the already-cached daily odds payload. We do NOT
+        # force a fresh Odds API fetch here — that path can stack multiple 15s
+        # HTTP timeouts (one /events + one per game) and was the source of the
+        # "add to roster spins forever" hang. The explicit sidebar Refresh
+        # button is the only place that should force a re-fetch.
         st.session_state.live_bust += 1
-        st.session_state["force_refresh_odds"] = True
         st.rerun()
 
 
@@ -756,8 +762,10 @@ def _render_sidebar() -> tuple[str, str, str]:
             )
             if cols[1].button("×", key=f"rm_{player}", help=f"Remove {player}"):
                 roster.pop(player)
+                # See _apply_sidebar_season_select_to_roster — live_bust alone
+                # invalidates the cached edge board; forcing an Odds API
+                # re-fetch here is what caused the add/remove spinner to hang.
                 st.session_state.live_bust += 1
-                st.session_state.force_refresh_odds = True
                 st.rerun()
 
         seasons_selected = st.multiselect(
@@ -782,7 +790,6 @@ def _render_sidebar() -> tuple[str, str, str]:
                 for p in list(roster):
                     roster[p] = list(seasons_selected)
                 st.session_state.live_bust += 1
-                st.session_state.force_refresh_odds = True
                 st.rerun()
 
         st.markdown(
@@ -805,8 +812,13 @@ def _render_sidebar() -> tuple[str, str, str]:
             try:
                 resolved = PlayerStore.resolve_player_name(new_player) or new_player
                 roster[resolved] = seasons
+                # live_bust invalidates the streamlit cache so the new player is
+                # filtered into the edge board on the next render, reusing the
+                # already-cached daily Odds API payload. Forcing a refresh here
+                # was stacking 15s HTTP timeouts and causing the spinner to
+                # hang on add-to-roster. The sidebar Refresh button still
+                # fires a real re-fetch when the user wants fresh lines.
                 st.session_state.live_bust += 1
-                st.session_state.force_refresh_odds = True
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))

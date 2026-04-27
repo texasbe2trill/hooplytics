@@ -85,7 +85,7 @@ def _fetch_odds_payload(
             pass
 
     events_resp = requests.get(
-        f"{ODDS_BASE}/events", params={"apiKey": api_key}, timeout=15
+        f"{ODDS_BASE}/events", params={"apiKey": api_key}, timeout=8
     )
     if events_resp.status_code == 401:
         raise RuntimeError("Odds API 401 Unauthorized — invalid or revoked key.")
@@ -102,8 +102,15 @@ def _fetch_odds_payload(
             json.dump([], f)
         return []
 
+    # Per-event timeout is intentionally tight: a slate of 10+ games at the old
+    # 15s timeout could pin the UI for 2+ minutes if any bookmaker endpoint
+    # was slow. We also enforce an overall wall-clock budget so the function
+    # always returns control to Streamlit promptly even on a degraded API.
     payload: list[dict] = []
+    deadline = time.monotonic() + 25.0  # overall budget (seconds)
     for ev in events:
+        if time.monotonic() >= deadline:
+            break
         matchup = f"{ev.get('away_team', '?')} @ {ev.get('home_team', '?')}"
         try:
             resp = requests.get(
@@ -115,7 +122,7 @@ def _fetch_odds_payload(
                     "bookmakers": ",".join(NA_BOOKMAKERS),
                     "oddsFormat": "american",
                 },
-                timeout=15,
+                timeout=6,
             )
             if resp.status_code == 401:
                 # Player props are a paid tier — bail out gracefully.
@@ -132,11 +139,14 @@ def _fetch_odds_payload(
         except Exception:  # noqa: BLE001 — skip flaky events
             continue
 
-    try:
-        with cache_path.open("w") as f:
-            json.dump(payload, f)
-    except Exception:  # noqa: BLE001
-        pass
+    # Only persist when we actually got something — otherwise a partial budget
+    # exhaustion would overwrite a good cache with an empty payload.
+    if payload:
+        try:
+            with cache_path.open("w") as f:
+                json.dump(payload, f)
+        except Exception:  # noqa: BLE001
+            pass
     return payload
 
 
