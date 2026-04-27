@@ -546,11 +546,15 @@ No betting-advice phrasing — frame everything as analytical lean and \
 rationale.
 
 Use roster, model metrics, edges, and projections from the structured context \
-as your authoritative source. Layer in real NBA reasoning — matchups, \
-defensive schemes, rotations, role changes, rest, injury context — naturally, \
-the way a writer would. Do NOT label or annotate anything as "context", \
-"local context", "general NBA context", "external", "outside reasoning", or \
-similar. Never reveal that you were given structured data. Just write.
+as your authoritative source. Layer in real, current NBA reasoning — recent \
+form, role changes, lineup shifts, injuries, rest days, defensive matchups, \
+team trends, playoff context — naturally, the way a writer would. Include \
+specific recent details (last 3-5 games, role/usage shifts, who's in/out of \
+the rotation, opponent defensive identity) so the reader can make a confident \
+more/less call without leaving the report. Do NOT label or annotate anything \
+as "context", "local context", "general NBA context", "external", "outside \
+reasoning", or similar. Never reveal that you were given structured data. \
+Just write.
 
 Numbers: it's fine to drop one or two specific stats per paragraph if they \
 sharpen a point (e.g., a recent-form average, an R², or a clear edge). Don't \
@@ -565,17 +569,29 @@ the loudest signal, how confident the models are overall, what to watch.",
 trends, model reliability, the matchups that swing the night, key risks \
 (rest, injury, blowout potential).",
   "players": {
-    "<Player Name>": "1 paragraph (3-5 sentences). Lead with the loudest \
+    "<Player Name>": {
+      "news": "1-2 short sentences of current NBA context for this player \
+TODAY: recent form arc, role/minutes shift, opponent identity, rest, \
+injury status, anything a sharp would already know going into tip-off. \
+Concrete, no fluff. Avoid speculation.",
+      "prediction": "ONE line: a concrete more/less pick on the player's \
+loudest market followed by a confidence read. Format strictly: \
+'<MARKET> <SIDE> <LINE> — <confidence: low/medium/high>' (e.g. 'POINTS \
+LESS 17.5 — high confidence'). If no callable edge exists, write \
+'No play — <one-clause reason>'.",
+      "rationale": "1 paragraph (3-5 sentences). Lead with the loudest \
 model-vs-line gap and the lean. Back it with concrete recent form or role \
-context. Add one matchup or rotational angle. Close with a confidence read \
-(low / medium / high) and the single biggest risk to the call."
+context. Add one matchup or rotational angle. Close with the single \
+biggest risk to the call."
+    }
   }
 }
 
 Rules:
-- Include EVERY player from the roster. If a player has no edge data, write a \
-short paragraph on recent form, role, and what to watch tonight.
-- Keep each player paragraph under ~110 words.
+- Include EVERY player from the roster. If a player has no edge data, still \
+provide news + a "No play" prediction + a short rationale on form, role, \
+and what to watch tonight.
+- Keep each player rationale under ~110 words; news under ~50 words.
 - Do not include any keys other than the schema above.
 - Never write the strings "LOCAL CONTEXT", "(general NBA context)", \
 "(nba context)", "(local context)", "(external)", or "(outside reasoning)". \
@@ -737,11 +753,26 @@ def generate_report_sections(
         return {"executive_summary": "", "slate_outlook": "", "players": {}}
 
     players_raw = parsed.get("players")
-    players: dict[str, str] = {}
+    players: dict[str, Any] = {}
     if isinstance(players_raw, dict):
         for k, v in players_raw.items():
-            if isinstance(k, str) and isinstance(v, str) and v.strip():
-                players[k] = _scrub_prose_leaks(v.strip())
+            if not isinstance(k, str):
+                continue
+            if isinstance(v, str) and v.strip():
+                # Legacy shape \u2014 a single rationale string. Surface it under
+                # the structured key so downstream code keeps a consistent
+                # access pattern.
+                players[k] = {
+                    "news": "",
+                    "prediction": "",
+                    "rationale": _scrub_prose_leaks(v.strip()),
+                }
+            elif isinstance(v, dict):
+                players[k] = {
+                    "news": _scrub_prose_leaks(str(v.get("news", "")).strip()),
+                    "prediction": _scrub_prose_leaks(str(v.get("prediction", "")).strip()),
+                    "rationale": _scrub_prose_leaks(str(v.get("rationale", "")).strip()),
+                }
 
     return {
         "executive_summary": _scrub_prose_leaks(str(parsed.get("executive_summary", "")).strip()),

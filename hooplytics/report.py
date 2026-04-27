@@ -496,11 +496,11 @@ def _section_header(
     head: list = []
     if anchor:
         head.append(_AnchorFlowable(anchor, title, level=0))
-    # Force the next ~1.4" of vertical space to live on the same page as the
-    # header. If less than that remains, ReportLab inserts a page break BEFORE
-    # the eyebrow — which keeps the section title attached to its content
-    # instead of stranding "SECTION 05" at the bottom of a page.
-    head.append(CondPageBreak(1.4 * inch))
+    # Require ~0.9" of vertical space so the eyebrow + title can't dangle alone
+    # at the bottom of a page, but stay tight enough that a fresh-page section
+    # header doesn't strand the entire body of the section to the next page
+    # (the cause of the "blank page with just a title" rendering wart).
+    head.append(CondPageBreak(0.9 * inch))
     block = KeepTogether([
         _para(eyebrow.upper(), styles["eyebrow"]),
         _para(title, styles["h1"]),
@@ -514,20 +514,46 @@ def _toc_flowables(
     items: list[tuple],
     styles: dict,
 ) -> list:
-    """Render a clickable table of contents.
+    """Render a glossy clickable table of contents.
 
-    ``items`` is a list of either ``(label, anchor)`` for top-level sections
-    or ``(label, anchor, "sub")`` for indented sub-items (e.g. per-player rows
-    nested under "Per-player breakdown"). Top-level rows carry a numeric chip;
-    sub-items render as quiet chevron rows with no number and lighter type.
+    ``items`` accepts:
+      * ``(label, anchor)`` \u2014 top-level section, no description
+      * ``(label, anchor, description)`` \u2014 top-level with subtitle line
+      * ``(label, anchor, "sub")`` \u2014 indented chevron sub-row (no number)
     """
     if not items:
         return []
 
-    flow: list = [
-        _para("CONTENTS", styles["eyebrow"]),
-        Spacer(1, 6),
-    ]
+    # Hero panel for the front matter \u2014 a magazine-style banner that frames
+    # the TOC and signals "this is a real report" before any data appears.
+    hero = Table(
+        [[
+            Paragraph(
+                "<font size='8.5' color='#cc5a00'><b>INSIDE THIS REPORT</b></font>"
+                "<br/><br/>"
+                "<font size='22' color='#11151c'><b>Contents</b></font>"
+                "<br/>"
+                "<font size='10' color='#6b7686'>"
+                "Tap any row to jump straight to that section. "
+                "Skim the <b>Quick calls</b> page if you only have a minute."
+                "</font>",
+                styles["body"],
+            )
+        ]],
+        colWidths=[7.0 * inch],
+    )
+    hero.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), BRAND_ORANGE_SOFT),
+        ("LINEBEFORE", (0, 0), (0, -1), 4, BRAND_ORANGE_DEEP),
+        ("LINEABOVE", (0, 0), (-1, 0), 0.5, PANEL_BORDER),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.5, PANEL_BORDER),
+        ("LEFTPADDING", (0, 0), (-1, -1), 16),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 16),
+        ("TOPPADDING", (0, 0), (-1, -1), 18),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 18),
+    ]))
+
+    flow: list = [hero, Spacer(1, 16)]
 
     rows: list[list[Any]] = []
     is_sub_flags: list[bool] = []
@@ -535,8 +561,12 @@ def _toc_flowables(
     for entry in items:
         is_sub = len(entry) >= 3 and entry[2] == "sub"
         label, anchor = entry[0], entry[1]
+        description = ""
+        if not is_sub and len(entry) >= 3 and entry[2] != "sub":
+            description = str(entry[2] or "")
+
         if is_sub:
-            # Indented chevron sub-row — no number, no JUMP affordance.
+            # Indented chevron sub-row \u2014 quiet visual nesting under its parent.
             left = Paragraph(
                 f'<link href="#{anchor}" color="#6b7686">'
                 f'&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'
@@ -549,14 +579,27 @@ def _toc_flowables(
         else:
             section_idx += 1
             num = f"{section_idx:02d}"
-            left = Paragraph(
-                f'<link href="#{anchor}" color="#11151c">'
-                f'<font size="8" color="#ffffff" backColor="#ff7a18">'
-                f'&nbsp;<b>&nbsp;{num}&nbsp;</b>&nbsp;</font>'
-                f'&nbsp;&nbsp;<font size="11" color="#11151c"><b>{label}</b></font>'
-                f'</link>',
-                styles["body"],
-            )
+            if description:
+                left = Paragraph(
+                    f'<link href="#{anchor}" color="#11151c">'
+                    f'<font size="8" color="#ffffff" backColor="#ff7a18">'
+                    f'&nbsp;<b>&nbsp;{num}&nbsp;</b>&nbsp;</font>'
+                    f'&nbsp;&nbsp;<font size="11.5" color="#11151c"><b>{label}</b></font>'
+                    f'<br/>'
+                    f'<font size="8.5" color="#6b7686">'
+                    f'&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{description}</font>'
+                    f'</link>',
+                    styles["body"],
+                )
+            else:
+                left = Paragraph(
+                    f'<link href="#{anchor}" color="#11151c">'
+                    f'<font size="8" color="#ffffff" backColor="#ff7a18">'
+                    f'&nbsp;<b>&nbsp;{num}&nbsp;</b>&nbsp;</font>'
+                    f'&nbsp;&nbsp;<font size="11.5" color="#11151c"><b>{label}</b></font>'
+                    f'</link>',
+                    styles["body"],
+                )
             right = Paragraph(
                 f'<link href="#{anchor}" color="#cc5a00">'
                 f'<font size="11" color="#cc5a00"><b>></b></font>'
@@ -572,10 +615,10 @@ def _toc_flowables(
     table = Table(rows, colWidths=[6.4 * inch, 0.6 * inch])
     style = [
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 12),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
-        ("TOPPADDING", (0, 0), (-1, -1), 7),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ("LEFTPADDING", (0, 0), (-1, -1), 14),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 14),
+        ("TOPPADDING", (0, 0), (-1, -1), 9),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
     ]
     # Per-row backgrounds: white for main sections, faint panel for sub-items
     # so the indented player rows visually nest under their parent section.
@@ -1590,7 +1633,7 @@ def _analytics_visuals_flowables(
     edge_df: pd.DataFrame | None,
     styles: dict,
 ) -> list:
-    flow: list = _section_header("Analytics visuals", "Section 03", styles, anchor="sec-analytics")
+    flow: list = _section_header("Analytics visuals", "Section 04", styles, anchor="sec-analytics")
 
     rendered = False
     if isinstance(metrics, pd.DataFrame) and not metrics.empty:
@@ -2549,6 +2592,182 @@ def _bottom_line_flowables(
     return flow
 
 
+def _quick_calls_flowables(
+    *,
+    edge_df: pd.DataFrame | None,
+    recent_form: dict[str, dict[str, float]] | None,
+    styles: dict,
+) -> list:
+    """At-a-glance call sheet: every more/less call with a one-line why.
+
+    Designed to be the section a skimming reader lands on first. Renders a
+    compact card grid (one card per edge) sorted by absolute edge, each
+    showing player + market + side + posted line + model projection +
+    a deterministic one-line rationale (book depth + form delta vs the line).
+    """
+    flow: list = _section_header(
+        "Quick calls", "Section 01", styles, anchor="sec-quick-calls",
+    )
+    flow.append(_para(
+        "Skim-friendly call sheet \u2014 every more/less lean from the live edge "
+        "board, sorted by signal strength.",
+        styles["muted"],
+    ))
+    flow.append(Spacer(1, 6))
+
+    if edge_df is None or not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
+        flow.append(_para(
+            "No live edges yet. Add an Odds API key and refresh lines to "
+            "populate this section.",
+            styles["muted"],
+        ))
+        return flow
+
+    df = edge_df.copy()
+    if "edge" not in df.columns:
+        flow.append(_para("No edge values available.", styles["muted"]))
+        return flow
+    df["abs_edge"] = pd.to_numeric(df["edge"], errors="coerce").abs()
+    df = df.sort_values("abs_edge", ascending=False).head(12)
+    if df.empty:
+        flow.append(_para("No callable edges in the current snapshot.", styles["muted"]))
+        return flow
+
+    recent_form = recent_form or {}
+
+    def _one_line_why(row: pd.Series) -> str:
+        """Deterministic one-liner combining edge size + form-vs-line delta."""
+        try:
+            edge_val = float(row.get("edge"))
+        except (TypeError, ValueError):
+            edge_val = 0.0
+        try:
+            line_val = float(row.get("posted line", row.get("line")))
+        except (TypeError, ValueError):
+            line_val = float("nan")
+        side = str(row.get("call") or row.get("side") or "").upper().split()[0]
+        side = side or ("MORE" if edge_val > 0 else "LESS")
+        market = str(row.get("model", "")).lower()
+        form_map = recent_form.get(str(row.get("player", "")), {}) or {}
+        # Map market \u2192 recent-form key. Fall back gracefully.
+        stat_key = {
+            "points": "pts", "rebounds": "reb", "assists": "ast",
+            "pra": "pra", "threepm": "fg3m",
+            "stl_blk": "stl_blk", "turnovers": "tov",
+            "fantasy_score": "fantasy_score",
+        }.get(market)
+        form_val = None
+        if stat_key:
+            form_val = form_map.get(stat_key)
+            if form_val is None:
+                form_val = form_map.get(stat_key + "_l5") or form_map.get(stat_key + "_l10")
+        try:
+            books = int(pd.to_numeric(row.get("books"), errors="coerce"))
+        except (TypeError, ValueError):
+            books = 0
+        depth = "deep" if books >= 7 else ("moderate" if books >= 4 else "thin")
+        bits: list[str] = [f"|edge| {abs(edge_val):.2f} on {depth} market ({books} books)"]
+        if form_val is not None and not pd.isna(form_val) and not pd.isna(line_val):
+            try:
+                form_f = float(form_val)
+                gap = form_f - line_val
+                direction = "above" if gap > 0 else "below"
+                bits.append(f"recent form {form_f:.1f} runs {abs(gap):.1f} {direction} the {line_val:.1f} line")
+            except (TypeError, ValueError):
+                pass
+        return " \u2022 ".join(bits)
+
+    cards: list = []
+    for _, row in df.iterrows():
+        edge_val = pd.to_numeric(row.get("edge"), errors="coerce")
+        if pd.isna(edge_val):
+            continue
+        side = str(row.get("call") or row.get("side") or "").upper().split()[0]
+        side = side or ("MORE" if edge_val > 0 else "LESS")
+        side_color = "#1f9d6c" if side in ("MORE", "OVER") else "#d24545"
+        side_bg = "#e9f7f0" if side in ("MORE", "OVER") else "#fbecec"
+
+        pill = Paragraph(
+            f"<font size='8.5' color='{side_color}'><b>{side}</b></font>",
+            ParagraphStyle("qc_side", parent=styles["body"], alignment=1),
+        )
+        pill_tbl = Table([[pill]], colWidths=[0.65 * inch])
+        pill_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(side_bg)),
+            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor(side_color)),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+
+        line_str = _fmt(row.get("posted line", row.get("line")), 1)
+        proj_str = _fmt(row.get("model prediction", row.get("projection")), 2)
+        edge_str = _fmt_signed(edge_val, 2)
+
+        title = Paragraph(
+            f"<font size='10.5' color='#11151c'><b>"
+            f"{_short(row.get('player', '\u2014'), 26)}</b></font>"
+            f"&nbsp;&nbsp;<font size='9' color='#6b7686'>"
+            f"{_short(row.get('model', ''), 14)}</font>",
+            styles["body"],
+        )
+        line_block = Paragraph(
+            f"<font size='8' color='#6b7686'>LINE</font> "
+            f"<font size='10' color='#11151c'><b>{line_str}</b></font>"
+            f"&nbsp;&nbsp;<font size='8' color='#6b7686'>MODEL</font> "
+            f"<font size='10' color='#11151c'><b>{proj_str}</b></font>"
+            f"&nbsp;&nbsp;<font size='8' color='#6b7686'>EDGE</font> "
+            f"<font size='10' color='{side_color}'><b>{edge_str}</b></font>",
+            styles["body"],
+        )
+        why = Paragraph(
+            f"<font size='8.5' color='#3a4250'>"
+            f"{_safe_text(_one_line_why(row))}</font>",
+            styles["body"],
+        )
+
+        body_tbl = Table(
+            [[title], [line_block], [why]],
+            colWidths=[5.5 * inch],
+        )
+        body_tbl.setStyle(TableStyle([
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 1),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ]))
+
+        card = Table(
+            [[pill_tbl, body_tbl]],
+            colWidths=[0.85 * inch, 5.95 * inch],
+        )
+        card.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+            ("LINEBELOW", (0, 0), (-1, -1), 0.5, PANEL_BORDER),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ("LINEBEFORE", (0, 0), (0, -1), 3, colors.HexColor(side_color)),
+        ]))
+        cards.append([card])
+
+    if cards:
+        wrap = Table(cards, colWidths=[6.8 * inch])
+        wrap.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.5, PANEL_BORDER),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        flow.append(wrap)
+    flow.append(Spacer(1, 10))
+    return flow
+
+
 def _executive_summary_flowables(
     *,
     roster: dict[str, list[str]],
@@ -2557,7 +2776,7 @@ def _executive_summary_flowables(
     ai_sections: dict[str, Any] | None,
     styles: dict,
 ) -> list:
-    flow: list = _section_header("Executive summary", "Section 01", styles, anchor="sec-exec")
+    flow: list = _section_header("Slate brief", "Section 02", styles, anchor="sec-exec")
     flow.append(_callout_box(
         _deterministic_summary_text(roster=roster, metrics=metrics, edge_df=edge_df),
         styles,
@@ -2649,7 +2868,7 @@ def _spotlight_card_flowable(
 
 
 def _spotlight_flowables(edge_df: pd.DataFrame | None, styles: dict) -> list:
-    flow: list = _section_header("Signal spotlight  |  top 3", "Section 02", styles, anchor="sec-spotlight")
+    flow: list = _section_header("Signal spotlight  |  top 3", "Section 03", styles, anchor="sec-spotlight")
     if edge_df is None or not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
         flow.append(_para("No live signals to spotlight yet.", styles["muted"]))
         return flow
@@ -2687,7 +2906,7 @@ def _spotlight_flowables(edge_df: pd.DataFrame | None, styles: dict) -> list:
 
 # ── Section: model quality ──────────────────────────────────────────────────
 def _model_quality_flowables(metrics: pd.DataFrame | None, styles: dict) -> list:
-    flow: list = _section_header("Model quality", "Section 04", styles, anchor="sec-model-quality")
+    flow: list = _section_header("Model quality", "Section 05", styles, anchor="sec-model-quality")
     if metrics is None or not isinstance(metrics, pd.DataFrame) or metrics.empty:
         flow.append(_para("Model metrics unavailable.", styles["muted"]))
         return flow
@@ -2745,7 +2964,7 @@ def _edge_board_flowables(
     *,
     top_n: int = 14,
 ) -> list:
-    flow: list = _section_header("Top edges — model vs market", "Section 05", styles, anchor="sec-edges")
+    flow: list = _section_header("Top edges — model vs market", "Section 06", styles, anchor="sec-edges")
     if edge_df is None or not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
         flow.append(_para(
             "No live edges available. Add an Odds API key and fetch lines "
@@ -2861,6 +3080,8 @@ def _player_block(
     projection: pd.DataFrame | None,
     recent_form: dict[str, float] | None,
     rationale: str,
+    news: str = "",
+    prediction: str = "",
     history: pd.DataFrame | None = None,
     games: pd.DataFrame | None = None,
     styles: dict,
@@ -3010,6 +3231,33 @@ def _player_block(
         flow.append(_para("No model projections available.", styles["muted"]))
 
     flow.append(Spacer(1, 4))
+
+    # Hooplytics prediction panel — concrete pick + confidence pulled from
+    # the AI rationale. Rendered as a high-contrast band so a skimmer can
+    # land on the call without reading the analyst notes.
+    if prediction and prediction.strip():
+        pred_para = Paragraph(
+            f"<font size='8' color='#cc5a00'><b>HOOPLYTICS PREDICTION</b></font>"
+            f"<br/><font size='10.5' color='#11151c'><b>"
+            f"{_safe_text(prediction.strip())}</b></font>",
+            styles["body"],
+        )
+        pred_tbl = Table([[pred_para]], colWidths=[7.0 * inch])
+        pred_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fff4ea")),
+            ("BOX", (0, 0), (-1, -1), 0.5, BRAND_ORANGE),
+            ("LINEBEFORE", (0, 0), (0, -1), 3, BRAND_ORANGE_DEEP),
+            ("LEFTPADDING", (0, 0), (-1, -1), 12),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ]))
+        flow.append(KeepTogether([pred_tbl, Spacer(1, 6)]))
+
+    if news and news.strip():
+        flow.append(_para("Latest context", styles["h3"]))
+        flow.append(_para(news.strip(), styles["body"]))
+
     if rationale and rationale.strip():
         flow.append(_para("Analyst notes", styles["h3"]))
         flow.append(_para(rationale.strip(), styles["body"]))
@@ -3033,7 +3281,7 @@ def _per_player_flowables(
     player_games: dict[str, pd.DataFrame] | None = None,
     styles: dict,
 ) -> list:
-    flow: list = _section_header("Per-player breakdown", "Section 06", styles, anchor="sec-players")
+    flow: list = _section_header("Per-player breakdown", "Section 07", styles, anchor="sec-players")
     if not roster:
         flow.append(_para("Roster is empty.", styles["muted"]))
         return flow
@@ -3045,20 +3293,32 @@ def _per_player_flowables(
     player_games = player_games or {}
 
     for player in roster.keys():
+        ai_entry = ai_players.get(player, "")
+        if isinstance(ai_entry, dict):
+            p_rationale = str(ai_entry.get("rationale", "")).strip()
+            p_news = str(ai_entry.get("news", "")).strip()
+            p_prediction = str(ai_entry.get("prediction", "")).strip()
+        else:
+            p_rationale = str(ai_entry or "").strip()
+            p_news = ""
+            p_prediction = ""
         block = _player_block(
             player,
             edge_df=edge_df,
             projection=projections.get(player),
             recent_form=recent_form.get(player),
-            rationale=str(ai_players.get(player, "")),
+            rationale=p_rationale,
+            news=p_news,
+            prediction=p_prediction,
             history=player_history.get(player),
             games=player_games.get(player),
             styles=styles,
         )
-        # Keep player hero band + first chart together so we don't orphan a name.
-        head = block[:2] if len(block) >= 2 else block
-        flow.append(KeepTogether(head))
-        flow.extend(block[len(head):])
+        # Each player block already KeepTogether's its own hero band; flowing
+        # the rest freely lets the first player start directly under the
+        # section header instead of forcing it onto a fresh page (the cause
+        # of the \"Section 07: Per-player breakdown\" lone-title page).
+        flow.extend(block)
 
     return flow
 
@@ -3189,13 +3449,23 @@ def build_pdf_report(
 
     # Clickable Table of Contents — links jump to bookmarked section anchors,
     # and the same anchors register as PDF outline entries for sidebar nav.
+    # Each top-level row carries a short description so the TOC reads like a
+    # glossy magazine front matter rather than a bare hyperlink list.
     toc_items: list[tuple] = [
-        ("Executive summary", "sec-exec"),
-        ("Signal spotlight  |  top 3", "sec-spotlight"),
-        ("Analytics visuals", "sec-analytics"),
-        ("Model quality", "sec-model-quality"),
-        ("Top edges — model vs market", "sec-edges"),
-        ("Per-player breakdown", "sec-players"),
+        ("Quick calls", "sec-quick-calls",
+         "Skim-friendly call sheet \u2014 every more/less lean ranked."),
+        ("Slate brief", "sec-exec",
+         "Loudest signal, slate posture, and AI-augmented context."),
+        ("Signal spotlight  |  top 3", "sec-spotlight",
+         "The three biggest model-vs-market gaps tonight."),
+        ("Analytics visuals", "sec-analytics",
+         "R\u00b2 lollipop, conviction leaderboard, and edge distribution."),
+        ("Model quality", "sec-model-quality",
+         "Per-model R\u00b2 and RMSE with confidence tiers."),
+        ("Top edges \u2014 model vs market", "sec-edges",
+         "Full ranked table of every callable edge."),
+        ("Per-player breakdown", "sec-players",
+         "Recent form, predictions, news, and analyst notes."),
     ]
     for player_name in (roster or {}).keys():
         slug = "player-" + "".join(
@@ -3220,6 +3490,11 @@ def build_pdf_report(
         roster=roster,
         metrics=bundle_metrics,
         edge_df=edge_df,
+        styles=styles,
+    ))
+    flow.extend(_quick_calls_flowables(
+        edge_df=edge_df,
+        recent_form=recent_form,
         styles=styles,
     ))
     flow.extend(_executive_summary_flowables(
