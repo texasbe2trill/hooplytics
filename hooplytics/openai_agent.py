@@ -606,13 +606,12 @@ trends, model reliability, the matchups that swing the night, key risks \
 (rest, injury, blowout potential).",
   "players": {
     "<Player Name>": {
-      "injury_status": "≤6 words. Short status chip: 'Healthy', 'Probable - \
-ankle', 'Out - rest', 'Questionable - knee', 'Game-time decision'. If \
-unknown, write 'No reported issue'. No sentences.",
       "matchup": "≤9 words. Opponent + the single defining defensive trait \
 or pace note (e.g. 'vs DET — bottom-10 perimeter D', 'at OKC — elite \
-wing length, top-3 pace', 'vs LAC — physical, slow tempo'). No verb \
-sentences.",
+wing length, top-3 pace', 'vs LAC — physical, slow tempo'). Use the \
+EXACT teams from extras.today_matchups[player] when present — never \
+invent an opponent. If no matchup is in extras, write 'Matchup \
+unconfirmed'.",
       "usage_trend": "≤9 words. Recent role/usage trajectory in plain \
 language (e.g. 'Usage climbing — 28% over last 5', 'Bench role since \
 Wagner return', 'Closing lineup back, 32+ minutes'). Concrete.",
@@ -641,6 +640,18 @@ Rules:
 edges_by_player or edges_top, you MUST give them a real more/less pick on \
 their loudest edge — never 'No play'. 'No play' is only for players with \
 zero edges and zero projections.
+- OPPONENT GROUNDING: extras.today_matchups is the ONLY trusted source for \
+who plays whom tonight. For each player, look up extras.today_matchups[player] \
+and cite that opponent (home_team / away_team / matchup) verbatim. If a \
+player has NO entry in extras.today_matchups, you MUST write 'Matchup \
+unconfirmed' in the matchup field and AVOID naming any opponent in news / \
+rationale. NEVER invent, guess, or recall an opponent from training data — \
+schedules from your training cutoff are stale.
+- Do NOT speculate about injury status, return dates, or availability. If \
+real news isn't given to you in the structured context, omit the topic \
+entirely — never write 'questionable', 'probable', 'doubtful', 'out', \
+'game-time decision', or any made-up status. Talk about role / minutes / \
+form trends instead.
 - Use recent_form values (pts/reb/ast/pra/min averages) as concrete anchors \
 in the news and rationale. Cite specific numbers from recent_form when \
 relevant.
@@ -814,18 +825,18 @@ def generate_report_sections(
             if not isinstance(k, str):
                 continue
             if isinstance(v, str) and v.strip():
-                # Legacy shape \u2014 a single rationale string. Surface it under
+                # Legacy shape — a single rationale string. Surface it under
                 # the structured key so downstream code keeps a consistent
                 # access pattern.
-                players[k] = {                    "injury_status": "",
+                players[k] = {
                     "matchup": "",
-                    "usage_trend": "",                    "news": "",
+                    "usage_trend": "",
+                    "news": "",
                     "prediction": "",
                     "rationale": _scrub_prose_leaks(v.strip()),
                 }
             elif isinstance(v, dict):
                 players[k] = {
-                    "injury_status": _scrub_prose_leaks(str(v.get("injury_status", "")).strip()),
                     "matchup": _scrub_prose_leaks(str(v.get("matchup", "")).strip()),
                     "usage_trend": _scrub_prose_leaks(str(v.get("usage_trend", "")).strip()),
                     "news": _scrub_prose_leaks(str(v.get("news", "")).strip()),

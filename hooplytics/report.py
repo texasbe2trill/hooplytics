@@ -3209,17 +3209,16 @@ def _ai_picks_flowables(
     for player_name in roster.keys():
         ai_entry = ai_players.get(player_name, "")
         if isinstance(ai_entry, dict):
-            injury_status = str(ai_entry.get("injury_status", "")).strip()
             matchup = str(ai_entry.get("matchup", "")).strip()
             usage_trend = str(ai_entry.get("usage_trend", "")).strip()
             news = str(ai_entry.get("news", "")).strip()
             prediction = str(ai_entry.get("prediction", "")).strip()
             rationale = str(ai_entry.get("rationale", "")).strip()
         else:
-            injury_status = matchup = usage_trend = news = prediction = ""
+            matchup = usage_trend = news = prediction = ""
             rationale = str(ai_entry or "").strip()
 
-        if not (news or prediction or rationale or injury_status or matchup or usage_trend):
+        if not (news or prediction or rationale or matchup or usage_trend):
             continue
 
         loud = loudest_by_player.get(player_name)
@@ -3306,17 +3305,15 @@ def _ai_picks_flowables(
 
         intel_row = Table(
             [[
-                _chip("INJURY", injury_status, "No reported issue"),
-                _chip("MATCHUP", matchup, "—"),
+                _chip("MATCHUP", matchup, "Matchup unconfirmed"),
                 _chip("USAGE TREND", usage_trend, "—"),
             ]],
-            colWidths=[2.25 * inch, 2.45 * inch, 2.30 * inch],
+            colWidths=[3.50 * inch, 3.50 * inch],
         )
         intel_row.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fdebd6")),
             ("BOX", (0, 0), (-1, -1), 0.3, colors.HexColor("#f1d4ad")),
             ("LINEAFTER", (0, 0), (0, 0), 0.3, colors.HexColor("#f1d4ad")),
-            ("LINEAFTER", (1, 0), (1, 0), 0.3, colors.HexColor("#f1d4ad")),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("LEFTPADDING", (0, 0), (-1, -1), 8),
             ("RIGHTPADDING", (0, 0), (-1, -1), 8),

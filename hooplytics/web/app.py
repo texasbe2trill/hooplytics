@@ -2941,6 +2941,9 @@ def _chatbot_grounding(roster: dict, api_key: str) -> dict[str, Any]:
         bundle=bundle,
         edge_df=edge_df if not edge_df.empty else None,
         projections=projections or None,
+        extras={
+            "today_matchups": _today_matchup_map(_roster_key()),
+        },
     )
 
 
@@ -3160,6 +3163,90 @@ def _player_history_lines_vs_outcomes(roster_key: str, last_n: int = 10) -> dict
     return out
 
 
+# ── Real-data grounding for AI report (no hallucination of opponents) ────────
+import re as _re
+from hooplytics.constants import ODDS_CACHE_DIR as _ODDS_CACHE_DIR
+
+
+def _canon_player_name(s: str) -> str:
+    return _re.sub(r"[^a-z]", "", str(s).lower())
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 15, max_entries=4)
+def _today_matchup_map(roster_key: str) -> dict[str, dict[str, str]]:
+    """Map ``{roster_player_name: {matchup, home_team, away_team, tipoff_iso}}``
+    from today's cached props payload. Lets the AI cite the EXACT opponent
+    instead of guessing.
+    """
+    try:
+        roster: dict = json.loads(roster_key)
+    except Exception:
+        return {}
+    if not roster:
+        return {}
+
+    canon_to_roster = {_canon_player_name(p): p for p in roster.keys()}
+    if not _ODDS_CACHE_DIR.exists():
+        return {}
+
+    files = sorted(_ODDS_CACHE_DIR.glob("nba_player_props_*.json"))
+    if not files:
+        return {}
+
+    out: dict[str, dict[str, str]] = {}
+    # Latest file wins — newer cache contains the live slate.
+    for path in reversed(files):
+        try:
+            payload = json.loads(path.read_text())
+        except Exception:
+            continue
+        if not isinstance(payload, list):
+            continue
+        for ev_entry in payload:
+            if not isinstance(ev_entry, dict):
+                continue
+            home = str(ev_entry.get("home_team") or "").strip()
+            away = str(ev_entry.get("away_team") or "").strip()
+            if not (home or away):
+                continue
+            matchup = str(ev_entry.get("matchup") or f"{away} @ {home}").strip()
+            tipoff = ""
+            props = ev_entry.get("props") or {}
+            if isinstance(props, dict):
+                tipoff = str(props.get("commence_time") or "").strip()
+
+            # Walk the bookmakers to find every player named in the props.
+            seen_names: set[str] = set()
+            for bm in (props.get("bookmakers") or []):
+                if not isinstance(bm, dict):
+                    continue
+                for market in (bm.get("markets") or []):
+                    if not isinstance(market, dict):
+                        continue
+                    for o in (market.get("outcomes") or []):
+                        if not isinstance(o, dict):
+                            continue
+                        nm = str(o.get("description") or "").strip()
+                        if nm:
+                            seen_names.add(nm)
+            for nm in seen_names:
+                roster_name = canon_to_roster.get(_canon_player_name(nm))
+                if roster_name and roster_name not in out:
+                    # Determine if rostered player is home or away by scanning
+                    # only the relevant team's roster context: not available
+                    # without play-by-play, so just record both teams.
+                    out[roster_name] = {
+                        "matchup": matchup,
+                        "home_team": home,
+                        "away_team": away,
+                        "tipoff_iso": tipoff,
+                    }
+        # If we already covered every roster member, stop.
+        if len(out) >= len(roster):
+            break
+    return out
+
+
 def page_report(roster: dict, api_key: str) -> None:
     page_hero(
         "Roster Report",
@@ -3296,6 +3383,9 @@ def page_report(roster: dict, api_key: str) -> None:
                     edge_df=edge_df if isinstance(edge_df, pd.DataFrame) and not edge_df.empty else None,
                     projections=projections or None,
                     recent_form=recent_form or None,
+                    extras={
+                        "today_matchups": _today_matchup_map(_roster_key()),
+                    },
                 )
                 ai_sections = generate_report_sections(
                     connection=conn,

@@ -510,26 +510,153 @@ def ingest_historical_odds(
     return pd.concat(frames, ignore_index=True)
 
 
+def _live_props_filename_to_date(name: str) -> str | None:
+    """Pull the ``YYYY-MM-DD`` segment from a live-cache filename."""
+    m = re.search(r"nba_player_props_(\d{4}-\d{2}-\d{2})\.json$", name)
+    return m.group(1) if m else None
+
+
+def _flatten_live_props_payload(
+    payload: list[dict], date_str: str,
+) -> pd.DataFrame:
+    """Flatten a live-shape props cache (events with bookmakers) into the
+    same row layout as historical odds (``game_date, player, model, line,
+    books, line_std, over_price, under_price``).
+
+    The live cache is the per-event payload written by ``_fetch_odds_payload``.
+    Historical files are already flat. This converter is what lets the report's
+    per-player history table populate from live snapshots before any backfill.
+    """
+    if not isinstance(payload, list) or not payload:
+        return pd.DataFrame()
+
+    allowed_books = set(NA_BOOKMAKERS)
+    # bucket: (player, model) -> {"lines": [...], "over_prices": [...], "under_prices": [...]}
+    buckets: dict[tuple[str, str], dict[str, list[float]]] = {}
+
+    for ev_entry in payload:
+        if not isinstance(ev_entry, dict):
+            continue
+        props = ev_entry.get("props") or {}
+        for bm in props.get("bookmakers", []) or []:
+            if bm.get("key") not in allowed_books:
+                continue
+            for market in bm.get("markets", []) or []:
+                model_name = ODDS_MARKETS.get(market.get("key"))
+                if model_name is None:
+                    continue
+                # Pair Over/Under for each player so we can capture both prices.
+                pair: dict[str, dict[str, dict[str, float]]] = {}
+                for o in market.get("outcomes", []) or []:
+                    side = o.get("name")
+                    if side not in ("Over", "Under"):
+                        continue
+                    name = o.get("description", "")
+                    if not name:
+                        continue
+                    try:
+                        point = float(o["point"])
+                    except (TypeError, ValueError, KeyError):
+                        continue
+                    try:
+                        price = float(o.get("price", 0.0))
+                    except (TypeError, ValueError):
+                        price = float("nan")
+                    pair.setdefault(name, {})[side] = {"point": point, "price": price}
+                for player_name, sides in pair.items():
+                    over = sides.get("Over")
+                    if over is None:
+                        continue
+                    slot = buckets.setdefault(
+                        (player_name, model_name),
+                        {"lines": [], "over_prices": [], "under_prices": []},
+                    )
+                    slot["lines"].append(over["point"])
+                    if over["price"] == over["price"]:  # not NaN
+                        slot["over_prices"].append(over["price"])
+                    under = sides.get("Under")
+                    if under is not None and under["price"] == under["price"]:
+                        slot["under_prices"].append(under["price"])
+
+    if not buckets:
+        return pd.DataFrame()
+
+    rows: list[dict] = []
+    for (player_name, model_name), agg in buckets.items():
+        lines = agg["lines"]
+        if not lines:
+            continue
+        rows.append({
+            "game_date": date_str,
+            "player": player_name,
+            "model": model_name,
+            "line": float(np.median(lines)),
+            "books": len(lines),
+            "line_std": float(np.std(lines)) if len(lines) > 1 else 0.0,
+            "over_price": float(np.median(agg["over_prices"])) if agg["over_prices"] else float("nan"),
+            "under_price": float(np.median(agg["under_prices"])) if agg["under_prices"] else float("nan"),
+        })
+    return pd.DataFrame(rows)
+
+
 def _load_cached_historical_odds_impl(hist_dir_str: str, _fingerprint: tuple) -> pd.DataFrame:
     hist_dir = Path(hist_dir_str)
-    if not hist_dir.exists():
-        return pd.DataFrame(columns=["game_date", "player", "model", "line", "books"])
-
     frames: list[pd.DataFrame] = []
-    for path in sorted(hist_dir.glob("nba_player_props_*.json")):
-        try:
-            df = pd.read_json(path, orient="records")
+
+    if hist_dir.exists():
+        for path in sorted(hist_dir.glob("nba_player_props_*.json")):
+            try:
+                df = pd.read_json(path, orient="records")
+                if not df.empty:
+                    frames.append(df)
+            except Exception:  # noqa: BLE001
+                continue
+
+    # Fallback: also flatten live snapshot files sitting in the parent
+    # ``data/cache/odds/`` directory. These are written by every roster
+    # refresh and become historical the moment the game is played.
+    # Without this, fresh installs (or users who haven't run the historical
+    # backfill CLI) would see an empty per-player history table.
+    seen_dates: set[str] = set()
+    if frames:
+        merged = pd.concat(frames, ignore_index=True)
+        if "game_date" in merged.columns:
+            seen_dates = set(
+                pd.to_datetime(merged["game_date"], errors="coerce")
+                .dt.strftime("%Y-%m-%d")
+                .dropna()
+                .tolist()
+            )
+    live_dir = hist_dir.parent
+    if live_dir.exists() and live_dir != hist_dir:
+        for path in sorted(live_dir.glob("nba_player_props_*.json")):
+            date_str = _live_props_filename_to_date(path.name)
+            if date_str is None or date_str in seen_dates:
+                continue
+            try:
+                payload = json.loads(path.read_text())
+            except Exception:  # noqa: BLE001
+                continue
+            # Live cache files are nested lists of events; historical files
+            # are flat row records. Detect by inspecting the first element.
+            if isinstance(payload, list) and payload and isinstance(payload[0], dict) and "props" in payload[0]:
+                df = _flatten_live_props_payload(payload, date_str)
+            else:
+                try:
+                    df = pd.DataFrame(payload)
+                except Exception:  # noqa: BLE001
+                    df = pd.DataFrame()
             if not df.empty:
                 frames.append(df)
-        except Exception:  # noqa: BLE001
-            continue
+                seen_dates.add(date_str)
 
     if not frames:
         return pd.DataFrame(columns=["game_date", "player", "model", "line", "books"])
 
     result = pd.concat(frames, ignore_index=True)
-    result["game_date"] = pd.to_datetime(result["game_date"]).dt.normalize()
-    return result
+    result["game_date"] = pd.to_datetime(result["game_date"], errors="coerce").dt.normalize()
+    result = result.dropna(subset=["game_date"])
+    return result.reset_index(drop=True)
 
 
 # Process-level memo so per-player feature builds reuse the parsed frame.
@@ -550,10 +677,14 @@ def load_cached_historical_odds(
     Returns an empty DataFrame if no cache files are found.
     """
     hist_dir = Path(cache_dir) if cache_dir else ODDS_HIST_CACHE_DIR
-    if not hist_dir.exists():
+    live_dir = hist_dir.parent
+
+    files = list(hist_dir.glob("nba_player_props_*.json")) if hist_dir.exists() else []
+    if live_dir.exists() and live_dir != hist_dir:
+        files += list(live_dir.glob("nba_player_props_*.json"))
+    if not files:
         return pd.DataFrame(columns=["game_date", "player", "model", "line", "books"])
 
-    files = sorted(hist_dir.glob("nba_player_props_*.json"))
     fingerprint = (
         str(hist_dir),
         len(files),
