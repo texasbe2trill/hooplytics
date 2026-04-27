@@ -3295,6 +3295,7 @@ def page_report(roster: dict, api_key: str) -> None:
                     bundle=bundle,
                     edge_df=edge_df if isinstance(edge_df, pd.DataFrame) and not edge_df.empty else None,
                     projections=projections or None,
+                    recent_form=recent_form or None,
                 )
                 ai_sections = generate_report_sections(
                     connection=conn,

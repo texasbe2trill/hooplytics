@@ -223,9 +223,11 @@ def build_grounding_payload(
     bundle: Any = None,
     edge_df: pd.DataFrame | None = None,
     projections: dict[str, pd.DataFrame] | None = None,
+    recent_form: dict[str, dict[str, float]] | None = None,
     extras: dict[str, Any] | None = None,
-    edge_limit: int = 12,
+    edge_limit: int = 60,
     projection_limit: int = 8,
+    per_player_edge_limit: int = 8,
 ) -> dict[str, Any]:
     """Assemble a compact, JSON-friendly payload for prompt grounding."""
     payload: dict[str, Any] = {}
@@ -251,14 +253,31 @@ def build_grounding_payload(
         payload["model_bundle"] = bundle_info
 
     if isinstance(edge_df, pd.DataFrame) and not edge_df.empty:
-        payload["edges_top"] = _safe_records(edge_df, edge_limit)
+        df = edge_df.copy()
+        # Sort by absolute edge so the loudest signals lead the payload.
+        if "edge" in df.columns:
+            df["_abs_edge"] = pd.to_numeric(df["edge"], errors="coerce").abs()
+            df = df.sort_values("_abs_edge", ascending=False).drop(columns=["_abs_edge"])
+        payload["edges_top"] = _safe_records(df, edge_limit)
         payload["edges_summary"] = {
-            "rows": int(len(edge_df)),
+            "rows": int(len(df)),
             "side_counts": (
-                edge_df["side"].value_counts().to_dict()
-                if "side" in edge_df.columns else {}
+                df["side"].value_counts().to_dict()
+                if "side" in df.columns else (
+                    df["call"].value_counts().to_dict()
+                    if "call" in df.columns else {}
+                )
             ),
         }
+        # Per-player slices so the model can never miss a roster member's edge.
+        if "player" in df.columns and roster:
+            edges_by_player: dict[str, list[dict[str, Any]]] = {}
+            for player_name in roster.keys():
+                sub = df[df["player"] == player_name]
+                if not sub.empty:
+                    edges_by_player[player_name] = _safe_records(sub, per_player_edge_limit)
+            if edges_by_player:
+                payload["edges_by_player"] = edges_by_player
 
     if projections:
         proj_out: dict[str, list[dict[str, Any]]] = {}
@@ -266,6 +285,23 @@ def build_grounding_payload(
             proj_out[player] = _safe_records(frame, projection_limit)
         if proj_out:
             payload["projections"] = proj_out
+
+    if recent_form:
+        # Round to one decimal so the prompt body stays compact.
+        rf_out: dict[str, dict[str, float]] = {}
+        for player, stats in recent_form.items():
+            if not isinstance(stats, dict):
+                continue
+            cleaned: dict[str, float] = {}
+            for k, v in stats.items():
+                try:
+                    cleaned[str(k)] = round(float(v), 2)
+                except (TypeError, ValueError):
+                    continue
+            if cleaned:
+                rf_out[player] = cleaned
+        if rf_out:
+            payload["recent_form"] = rf_out
 
     if extras:
         payload["extras"] = extras
@@ -584,6 +620,16 @@ Wagner return', 'Closing lineup back, 32+ minutes'). Concrete.",
 TODAY: recent form arc, role/minutes shift, anything a sharp would \
 already know going into tip-off. Concrete, no fluff. Do not repeat \
 info already in the chips above.",
+      "prediction": "ONE line: a concrete more/less pick on the player's \
+loudest market followed by a confidence read. Format strictly: \
+'<MARKET> <SIDE> <LINE> — <confidence: low/medium/high>' (e.g. 'POINTS \
+LESS 17.5 — high confidence'). REQUIRED: if the player has ANY entry in \
+edges_by_player or edges_top, you MUST issue a more/less pick on the \
+largest |edge| row — do NOT write 'No play'. Even tiny edges (±0.5) get \
+a low-confidence call. Only fall back to 'No play — <one-clause reason>' \
+if the player has zero edges AND zero projections in LOCAL CONTEXT.",
+      "rationale": "1 paragraph (3-5 sentences). Lead with the loudest \
+model-vs-line gap and the lean. Back it with concrete recent form or role \
 context. Add one matchup or rotational angle. Close with the single \
 biggest risk to the call."
     }
@@ -591,9 +637,15 @@ biggest risk to the call."
 }
 
 Rules:
-- Include EVERY player from the roster. If a player has no edge data, still \
-provide news + a "No play" prediction + a short rationale on form, role, \
-and what to watch tonight.
+- Include EVERY player from the roster. If a player appears in \
+edges_by_player or edges_top, you MUST give them a real more/less pick on \
+their loudest edge — never 'No play'. 'No play' is only for players with \
+zero edges and zero projections.
+- Use recent_form values (pts/reb/ast/pra/min averages) as concrete anchors \
+in the news and rationale. Cite specific numbers from recent_form when \
+relevant.
+- Use the player's edges_by_player slice to pick the loudest market for \
+prediction, NOT a guess.
 - Keep each player rationale under ~110 words; news under ~50 words.
 - Do not include any keys other than the schema above.
 - Never write the strings "LOCAL CONTEXT", "(general NBA context)", \
