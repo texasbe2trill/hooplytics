@@ -1135,7 +1135,7 @@ def page_home(roster: dict, api_key: str) -> None:
     cmap = player_color_map(list(roster))
     cards = []
     for player, seasons in roster.items():
-        games = (modeling_df["player"] == player).sum()
+        games = (modeling_df["player"] == player).sum() if "player" in modeling_df.columns else 0
         color = cmap[player]
         cards.append(
             f'<div class="hl-roster-card">'
