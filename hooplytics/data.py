@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+import unicodedata
 from pathlib import Path
 from typing import Iterable
 
@@ -182,12 +183,35 @@ class PlayerStore:
         return None
 
     # ── Cached game-log fetch ────────────────────────────────────────────────
+    @staticmethod
+    def _cache_filename(name: str) -> str:
+        """Filesystem-safe ASCII filename for a player parquet cache.
+
+        nba_api returns canonical names with diacritics (e.g. ``"Nikola Jokić"``,
+        ``"Nikola Vučević"``) but the shipped seed cache files are ASCII
+        (``Nikola_Jokic.parquet``). Stripping diacritics keeps lookups stable
+        across platforms and ensures the seed cache hydrates new players
+        instantly instead of falling through to a slow live ``nba_api`` fetch
+        that can hang the UI for 30+ seconds on first add.
+        """
+        ascii_name = (
+            unicodedata.normalize("NFKD", name)
+            .encode("ascii", "ignore")
+            .decode("ascii")
+        )
+        return f"{ascii_name.replace(' ', '_')}.parquet"
+
     def _cache_path(self, name: str) -> Path:
-        return self.cache_dir / f"{name.replace(' ', '_')}.parquet"
+        return self.cache_dir / self._cache_filename(name)
 
     def _seed_cache_path(self, name: str) -> Path:
         """Read-only seed cache shipped with the repo for fast cold starts."""
-        return Path(__file__).resolve().parent.parent / "data" / "seed_cache" / f"{name.replace(' ', '_')}.parquet"
+        return (
+            Path(__file__).resolve().parent.parent
+            / "data"
+            / "seed_cache"
+            / self._cache_filename(name)
+        )
 
     def fetch_player_seasons(self, name: str, seasons: list[str]) -> pd.DataFrame:
         """Return raw game logs for ``name`` across ``seasons``, using disk cache.
