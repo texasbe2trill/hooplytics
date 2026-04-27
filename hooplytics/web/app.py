@@ -310,12 +310,30 @@ def _player_modeling_rows(player: str, seasons_key: str) -> pd.DataFrame:
     Per-player caching means adding or removing a sidebar player only triggers
     pipeline work for that single player — every other roster member's
     modeling rows are reused from cache (or from the shipped seed parquet).
+
+    Empty/no-data results are surfaced as ``NBADataUnavailable`` rather than
+    returned as empty frames. Streamlit's ``cache_data`` does NOT cache raised
+    exceptions, so this guarantees the next attempt re-runs the fetch instead
+    of being pinned to a stale empty result for the full 6-hour TTL after a
+    single transient API failure.
     """
     seasons = list(json.loads(seasons_key))
     raw = _store().load_player_data({player: seasons})
     if raw.empty:
-        return raw
-    return _store().modeling_frame(raw)
+        raise NBADataUnavailable(
+            f"NBA stats API returned no game logs for {player!r}.",
+            kind="empty",
+            player=player,
+        )
+    rows = _store().modeling_frame(raw)
+    if rows.empty:
+        raise NBADataUnavailable(
+            f"NBA stats API returned data for {player!r} but no complete "
+            "modeling rows survived feature construction.",
+            kind="empty",
+            player=player,
+        )
+    return rows
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 6, max_entries=12)
@@ -825,6 +843,16 @@ def _render_sidebar() -> tuple[str, str, str]:
                 # silent "0 game rows" card with no explanation.
                 with st.spinner(f"Loading game logs for {resolved}\u2026"):
                     seasons_key = json.dumps(sorted(seasons))
+                    # Force-bypass any stale cached empty result. Earlier
+                    # versions of _player_modeling_rows silently cached empty
+                    # frames after a transient NBA API failure, which then
+                    # pinned the user out of adding that player for the full
+                    # 6-hour TTL. Clearing on every add guarantees the
+                    # current attempt actually re-runs the fetch.
+                    try:
+                        _player_modeling_rows.clear()
+                    except Exception:  # noqa: BLE001 - defensive
+                        pass
                     try:
                         rows = _player_modeling_rows(resolved, seasons_key)
                     except NBADataUnavailable as nba_exc:
