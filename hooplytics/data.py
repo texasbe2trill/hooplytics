@@ -220,8 +220,6 @@ class PlayerStore:
         every requested season; otherwise the missing seasons are fetched and
         merged into the cache.
         """
-        from nba_api.stats.endpoints import playergamelog
-
         cache_path = self._cache_path(name)
         # Hydrate from the shipped seed cache on first run if no per-user cache yet.
         if not cache_path.exists():
@@ -257,33 +255,38 @@ class PlayerStore:
         pid = self.resolve_player_id(name)
         needed = [s for s in seasons if cached.empty or s not in cached["season"].unique()]
         frames: list[pd.DataFrame] = [cached] if not cached.empty else []
-        # Tighter timeouts + smaller backoff: nba_api occasionally hangs the
-        # full default 30s window per attempt, which previously stacked up to
-        # ~3min for a single brand-new player across 2 seasons * 2 types * 3
-        # retries. 12s + 2s/4s backoff fails fast and keeps the UI responsive.
-        for season in needed:
-            season_frames: list[pd.DataFrame] = []
-            for season_type in ("Regular Season", "Playoffs"):
-                gl = pd.DataFrame()
-                for attempt in range(2):
-                    try:
-                        gl = playergamelog.PlayerGameLog(
-                            player_id=pid, season=season,
-                            season_type_all_star=season_type, timeout=12
-                        ).get_data_frames()[0]
-                        break
-                    except Exception:  # noqa: BLE001 — transient network errors
-                        if attempt == 1:
-                            break
-                        time.sleep(1.5)
+
+        # Parallelize the per-(season, season_type) game-log fetches. Serially
+        # this stacks 4 HTTP calls (2 seasons \u00d7 Regular Season + Playoffs) with
+        # 12s timeouts each, which can pin the UI for a full minute on a slow
+        # network when a brand-new player has no seed cache. Threading drops
+        # wall time to ~one slow call regardless of how many seasons are
+        # requested. Single attempt + a longer timeout fails faster than the
+        # old retry-with-backoff loop, which rarely recovered anyway.
+        from concurrent.futures import ThreadPoolExecutor
+        from nba_api.stats.endpoints import playergamelog as _pgl
+
+        def _fetch_one(season: str, season_type: str) -> pd.DataFrame:
+            try:
+                gl = _pgl.PlayerGameLog(
+                    player_id=pid, season=season,
+                    season_type_all_star=season_type, timeout=15,
+                ).get_data_frames()[0]
+            except Exception:  # noqa: BLE001 \u2014 transient network errors
+                return pd.DataFrame()
+            if gl.empty:
+                return gl
+            return gl.assign(player=name, season=season, season_type=season_type)
+
+        jobs = [
+            (s, t) for s in needed for t in ("Regular Season", "Playoffs")
+        ]
+        if jobs:
+            with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as pool:
+                results = list(pool.map(lambda args: _fetch_one(*args), jobs))
+            for gl in results:
                 if not gl.empty:
-                    gl = gl.assign(player=name, season=season, season_type=season_type)
-                    season_frames.append(gl)
-                # Brief politeness pause only when an actual network hop happened.
-                if not gl.empty or attempt > 0:
-                    time.sleep(self.pause)
-            if season_frames:
-                frames.extend(season_frames)
+                    frames.append(gl)
 
         if not frames:
             return pd.DataFrame()
