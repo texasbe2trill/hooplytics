@@ -510,16 +510,8 @@ def ingest_historical_odds(
     return pd.concat(frames, ignore_index=True)
 
 
-def load_cached_historical_odds(
-    cache_dir: Path | None = None,
-) -> pd.DataFrame:
-    """Load all cached historical player prop lines into one DataFrame.
-
-    Scans ``ODDS_HIST_CACHE_DIR`` (or ``cache_dir``) for
-    ``nba_player_props_*.json`` files and concatenates them.
-    Returns an empty DataFrame if no cache files are found.
-    """
-    hist_dir = Path(cache_dir) if cache_dir else ODDS_HIST_CACHE_DIR
+def _load_cached_historical_odds_impl(hist_dir_str: str, _fingerprint: tuple) -> pd.DataFrame:
+    hist_dir = Path(hist_dir_str)
     if not hist_dir.exists():
         return pd.DataFrame(columns=["game_date", "player", "model", "line", "books"])
 
@@ -537,4 +529,42 @@ def load_cached_historical_odds(
 
     result = pd.concat(frames, ignore_index=True)
     result["game_date"] = pd.to_datetime(result["game_date"]).dt.normalize()
+    return result
+
+
+# Process-level memo so per-player feature builds reuse the parsed frame.
+# Keyed on (cache_dir, file_count, latest_mtime) so new cache writes invalidate.
+_HIST_ODDS_CACHE: dict[tuple, pd.DataFrame] = {}
+
+
+def load_cached_historical_odds(
+    cache_dir: Path | None = None,
+) -> pd.DataFrame:
+    """Load all cached historical player prop lines into one DataFrame.
+
+    Scans ``ODDS_HIST_CACHE_DIR`` (or ``cache_dir``) for
+    ``nba_player_props_*.json`` files and concatenates them. The parsed
+    frame is memoized at module level keyed on (file count, latest mtime)
+    so repeat calls — common during per-player feature builds on roster
+    mutation — return instantly without re-reading hundreds of JSON files.
+    Returns an empty DataFrame if no cache files are found.
+    """
+    hist_dir = Path(cache_dir) if cache_dir else ODDS_HIST_CACHE_DIR
+    if not hist_dir.exists():
+        return pd.DataFrame(columns=["game_date", "player", "model", "line", "books"])
+
+    files = sorted(hist_dir.glob("nba_player_props_*.json"))
+    fingerprint = (
+        str(hist_dir),
+        len(files),
+        max((f.stat().st_mtime for f in files), default=0.0),
+    )
+    cached = _HIST_ODDS_CACHE.get(fingerprint)
+    if cached is not None:
+        return cached
+    result = _load_cached_historical_odds_impl(str(hist_dir), fingerprint)
+    # Keep only the latest fingerprint to avoid unbounded growth as the
+    # cache directory churns.
+    _HIST_ODDS_CACHE.clear()
+    _HIST_ODDS_CACHE[fingerprint] = result
     return result

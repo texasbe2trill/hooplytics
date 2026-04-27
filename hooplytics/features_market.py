@@ -136,6 +136,16 @@ def build_market_features(
     if odds_df.empty:
         return df
 
+    # Restrict the historical frame to only the players present in ``df``.
+    # The cache holds 400+ players across the league, but per-player feature
+    # builds (the hot path on roster mutation) pass in a single player. Without
+    # this filter the pivots below run over the full league frame every call.
+    df_canon_names = set(df["player"].map(_canon).dropna().unique())
+    if df_canon_names:
+        odds_df = odds_df[odds_df["player"].map(_canon).isin(df_canon_names)]
+    if odds_df.empty:
+        return df
+
     # ── Step 1: derive per-row Over prob + overround if prices are cached ──
     odds_df = odds_df.copy()
     if "over_price" in odds_df.columns and "under_price" in odds_df.columns:
