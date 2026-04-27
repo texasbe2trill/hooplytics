@@ -570,17 +570,20 @@ trends, model reliability, the matchups that swing the night, key risks \
 (rest, injury, blowout potential).",
   "players": {
     "<Player Name>": {
+      "injury_status": "≤6 words. Short status chip: 'Healthy', 'Probable - \
+ankle', 'Out - rest', 'Questionable - knee', 'Game-time decision'. If \
+unknown, write 'No reported issue'. No sentences.",
+      "matchup": "≤9 words. Opponent + the single defining defensive trait \
+or pace note (e.g. 'vs DET — bottom-10 perimeter D', 'at OKC — elite \
+wing length, top-3 pace', 'vs LAC — physical, slow tempo'). No verb \
+sentences.",
+      "usage_trend": "≤9 words. Recent role/usage trajectory in plain \
+language (e.g. 'Usage climbing — 28% over last 5', 'Bench role since \
+Wagner return', 'Closing lineup back, 32+ minutes'). Concrete.",
       "news": "1-2 short sentences of current NBA context for this player \
-TODAY: recent form arc, role/minutes shift, opponent identity, rest, \
-injury status, anything a sharp would already know going into tip-off. \
-Concrete, no fluff. Avoid speculation.",
-      "prediction": "ONE line: a concrete more/less pick on the player's \
-loudest market followed by a confidence read. Format strictly: \
-'<MARKET> <SIDE> <LINE> — <confidence: low/medium/high>' (e.g. 'POINTS \
-LESS 17.5 — high confidence'). If no callable edge exists, write \
-'No play — <one-clause reason>'.",
-      "rationale": "1 paragraph (3-5 sentences). Lead with the loudest \
-model-vs-line gap and the lean. Back it with concrete recent form or role \
+TODAY: recent form arc, role/minutes shift, anything a sharp would \
+already know going into tip-off. Concrete, no fluff. Do not repeat \
+info already in the chips above.",
 context. Add one matchup or rotational angle. Close with the single \
 biggest risk to the call."
     }
@@ -762,13 +765,17 @@ def generate_report_sections(
                 # Legacy shape \u2014 a single rationale string. Surface it under
                 # the structured key so downstream code keeps a consistent
                 # access pattern.
-                players[k] = {
-                    "news": "",
+                players[k] = {                    "injury_status": "",
+                    "matchup": "",
+                    "usage_trend": "",                    "news": "",
                     "prediction": "",
                     "rationale": _scrub_prose_leaks(v.strip()),
                 }
             elif isinstance(v, dict):
                 players[k] = {
+                    "injury_status": _scrub_prose_leaks(str(v.get("injury_status", "")).strip()),
+                    "matchup": _scrub_prose_leaks(str(v.get("matchup", "")).strip()),
+                    "usage_trend": _scrub_prose_leaks(str(v.get("usage_trend", "")).strip()),
                     "news": _scrub_prose_leaks(str(v.get("news", "")).strip()),
                     "prediction": _scrub_prose_leaks(str(v.get("prediction", "")).strip()),
                     "rationale": _scrub_prose_leaks(str(v.get("rationale", "")).strip()),

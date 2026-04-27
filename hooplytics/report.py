@@ -1910,7 +1910,7 @@ def _analytics_visuals_flowables(
     edge_df: pd.DataFrame | None,
     styles: dict,
 ) -> list:
-    flow: list = _section_header("Analytics visuals", "Section 04", styles, anchor="sec-analytics")
+    flow: list = _section_header("Analytics visuals", "Section 05", styles, anchor="sec-analytics")
 
     rendered = False
     if isinstance(metrics, pd.DataFrame) and not metrics.empty:
@@ -3105,11 +3105,266 @@ def _executive_summary_flowables(
     ai_text = str((ai_sections or {}).get("executive_summary", "")).strip()
     outlook = str((ai_sections or {}).get("slate_outlook", "")).strip()
     if ai_text or outlook:
-        flow.append(_para("Context narrative (AI)", styles["h3"]))
+        # AI prose lives in a styled accent panel so the reader can tell at a
+        # glance which prose came from the model vs the deterministic summary
+        # callout above. A left rule + AI eyebrow badge keeps it on-brand.
+        prose_html_parts: list[str] = []
         if ai_text:
-            flow.append(_para(ai_text, styles["body"]))
+            prose_html_parts.append(
+                f"<font size='10' color='#2b3340'>{_safe_text(ai_text)}</font>"
+            )
         if outlook:
-            flow.append(_para(outlook, styles["body"]))
+            prose_html_parts.append(
+                f"<font size='10' color='#2b3340'>{_safe_text(outlook)}</font>"
+            )
+        prose_html = "<br/><br/>".join(prose_html_parts)
+        ai_panel = Table(
+            [[Paragraph(
+                "<font size='8' color='#cc5a00'><b>AI&nbsp;SCOUT</b></font>"
+                "&nbsp;&nbsp;"
+                "<font size='8' color='#6b7686'><b>CONTEXT NARRATIVE</b></font>"
+                f"<br/><br/>{prose_html}",
+                styles["body"],
+            )]],
+            colWidths=[7.0 * inch],
+        )
+        ai_panel.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fff8f1")),
+            ("LINEBEFORE", (0, 0), (0, -1), 3, BRAND_ORANGE),
+            ("BOX", (0, 0), (-1, -1), 0.4, PANEL_BORDER),
+            ("LEFTPADDING", (0, 0), (-1, -1), 14),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 14),
+            ("TOPPADDING", (0, 0), (-1, -1), 12),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+        ]))
+        flow.append(ai_panel)
+    return flow
+
+
+def _ai_picks_flowables(
+    *,
+    roster: dict[str, list[str]],
+    edge_df: pd.DataFrame | None,
+    ai_sections: dict[str, Any] | None,
+    sigma_lookup: dict[str, float] | None,
+    styles: dict,
+) -> list:
+    """Aggregate the per-player AI scout output into a single readable board.
+
+    Renders one card per rostered player with:
+      * the AI's concrete "more / less / no play" prediction line
+      * the loudest model-vs-line gap pulled from ``edge_df`` for context
+      * the AI's news + rationale prose
+
+    The deterministic edge data anchors each card so the reader can see *why*
+    the AI is leaning a particular direction without flipping back to other
+    sections. AI prose lives in tinted accent panels with an "AI Scout" badge
+    so it never gets confused with deterministic content.
+    """
+    flow: list = _section_header(
+        "AI scout picks", "Section 03", styles, anchor="sec-ai-picks",
+    )
+
+    ai_players: dict[str, Any] = (ai_sections or {}).get("players") or {}
+    if not roster or not ai_players:
+        flow.append(_para(
+            "Connect an OpenAI key in the sidebar to populate the AI scout "
+            "section. Every other section in this report still works without "
+            "it — only the AI prose is gated.",
+            styles["muted"],
+        ))
+        return flow
+
+    # Pre-compute "loudest signal" per player so each card can show the
+    # primary edge the AI is reasoning about, not just unanchored prose.
+    loudest_by_player: dict[str, dict] = {}
+    if isinstance(edge_df, pd.DataFrame) and not edge_df.empty:
+        df = edge_df.copy()
+        if "abs_edge" not in df.columns and "edge" in df.columns:
+            df["abs_edge"] = df["edge"].abs()
+        df = df.sort_values("abs_edge", ascending=False)
+        for player_name in roster.keys():
+            sub = df[df["player"] == player_name]
+            if sub.empty:
+                continue
+            top = sub.iloc[0]
+            loudest_by_player[player_name] = {
+                "model": str(top.get("model", "")),
+                "line": top.get("posted line", top.get("line")),
+                "proj": top.get("model prediction", top.get("projection")),
+                "edge": top.get("edge"),
+                "side": str(top.get("call") or top.get("side") or "").upper(),
+            }
+
+    intro = _callout_box(
+        "Hooplytics Scout reads the edge board, model quality, and recent "
+        "form for every rostered player and writes a concrete more/less call "
+        "with reasoning. Use these picks as a starting hypothesis — the data "
+        "tables in the rest of the report are the source of truth.",
+        styles,
+    )
+    flow.append(intro)
+    flow.append(Spacer(1, 8))
+
+    for player_name in roster.keys():
+        ai_entry = ai_players.get(player_name, "")
+        if isinstance(ai_entry, dict):
+            injury_status = str(ai_entry.get("injury_status", "")).strip()
+            matchup = str(ai_entry.get("matchup", "")).strip()
+            usage_trend = str(ai_entry.get("usage_trend", "")).strip()
+            news = str(ai_entry.get("news", "")).strip()
+            prediction = str(ai_entry.get("prediction", "")).strip()
+            rationale = str(ai_entry.get("rationale", "")).strip()
+        else:
+            injury_status = matchup = usage_trend = news = prediction = ""
+            rationale = str(ai_entry or "").strip()
+
+        if not (news or prediction or rationale or injury_status or matchup or usage_trend):
+            continue
+
+        loud = loudest_by_player.get(player_name)
+        # Header row: player name on the left, AI pick chip on the right.
+        edge_chip_html = ""
+        side_color = INK_MUTED
+        if loud is not None:
+            try:
+                ev = float(loud.get("edge")) if loud.get("edge") is not None else None
+            except (TypeError, ValueError):
+                ev = None
+            side = loud.get("side", "")
+            if side in ("MORE", "OVER"):
+                side_color = POS_GREEN
+                side_label = "ABOVE"
+            elif side in ("LESS", "UNDER"):
+                side_color = NEG_RED
+                side_label = "BELOW"
+            else:
+                side_label = "NEUTRAL"
+            edge_str = _fmt_signed(ev, 2) if ev is not None else "—"
+            edge_chip_html = (
+                f"<font size='7.5' color='#6b7686'><b>LOUDEST SIGNAL</b></font>"
+                f"<br/>"
+                f"<font size='9' color='#{side_color.hexval()[2:]}'>"
+                f"<b>{loud.get('model','').upper()} {side_label} {edge_str}</b>"
+                f"</font><br/>"
+                f"<font size='7.5' color='#6b7686'>"
+                f"line {_fmt(loud.get('line'), 1)} &middot; "
+                f"model {_fmt(loud.get('proj'), 2)}"
+                f"</font>"
+            )
+        else:
+            edge_chip_html = (
+                "<font size='7.5' color='#6b7686'><b>LOUDEST SIGNAL</b></font>"
+                "<br/><font size='8.5' color='#9aa3b2'>No live signal</font>"
+            )
+
+        header_left = Paragraph(
+            "<font size='7.5' color='#cc5a00'><b>AI&nbsp;SCOUT&nbsp;PICK</b></font>"
+            f"<br/><font size='13' color='#11151c'><b>{_safe_text(player_name)}</b></font>",
+            styles["body"],
+        )
+        header_right = Paragraph(edge_chip_html, ParagraphStyle(
+            "ai_pick_right", parent=styles["body"], alignment=TA_LEFT,
+        ))
+        header_row = Table(
+            [[header_left, header_right]],
+            colWidths=[3.6 * inch, 3.4 * inch],
+        )
+        header_row.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]))
+
+        # Pick line — the concrete more/less call.
+        pick_html = (
+            f"<font size='7.5' color='#cc5a00'><b>THE PICK</b></font>"
+            f"<br/><font size='11' color='#11151c'><b>"
+            f"{_safe_text(prediction or 'No play — see analyst notes')}"
+            f"</b></font>"
+        )
+        pick_para = Paragraph(pick_html, styles["body"])
+
+        # Scout intel chip strip (injury · matchup · usage). Each chip has a
+        # small orange eyebrow and a one-line value. Missing fields fall back
+        # to a muted placeholder so the layout stays consistent across cards.
+        def _chip(label: str, value: str, fallback: str) -> Paragraph:
+            shown = value if value else fallback
+            color = "#11151c" if value else "#9aa3b2"
+            return Paragraph(
+                f"<font size='7' color='#cc5a00'><b>{label}</b></font>"
+                f"<br/><font size='9' color='{color}'>{_safe_text(shown)}</font>",
+                ParagraphStyle(
+                    f"ai_chip_{label.lower()}",
+                    parent=styles["body"],
+                    alignment=TA_LEFT,
+                    leading=11,
+                ),
+            )
+
+        intel_row = Table(
+            [[
+                _chip("INJURY", injury_status, "No reported issue"),
+                _chip("MATCHUP", matchup, "—"),
+                _chip("USAGE TREND", usage_trend, "—"),
+            ]],
+            colWidths=[2.25 * inch, 2.45 * inch, 2.30 * inch],
+        )
+        intel_row.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fdebd6")),
+            ("BOX", (0, 0), (-1, -1), 0.3, colors.HexColor("#f1d4ad")),
+            ("LINEAFTER", (0, 0), (0, 0), 0.3, colors.HexColor("#f1d4ad")),
+            ("LINEAFTER", (1, 0), (1, 0), 0.3, colors.HexColor("#f1d4ad")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ]))
+
+        # Prose body.
+        prose_parts: list[str] = []
+        if news:
+            prose_parts.append(
+                "<font size='7.5' color='#cc5a00'><b>LATEST CONTEXT</b></font>"
+                f"<br/><font size='9.5' color='#2b3340'>{_safe_text(news)}</font>"
+            )
+        if rationale:
+            prose_parts.append(
+                "<font size='7.5' color='#cc5a00'><b>REASONING</b></font>"
+                f"<br/><font size='9.5' color='#2b3340'>{_safe_text(rationale)}</font>"
+            )
+        prose_html = "<br/><br/>".join(prose_parts) or (
+            "<font size='9' color='#9aa3b2'>"
+            "No additional context provided.</font>"
+        )
+        prose_para = Paragraph(prose_html, styles["body"])
+
+        card = Table(
+            [
+                [header_row],
+                [pick_para],
+                [intel_row],
+                [prose_para],
+            ],
+            colWidths=[7.0 * inch],
+        )
+        card.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fff8f1")),
+            ("LINEBEFORE", (0, 0), (0, -1), 4, BRAND_ORANGE),
+            ("BOX", (0, 0), (-1, -1), 0.4, PANEL_BORDER),
+            ("LINEBELOW", (0, 0), (0, 0), 0.4, PANEL_BORDER),
+            ("LINEBELOW", (0, 1), (0, 1), 0.4, PANEL_BORDER),
+            ("LEFTPADDING", (0, 0), (-1, -1), 16),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 16),
+            ("TOPPADDING", (0, 0), (-1, -1), 12),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ]))
+        flow.append(KeepTogether([card, Spacer(1, 8)]))
+
     return flow
 
 
@@ -3209,7 +3464,7 @@ def _spotlight_flowables(
     edge_df: pd.DataFrame | None, styles: dict,
     *, sigma_lookup: dict[str, float] | None = None,
 ) -> list:
-    flow: list = _section_header("Signal spotlight  |  top 3", "Section 03", styles, anchor="sec-spotlight")
+    flow: list = _section_header("Signal spotlight  |  top 3", "Section 04", styles, anchor="sec-spotlight")
     if edge_df is None or not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
         flow.append(_para("No live signals to spotlight yet.", styles["muted"]))
         return flow
@@ -3247,7 +3502,7 @@ def _spotlight_flowables(
 
 # ── Section: model quality ──────────────────────────────────────────────────
 def _model_quality_flowables(metrics: pd.DataFrame | None, styles: dict) -> list:
-    flow: list = _section_header("Model quality", "Section 05", styles, anchor="sec-model-quality")
+    flow: list = _section_header("Model quality", "Section 06", styles, anchor="sec-model-quality")
     if metrics is None or not isinstance(metrics, pd.DataFrame) or metrics.empty:
         flow.append(_para("Model metrics unavailable.", styles["muted"]))
         return flow
@@ -3306,7 +3561,7 @@ def _edge_board_flowables(
     top_n: int = 14,
     sigma_lookup: dict[str, float] | None = None,
 ) -> list:
-    flow: list = _section_header("Model vs line gaps", "Section 06", styles, anchor="sec-edges")
+    flow: list = _section_header("Model vs line gaps", "Section 07", styles, anchor="sec-edges")
     if edge_df is None or not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
         flow.append(_para(
             "No live signals available. Add an Odds API key and fetch lines "
@@ -3332,13 +3587,17 @@ def _edge_board_flowables(
             r.get("posted line", r.get("line")), side, sigma,
         )
         conf = _confidence_score(edge_val, sigma, r.get("books"))
-        books_label = (
-            _abbrev_books(r.get("book_names"), max_show=3)
-            if "book_names" in r else None
-        )
-        if not books_label or books_label == "—":
-            n = r.get("books")
-            books_label = f"{int(n)} books" if pd.notna(n) else "—"
+        # Books column is tight on width, so render a small numeric chip
+        # ("8 books") instead of a wrapping ticker — the per-player block
+        # already shows the full abbreviated book list when it matters.
+        n = r.get("books")
+        if pd.notna(n):
+            try:
+                books_label = f"{int(n)}"
+            except (TypeError, ValueError):
+                books_label = "—"
+        else:
+            books_label = "—"
         rows.append([
             str(r.get("player", "—")),
             str(r.get("model", "—")),
@@ -3353,9 +3612,12 @@ def _edge_board_flowables(
 
     table = _styled_table(
         rows,
-        col_widths=[1.35 * inch, 0.95 * inch, 0.55 * inch, 0.65 * inch,
-                    0.6 * inch, 0.55 * inch, 0.5 * inch, 0.5 * inch, 1.05 * inch],
-        align_right_cols=[2, 3, 4, 5, 6],
+        # Player column gets the extra space freed up by collapsing Books
+        # to a numeric chip; every other column inherits the previous
+        # widths so the existing per-cell colorings still line up.
+        col_widths=[1.85 * inch, 1.05 * inch, 0.55 * inch, 0.65 * inch,
+                    0.65 * inch, 0.55 * inch, 0.5 * inch, 0.55 * inch, 0.55 * inch],
+        align_right_cols=[2, 3, 4, 5, 6, 8],
     )
     extra: list = []
     for i, (_, r) in enumerate(df.iterrows(), start=1):
@@ -3686,13 +3948,43 @@ def _player_block(
         ]))
         flow.append(KeepTogether([pred_tbl, Spacer(1, 6)]))
 
-    if news and news.strip():
-        flow.append(_para("Latest context", styles["h3"]))
-        flow.append(_para(news.strip(), styles["body"]))
-
-    if rationale and rationale.strip():
-        flow.append(_para("Analyst notes", styles["h3"]))
-        flow.append(_para(rationale.strip(), styles["body"]))
+    # AI scout report — combine "Latest context" (news) + "Analyst notes"
+    # (rationale) into a single visually distinct card so the prose reads
+    # as a unit and is clearly attributed to the AI scout, not the model.
+    if (news and news.strip()) or (rationale and rationale.strip()):
+        prose_parts: list[str] = []
+        if news and news.strip():
+            prose_parts.append(
+                "<font size='7.5' color='#cc5a00'><b>LATEST CONTEXT</b></font>"
+                f"<br/><font size='9.5' color='#2b3340'>{_safe_text(news.strip())}</font>"
+            )
+        if rationale and rationale.strip():
+            prose_parts.append(
+                "<font size='7.5' color='#cc5a00'><b>ANALYST NOTES</b></font>"
+                f"<br/><font size='9.5' color='#2b3340'>{_safe_text(rationale.strip())}</font>"
+            )
+        prose_html = "<br/><br/>".join(prose_parts)
+        ai_card = Table(
+            [[Paragraph(
+                "<font size='8' color='#cc5a00'><b>AI&nbsp;SCOUT&nbsp;REPORT</b></font>"
+                "&nbsp;&nbsp;"
+                f"<font size='8' color='#6b7686'><b>{_safe_text(player.upper())}</b></font>"
+                f"<br/><br/>{prose_html}",
+                styles["body"],
+            )]],
+            colWidths=[7.0 * inch],
+        )
+        ai_card.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fff8f1")),
+            ("LINEBEFORE", (0, 0), (0, -1), 3, BRAND_ORANGE),
+            ("BOX", (0, 0), (-1, -1), 0.4, PANEL_BORDER),
+            ("LEFTPADDING", (0, 0), (-1, -1), 14),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 14),
+            ("TOPPADDING", (0, 0), (-1, -1), 10),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ]))
+        flow.append(Spacer(1, 4))
+        flow.append(ai_card)
 
     history_block = _player_history_table(player, history, styles)
     if history_block:
@@ -3716,7 +4008,7 @@ def _slip_builder_flowables(
     same edge_df produces the same slip every render.
     """
     flow: list = _section_header(
-        "Signal stack", "Section 07", styles, anchor="sec-slip",
+        "Signal stack", "Section 08", styles, anchor="sec-slip",
     )
     if edge_df is None or not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
         flow.append(_para(
@@ -3917,7 +4209,7 @@ def _per_player_flowables(
     sigma_lookup: dict[str, float] | None = None,
     styles: dict,
 ) -> list:
-    flow: list = _section_header("Per-player breakdown", "Section 08", styles, anchor="sec-players")
+    flow: list = _section_header("Per-player breakdown", "Section 09", styles, anchor="sec-players")
     if not roster:
         flow.append(_para("Roster is empty.", styles["muted"]))
         return flow
@@ -4093,6 +4385,8 @@ def build_pdf_report(
          "Skim-friendly summary \u2014 every above/below-line signal ranked."),
         ("Slate brief", "sec-exec",
          "Loudest signal, slate posture, and AI-augmented context."),
+        ("AI scout picks", "sec-ai-picks",
+         "Per-player AI more/less calls grounded in the model and live news."),
         ("Signal spotlight  |  top 3", "sec-spotlight",
          "The three biggest model-vs-line gaps tonight."),
         ("Analytics visuals", "sec-analytics",
@@ -4143,6 +4437,13 @@ def build_pdf_report(
         metrics=bundle_metrics,
         edge_df=edge_df,
         ai_sections=ai_sections,
+        styles=styles,
+    ))
+    flow.extend(_ai_picks_flowables(
+        roster=roster,
+        edge_df=edge_df,
+        ai_sections=ai_sections,
+        sigma_lookup=sigma_lookup,
         styles=styles,
     ))
     flow.extend(_spotlight_flowables(edge_df, styles, sigma_lookup=sigma_lookup))
