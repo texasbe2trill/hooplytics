@@ -22,6 +22,45 @@ from .features_role import build_role_features
 from .fantasy import fantasy
 
 
+class NBADataUnavailable(RuntimeError):
+    """Raised when the NBA stats API can't be reached or returns no data.
+
+    ``kind`` discriminates the failure mode so the UI can render an actionable
+    message instead of always blaming the host:
+
+    - ``"blocked"``  - HTTP 4xx / explicit block (typical on cloud datacenter IPs)
+    - ``"timeout"``  - request timed out / connection error after retries
+    - ``"empty"``    - API responded but returned no rows for the player/seasons
+    - ``"unknown"``  - any other failure (parsing, library mismatch, etc.)
+    """
+
+    def __init__(self, message: str, *, kind: str = "unknown", player: str | None = None) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.player = player
+
+
+def _configure_nba_stats_headers() -> None:
+    """Augment nba_api's default headers with stats.nba.com-specific tokens.
+
+    The library ships a Chrome User-Agent but omits the ``x-nba-stats-*``
+    headers that ``stats.nba.com`` increasingly requires when traffic looks
+    automated. Adding them here is a no-op when nba_api isn't installed and
+    is safe to run multiple times.
+    """
+    try:
+        from nba_api.stats.library.http import NBAStatsHTTP  # type: ignore
+    except Exception:  # noqa: BLE001 - optional dependency at import time
+        return
+    NBAStatsHTTP.headers.setdefault("x-nba-stats-origin", "stats")
+    NBAStatsHTTP.headers.setdefault("x-nba-stats-token", "true")
+    NBAStatsHTTP.headers.setdefault("Sec-Fetch-Mode", "cors")
+    NBAStatsHTTP.headers.setdefault("Sec-Fetch-Site", "same-site")
+
+
+_configure_nba_stats_headers()
+
+
 def nba_seasons(start: int, end: int) -> list[str]:
     """Season strings from ``start`` (inclusive) to ``end`` (exclusive on year, inclusive on season).
 
@@ -257,39 +296,96 @@ class PlayerStore:
         frames: list[pd.DataFrame] = [cached] if not cached.empty else []
 
         # Parallelize the per-(season, season_type) game-log fetches. Serially
-        # this stacks 4 HTTP calls (2 seasons \u00d7 Regular Season + Playoffs) with
-        # 12s timeouts each, which can pin the UI for a full minute on a slow
+        # this stacks 4 HTTP calls (2 seasons × Regular Season + Playoffs) with
+        # ~12s timeouts each, which can pin the UI for a full minute on a slow
         # network when a brand-new player has no seed cache. Threading drops
         # wall time to ~one slow call regardless of how many seasons are
-        # requested. Single attempt + a longer timeout fails faster than the
-        # old retry-with-backoff loop, which rarely recovered anyway.
+        # requested. Each job retries once on transient network errors with a
+        # short backoff — stats.nba.com cold calls routinely take 6–10s, so a
+        # single 8s attempt (the previous behavior) was failing too eagerly.
         from concurrent.futures import ThreadPoolExecutor
         from nba_api.stats.endpoints import playergamelog as _pgl
 
-        def _fetch_one(season: str, season_type: str) -> pd.DataFrame:
+        def _classify(exc: Exception) -> str:
+            # Lazily import requests so missing optional deps don't crash here.
             try:
-                gl = _pgl.PlayerGameLog(
-                    player_id=pid, season=season,
-                    season_type_all_star=season_type, timeout=8,
-                ).get_data_frames()[0]
-            except Exception:  # noqa: BLE001 \u2014 transient network errors
-                return pd.DataFrame()
-            if gl.empty:
-                return gl
-            return gl.assign(player=name, season=season, season_type=season_type)
+                from requests import exceptions as rexc  # type: ignore
+            except Exception:  # noqa: BLE001
+                rexc = None  # type: ignore[assignment]
+            if rexc is not None:
+                if isinstance(exc, (rexc.ReadTimeout, rexc.ConnectTimeout, rexc.Timeout)):
+                    return "timeout"
+                if isinstance(exc, rexc.ConnectionError):
+                    return "timeout"
+                if isinstance(exc, rexc.HTTPError):
+                    status = getattr(getattr(exc, "response", None), "status_code", None)
+                    if status in (401, 403, 429):
+                        return "blocked"
+                    return "unknown"
+            # Fallback: inspect the message for the common timeout/block markers.
+            msg = str(exc).lower()
+            if "timeout" in msg or "timed out" in msg or "connection" in msg:
+                return "timeout"
+            if "403" in msg or "forbidden" in msg or "blocked" in msg:
+                return "blocked"
+            return "unknown"
+
+        def _fetch_one(season: str, season_type: str) -> tuple[pd.DataFrame, Exception | None, str | None]:
+            last_exc: Exception | None = None
+            for attempt in range(2):
+                try:
+                    gl = _pgl.PlayerGameLog(
+                        player_id=pid, season=season,
+                        season_type_all_star=season_type, timeout=12,
+                    ).get_data_frames()[0]
+                except Exception as exc:  # noqa: BLE001 - classified below
+                    last_exc = exc
+                    kind = _classify(exc)
+                    if kind == "blocked":
+                        # Datacenter IP blocks won't recover on retry; fail fast.
+                        return pd.DataFrame(), exc, kind
+                    if attempt == 0:
+                        time.sleep(0.75)
+                        continue
+                    return pd.DataFrame(), exc, kind
+                if gl.empty:
+                    return gl, None, None
+                return gl.assign(player=name, season=season, season_type=season_type), None, None
+            return pd.DataFrame(), last_exc, _classify(last_exc) if last_exc else None
 
         jobs = [
             (s, t) for s in needed for t in ("Regular Season", "Playoffs")
         ]
+        errors: list[tuple[Exception, str]] = []
         if jobs:
             with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as pool:
                 results = list(pool.map(lambda args: _fetch_one(*args), jobs))
-            for gl in results:
+            for gl, exc, kind in results:
+                if exc is not None and kind is not None:
+                    errors.append((exc, kind))
                 if not gl.empty:
                     frames.append(gl)
 
         if not frames:
-            return pd.DataFrame()
+            # Nothing came back. If every job failed with an exception, surface
+            # a typed error that the UI can translate into the correct message
+            # instead of unconditionally blaming the host.
+            if errors and len(errors) == len(jobs):
+                # Prefer the most actionable failure mode.
+                priority = {"blocked": 0, "timeout": 1, "unknown": 2}
+                errors.sort(key=lambda e: priority.get(e[1], 99))
+                exc, kind = errors[0]
+                raise NBADataUnavailable(
+                    f"Failed to fetch game logs for {name!r}: {exc}",
+                    kind=kind,
+                    player=name,
+                ) from exc
+            # API responded cleanly but had no rows for these seasons.
+            raise NBADataUnavailable(
+                f"NBA stats API returned no game logs for {name!r} in {seasons}.",
+                kind="empty",
+                player=name,
+            )
         out = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["Game_ID", "player"])
         # Normalize player to the requested (possibly diacritic) form before
         # persisting so future cache hits match roster keys exactly.

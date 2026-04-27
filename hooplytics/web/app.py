@@ -54,7 +54,7 @@ _TRAINING_ANCHOR_PLAYERS: list[str] = [
     "Nikola Jokic",
     "Giannis Antetokounmpo",
 ]
-from hooplytics.data import PlayerStore, nba_seasons
+from hooplytics.data import NBADataUnavailable, PlayerStore, nba_seasons
 from hooplytics.models import ModelBundle, ensure_models, load_models
 from hooplytics.odds import fetch_live_player_lines, load_cached_historical_odds
 from hooplytics.openai_agent import (
@@ -355,7 +355,14 @@ def _modeling_frame(roster_key: str) -> pd.DataFrame:
                         chunks.append(sub)
                         continue
         seasons_key = json.dumps(sorted(season_list))
-        rows = _player_modeling_rows(player, seasons_key)
+        try:
+            rows = _player_modeling_rows(player, seasons_key)
+        except NBADataUnavailable:
+            # An individual player's data may be unreachable (cold cache + a
+            # stats.nba.com hiccup). Skip them here so the rest of the roster
+            # still renders; the explicit add-to-roster flow surfaces the
+            # typed error directly to the user.
+            continue
         if not rows.empty:
             chunks.append(rows)
 
@@ -818,13 +825,38 @@ def _render_sidebar() -> tuple[str, str, str]:
                 # silent "0 game rows" card with no explanation.
                 with st.spinner(f"Loading game logs for {resolved}\u2026"):
                     seasons_key = json.dumps(sorted(seasons))
-                    rows = _player_modeling_rows(resolved, seasons_key)
+                    try:
+                        rows = _player_modeling_rows(resolved, seasons_key)
+                    except NBADataUnavailable as nba_exc:
+                        kind = nba_exc.kind
+                        if kind == "blocked":
+                            st.error(
+                                f"NBA stats API blocked the request for **{resolved}** "
+                                "(HTTP 403/429). This is expected on Streamlit Cloud and "
+                                "other datacenter hosts \u2014 stats.nba.com filters those IPs. "
+                                "Try again from a local install."
+                            )
+                        elif kind == "timeout":
+                            st.error(
+                                f"Timed out reaching the NBA stats API while loading "
+                                f"**{resolved}**. The endpoint can be slow on cold calls; "
+                                "try again in a few seconds."
+                            )
+                        elif kind == "empty":
+                            st.error(
+                                f"NBA stats API returned no game logs for **{resolved}** "
+                                "in the selected seasons. Try a different season range."
+                            )
+                        else:
+                            st.error(
+                                f"Couldn\u2019t load game logs for **{resolved}**: {nba_exc}"
+                            )
+                        st.stop()
                 if rows.empty:
                     st.error(
-                        f"Couldn't load game logs for **{resolved}**. "
-                        "The NBA stats API may be unreachable from this host "
-                        "(this is common on cloud deployments). Try again later "
-                        "or run Hooplytics locally."
+                        f"Couldn\u2019t load game logs for **{resolved}**. "
+                        "The NBA stats API returned data but no complete modeling rows "
+                        "after feature construction. Try a wider season range."
                     )
                     st.stop()
                 roster[resolved] = seasons
