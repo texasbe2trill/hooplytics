@@ -507,9 +507,12 @@ def _init_state() -> None:
 
 
 def _sync_session_odds_api_key() -> None:
-    st.session_state.session_odds_api_key = (
-        st.session_state.session_odds_api_key_input.strip()
-    )
+    new_key = st.session_state.session_odds_api_key_input.strip()
+    if new_key != st.session_state.session_odds_api_key:
+        st.session_state.session_odds_api_key = new_key
+        st.session_state.live_bust += 1
+        st.rerun()
+    st.session_state.session_odds_api_key = new_key
 
 
 def _sync_session_openai_api_key() -> None:
@@ -914,7 +917,35 @@ def _render_sidebar() -> tuple[str, str, str]:
             key="train_on_display_roster",
             help="Off by default for speed. Enable to personalize training to displayed players.",
         )
-        st.caption("Prebuilt bundle: " + (st.session_state.prebuilt_bundle_path or "not found"))
+        # Bundle selector — show all .joblib files in bundles/ directory
+        if st.session_state.get("use_prebuilt_bundle"):
+            _bundles_dir = Path(__file__).resolve().parents[2] / "bundles"
+            _available_bundles = sorted(_bundles_dir.glob("*.joblib")) if _bundles_dir.exists() else []
+            if _available_bundles:
+                _bundle_names = [b.name for b in _available_bundles]
+                _current_path = st.session_state.get("prebuilt_bundle_path", "")
+                _current_name = Path(_current_path).name if _current_path else _bundle_names[0]
+                _selected_idx = _bundle_names.index(_current_name) if _current_name in _bundle_names else 0
+                _selected_name = st.selectbox(
+                    "Bundle",
+                    options=_bundle_names,
+                    index=_selected_idx,
+                    key="prebuilt_bundle_selector",
+                    label_visibility="collapsed",
+                    help="Switch between available prebuilt model bundles.",
+                )
+                _new_path = str(_bundles_dir / _selected_name)
+                if _new_path != st.session_state.get("prebuilt_bundle_path", ""):
+                    st.session_state.prebuilt_bundle_path = _new_path
+                    try:
+                        _bundle.clear()
+                    except Exception:
+                        pass
+                    st.rerun()
+            else:
+                st.caption("Prebuilt bundle: " + (st.session_state.prebuilt_bundle_path or "not found"))
+        else:
+            st.caption("Prebuilt bundle: " + (st.session_state.prebuilt_bundle_path or "not found"))
 
         divider()
 
