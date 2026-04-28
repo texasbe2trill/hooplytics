@@ -606,19 +606,11 @@ with the directional tilt and why. One sentence on what would break the \
 thesis. No second paragraph. No restating the executive summary.",
   "players": {
     "<Player Name>": {
-      "matchup": "≤9 words. Opponent + the single defining defensive trait \
-or pace note (e.g. 'vs DET — bottom-10 perimeter D', 'at OKC — elite \
-wing length, top-3 pace', 'vs LAC — physical, slow tempo'). Use the \
-EXACT teams from extras.today_matchups[player] when present — never \
-invent an opponent. If no matchup is in extras, write 'Matchup \
-unconfirmed'.",
-      "usage_trend": "≤9 words. Recent role/usage trajectory in plain \
-language (e.g. 'Usage climbing — 28% over last 5', 'Bench role since \
-Wagner return', 'Closing lineup back, 32+ minutes'). Concrete.",
       "news": "1-2 short sentences of current NBA context for this player \
-TODAY: recent form arc, role/minutes shift, anything a sharp would \
-already know going into tip-off. Concrete, no fluff. Do not repeat \
-info already in the chips above.",
+TODAY: recent form arc, role/minutes shift, and (only if extras confirms it) \
+the opponent / matchup angle. Concrete, no fluff. If extras.today_matchups[player] \
+is present, you MAY name the opponent verbatim from that entry; otherwise do \
+NOT name an opponent.",
       "prediction": "ONE line: a concrete more/less pick on the player's \
 loudest market followed by a confidence read. Format strictly: \
 '<MARKET> <SIDE> <LINE> — <confidence: low/medium/high>' (e.g. 'POINTS \
@@ -629,8 +621,8 @@ a low-confidence call. Only fall back to 'No play — <one-clause reason>' \
 if the player has zero edges AND zero projections in LOCAL CONTEXT.",
       "rationale": "1 paragraph (3-5 sentences). Lead with the loudest \
 model-vs-line gap and the lean. Back it with concrete recent form or role \
-context. Add one matchup or rotational angle. Close with the single \
-biggest risk to the call."
+context. Add one matchup or rotational angle ONLY if extras confirms the \
+opponent. Close with the single biggest risk to the call."
     }
   }
 }

@@ -2915,10 +2915,10 @@ def _quick_calls_flowables(
     a deterministic one-line rationale (book depth + form delta vs the line).
     """
     flow: list = _section_header(
-        "Signal summary", "Section 01", styles, anchor="sec-quick-calls",
+        "Signal summary  |  top 5", "Section 01", styles, anchor="sec-quick-calls",
     )
     flow.append(_para(
-        "Skim-friendly summary \u2014 every above/below-line signal from the live "
+        "Skim-friendly summary \u2014 the top 5 above/below-line signals from the live "
         "board, sorted by signal strength.",
         styles["muted"],
     ))
@@ -2937,7 +2937,7 @@ def _quick_calls_flowables(
         flow.append(_para("No edge values available.", styles["muted"]))
         return flow
     df["abs_edge"] = pd.to_numeric(df["edge"], errors="coerce").abs()
-    df = df.sort_values("abs_edge", ascending=False).head(12)
+    df = df.sort_values("abs_edge", ascending=False).head(5)
     if df.empty:
         flow.append(_para("No callable edges in the current snapshot.", styles["muted"]))
         return flow
@@ -3178,7 +3178,7 @@ def _ai_picks_flowables(
     so it never gets confused with deterministic content.
     """
     flow: list = _section_header(
-        "AI scout picks", "Section 03", styles, anchor="sec-ai-picks",
+        "AI scout picks  |  top 3", "Section 03", styles, anchor="sec-ai-picks",
     )
 
     ai_players: dict[str, Any] = (ai_sections or {}).get("players") or {}
@@ -3209,32 +3209,45 @@ def _ai_picks_flowables(
                 "line": top.get("posted line", top.get("line")),
                 "proj": top.get("model prediction", top.get("projection")),
                 "edge": top.get("edge"),
+                "abs_edge": abs(float(top.get("edge"))) if top.get("edge") is not None else 0.0,
                 "side": str(top.get("call") or top.get("side") or "").upper(),
             }
 
+    # Rank players by loudest absolute edge and keep only the top 5 so the
+    # section stays skim-friendly. Players without any edge fall to the end
+    # and are dropped past the cap.
+    ranked_players = sorted(
+        roster.keys(),
+        key=lambda p: loudest_by_player.get(p, {}).get("abs_edge", -1.0),
+        reverse=True,
+    )
+    top_players = [p for p in ranked_players if p in loudest_by_player][:3]
+    # If nothing has an edge, fall back to first 3 roster players so the
+    # section isn't empty when AI prose still has value.
+    if not top_players:
+        top_players = list(roster.keys())[:3]
+
     intro = _callout_box(
-        "Hooplytics Scout reads the edge board, model quality, and recent "
-        "form for every rostered player and writes a concrete more/less call "
-        "with reasoning. Use these picks as a starting hypothesis — the data "
-        "tables in the rest of the report are the source of truth.",
+        "Hooplytics Scout's three loudest more/less calls for tonight, ranked "
+        "by model-vs-line edge. Each card pairs the AI's concrete pick with "
+        "the deterministic signal that anchors it. The full ranked board "
+        "lives in Section 07.",
         styles,
     )
     flow.append(intro)
     flow.append(Spacer(1, 8))
 
-    for player_name in roster.keys():
+    for player_name in top_players:
         ai_entry = ai_players.get(player_name, "")
         if isinstance(ai_entry, dict):
-            matchup = str(ai_entry.get("matchup", "")).strip()
-            usage_trend = str(ai_entry.get("usage_trend", "")).strip()
             news = str(ai_entry.get("news", "")).strip()
             prediction = str(ai_entry.get("prediction", "")).strip()
             rationale = str(ai_entry.get("rationale", "")).strip()
         else:
-            matchup = usage_trend = news = prediction = ""
+            news = prediction = ""
             rationale = str(ai_entry or "").strip()
 
-        if not (news or prediction or rationale or matchup or usage_trend):
+        if not (news or prediction or rationale):
             continue
 
         loud = loudest_by_player.get(player_name)
@@ -3302,42 +3315,10 @@ def _ai_picks_flowables(
         )
         pick_para = Paragraph(pick_html, styles["body"])
 
-        # Scout intel chip strip (injury · matchup · usage). Each chip has a
-        # small orange eyebrow and a one-line value. Missing fields fall back
-        # to a muted placeholder so the layout stays consistent across cards.
-        def _chip(label: str, value: str, fallback: str) -> Paragraph:
-            shown = value if value else fallback
-            color = "#11151c" if value else "#9aa3b2"
-            return Paragraph(
-                f"<font size='7' color='#cc5a00'><b>{label}</b></font>"
-                f"<br/><font size='9' color='{color}'>{_safe_text(shown)}</font>",
-                ParagraphStyle(
-                    f"ai_chip_{label.lower()}",
-                    parent=styles["body"],
-                    alignment=TA_LEFT,
-                    leading=11,
-                ),
-            )
-
-        intel_row = Table(
-            [[
-                _chip("MATCHUP", matchup, "Matchup unconfirmed"),
-                _chip("USAGE TREND", usage_trend, "—"),
-            ]],
-            colWidths=[3.50 * inch, 3.50 * inch],
-        )
-        intel_row.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fdebd6")),
-            ("BOX", (0, 0), (-1, -1), 0.3, colors.HexColor("#f1d4ad")),
-            ("LINEAFTER", (0, 0), (0, 0), 0.3, colors.HexColor("#f1d4ad")),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 8),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-            ("TOPPADDING", (0, 0), (-1, -1), 6),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-        ]))
-
-        # Prose body.
+        # Prose body — Latest context + Reasoning. We removed the matchup /
+        # usage-trend chip strip because it was a hallucination magnet
+        # whenever extras.today_matchups didn't cover the player; the news
+        # paragraph now carries any opponent angle the AI is allowed to cite.
         prose_parts: list[str] = []
         if news:
             prose_parts.append(
@@ -3359,7 +3340,6 @@ def _ai_picks_flowables(
             [
                 [header_row],
                 [pick_para],
-                [intel_row],
                 [prose_para],
             ],
             colWidths=[7.0 * inch],
@@ -3961,43 +3941,40 @@ def _player_block(
         ]))
         flow.append(KeepTogether([pred_tbl, Spacer(1, 6)]))
 
-    # AI scout report — combine "Latest context" (news) + "Analyst notes"
-    # (rationale) into a single visually distinct card so the prose reads
-    # as a unit and is clearly attributed to the AI scout, not the model.
+    # AI scout prose — plain inline subheadings so the per-player block reads
+    # like the reference report (no card chrome, no chip strip). The "loud"
+    # AI scout card lives in Section 03; here the prose just supports the
+    # numbers above. The block is clearly attributed to the AI scout via the
+    # eyebrow heading so readers don't confuse it with deterministic output.
     if (news and news.strip()) or (rationale and rationale.strip()):
-        prose_parts: list[str] = []
+        flow.append(Spacer(1, 8))
+        flow.append(Paragraph(
+            "<font size='8' color='#cc5a00'><b>AI&nbsp;SCOUT&nbsp;REPORT</b></font>"
+            "&nbsp;&nbsp;<font size='7.5' color='#9aa3b2'>"
+            "Generated prose &middot; not a deterministic signal"
+            "</font>",
+            styles["body"],
+        ))
+        flow.append(Spacer(1, 2))
         if news and news.strip():
-            prose_parts.append(
-                "<font size='7.5' color='#cc5a00'><b>LATEST CONTEXT</b></font>"
-                f"<br/><font size='9.5' color='#2b3340'>{_safe_text(news.strip())}</font>"
-            )
-        if rationale and rationale.strip():
-            prose_parts.append(
-                "<font size='7.5' color='#cc5a00'><b>ANALYST NOTES</b></font>"
-                f"<br/><font size='9.5' color='#2b3340'>{_safe_text(rationale.strip())}</font>"
-            )
-        prose_html = "<br/><br/>".join(prose_parts)
-        ai_card = Table(
-            [[Paragraph(
-                "<font size='8' color='#cc5a00'><b>AI&nbsp;SCOUT&nbsp;REPORT</b></font>"
-                "&nbsp;&nbsp;"
-                f"<font size='8' color='#6b7686'><b>{_safe_text(player.upper())}</b></font>"
-                f"<br/><br/>{prose_html}",
+            flow.append(Paragraph(
+                "<font size='7.5' color='#cc5a00'><b>LATEST CONTEXT</b></font>",
                 styles["body"],
-            )]],
-            colWidths=[7.0 * inch],
-        )
-        ai_card.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fff8f1")),
-            ("LINEBEFORE", (0, 0), (0, -1), 3, BRAND_ORANGE),
-            ("BOX", (0, 0), (-1, -1), 0.4, PANEL_BORDER),
-            ("LEFTPADDING", (0, 0), (-1, -1), 14),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 14),
-            ("TOPPADDING", (0, 0), (-1, -1), 10),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
-        ]))
-        flow.append(Spacer(1, 4))
-        flow.append(ai_card)
+            ))
+            flow.append(Paragraph(
+                f"<font size='9.5' color='#2b3340'>{_safe_text(news.strip())}</font>",
+                styles["body"],
+            ))
+            flow.append(Spacer(1, 4))
+        if rationale and rationale.strip():
+            flow.append(Paragraph(
+                "<font size='7.5' color='#cc5a00'><b>ANALYST NOTES</b></font>",
+                styles["body"],
+            ))
+            flow.append(Paragraph(
+                f"<font size='9.5' color='#2b3340'>{_safe_text(rationale.strip())}</font>",
+                styles["body"],
+            ))
 
     history_block = _player_history_table(player, history, styles)
     if history_block:
@@ -4394,12 +4371,12 @@ def build_pdf_report(
     # Each top-level row carries a short description so the TOC reads like a
     # glossy magazine front matter rather than a bare hyperlink list.
     toc_items: list[tuple] = [
-        ("Signal summary", "sec-quick-calls",
-         "Skim-friendly summary \u2014 every above/below-line signal ranked."),
+        ("Signal summary  |  top 5", "sec-quick-calls",
+         "Skim-friendly summary \u2014 the top 5 above/below-line signals ranked."),
         ("Slate brief", "sec-exec",
          "Loudest signal, slate posture, and AI-augmented context."),
-        ("AI scout picks", "sec-ai-picks",
-         "Per-player AI more/less calls grounded in the model and live news."),
+        ("AI scout picks  |  top 3", "sec-ai-picks",
+         "Top 3 AI more/less calls grounded in the model and live news."),
         ("Signal spotlight  |  top 3", "sec-spotlight",
          "The three biggest model-vs-line gaps tonight."),
         ("Analytics visuals", "sec-analytics",
