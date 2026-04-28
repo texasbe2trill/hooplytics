@@ -4786,11 +4786,12 @@ def _v2_edge_confidence_quadrant(
     *,
     width: float = 6.4 * inch,
     height: float = 4.4 * inch,
-) -> tuple[Drawing | None, list[tuple[int, str]]]:
+) -> tuple[Drawing | None, list[dict]]:
     """Scatter of |edge| (y) vs book depth (x) with quadrant labels.
 
-    Returns (drawing, legend_rows). Legend rows are (rank, "player · market")
-    so the call site can render a side panel mapping numbers to signals.
+    Returns (drawing, legend_rows). Each legend row is a dict with keys
+    ``rank``, ``player``, ``market``, ``edge``, ``side`` so the call site
+    can render a richly formatted index panel.
     """
     if not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
         return None, []
@@ -4872,30 +4873,57 @@ def _v2_edge_confidence_quadrant(
         "threepm": "3PM", "pra": "PRA", "fantasy_score": "FAN",
         "stl_blk": "S+B", "turnovers": "TOV",
     }
-    legend: list[tuple[int, str]] = []
+    legend: list[dict] = []
 
-    placed_dots: list[tuple[float, float]] = []
-    for rank, (_, row) in enumerate(df.iterrows(), start=1):
+    # ── Compute initial dot positions, then iteratively relax to dodge ──
+    # collisions. Marker radius is 8 so we need ≥ 18 px center-to-center
+    # spacing for a clean visual gap.
+    MIN_DIST = 19.0
+    BOUND_L = pad_l + 12
+    BOUND_R = pad_l + plot_w - 12
+    BOUND_B = pad_b + 12
+    BOUND_T = pad_b + plot_h - 12
+
+    raw: list[list[float]] = []
+    rows_data: list = []
+    for _, row in df.iterrows():
         e = float(row["_e"])
         books = float(row["_books"])
-        x = pad_l + plot_w * (books / max_books)
-        y = pad_b + plot_h * (abs(e) / max_abs) * 0.92 + plot_h * 0.06
-        # Repel from previously placed dots so numbers stay readable.
-        for _ in range(6):
-            shifted = False
-            for px, py in placed_dots:
-                dx = x - px
-                dy = y - py
-                if abs(dx) < 16 and abs(dy) < 16:
-                    if abs(dy) >= abs(dx):
-                        y += 16 if dy >= 0 else -16
-                    else:
-                        x += 16 if dx >= 0 else -16
-                    shifted = True
-            if not shifted:
-                break
-        x = max(pad_l + 12, min(pad_l + plot_w - 12, x))
-        y = max(pad_b + 12, min(pad_b + plot_h - 12, y))
+        x0 = pad_l + plot_w * (books / max_books)
+        y0 = pad_b + plot_h * (abs(e) / max_abs) * 0.92 + plot_h * 0.06
+        raw.append([x0, y0])
+        rows_data.append((e, row))
+
+    # Force-directed relaxation (~30 iterations is more than enough for ≤7 dots).
+    import math as _math
+    n = len(raw)
+    for _ in range(40):
+        moved = 0.0
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx = raw[j][0] - raw[i][0]
+                dy = raw[j][1] - raw[i][1]
+                dist = _math.hypot(dx, dy)
+                if dist < MIN_DIST:
+                    if dist < 0.01:
+                        # Identical points: nudge in opposing diagonals
+                        dx, dy, dist = 1.0, 1.0, 1.4142
+                    overlap = (MIN_DIST - dist) / 2.0 + 0.5
+                    ux = dx / dist
+                    uy = dy / dist
+                    raw[i][0] -= ux * overlap
+                    raw[i][1] -= uy * overlap
+                    raw[j][0] += ux * overlap
+                    raw[j][1] += uy * overlap
+                    moved += overlap
+        # Clamp into plot rect after each pass
+        for i in range(n):
+            raw[i][0] = max(BOUND_L, min(BOUND_R, raw[i][0]))
+            raw[i][1] = max(BOUND_B, min(BOUND_T, raw[i][1]))
+        if moved < 0.5:
+            break
+
+    for rank, ((x, y), (e, row)) in enumerate(zip(raw, rows_data), start=1):
         col = POS_GREEN if e > 0 else NEG_RED
         # Numbered marker: filled disk, white inner, rank numeral.
         d.add(Circle(x, y, 8.0, strokeColor=None, fillColor=col))
@@ -4903,13 +4931,19 @@ def _v2_edge_confidence_quadrant(
         d.add(String(x, y - 2.5, str(rank),
                      fontName=_BOLD_FONT, fontSize=7.5,
                      fillColor=col, textAnchor="middle"))
-        placed_dots.append((x, y))
 
         player = str(row.get("player", ""))
         last_name = player.split()[-1] if player else "?"
         market = market_short.get(str(row.get("model", "")).lower(),
                                   str(row.get("model", ""))[:3].upper())
-        legend.append((rank, f"{_short(last_name, 14)} {market} {_fmt_signed(e, 2)}"))
+        legend.append({
+            "rank": rank,
+            "player": _short(last_name, 14),
+            "full_player": player,
+            "market": market,
+            "edge": e,
+            "side": "OVER" if e > 0 else "UNDER",
+        })
 
     return d, legend
 
@@ -5863,61 +5897,112 @@ def _v2_conviction_map_flowables(
     ]
 
     if quad is not None:
-        # Build a 2-column numbered legend that maps each dot to a signal.
+        # ── Build a beautifully formatted Signal Index ────────────────────
+        # Each row: [#chip] [Surname]  [MARKET]  [+edge]
+        # Two columns; thin rules between rows for an editorial table feel.
+
+        def _chip(rank: int, side: str) -> Drawing:
+            col = POS_GREEN if side == "OVER" else NEG_RED
+            chip = Drawing(16, 14)
+            chip.add(Circle(8, 7, 6.5, strokeColor=col, strokeWidth=0.9,
+                            fillColor=V2_BG_CREAM))
+            chip.add(String(8, 4.5, str(rank),
+                            fontName=_BOLD_FONT, fontSize=7.0,
+                            fillColor=col, textAnchor="middle"))
+            return chip
+
+        def _row_cells(item: dict) -> list:
+            edge_col = "#1f7a3d" if item["side"] == "OVER" else "#b8392b"
+            name_para = Paragraph(
+                f"<font name='{_V2_SERIF_BOLD}' size='9' color='#0a0e14'>"
+                f"{_safe_text(item['player'])}</font>"
+                f" &nbsp;<font name='{_BOLD_FONT}' size='6.5' color='#6b7686'>"
+                f"{_safe_text(item['market'])}</font>",
+                styles["body"],
+            )
+            edge_para = Paragraph(
+                f"<para align='right'>"
+                f"<font name='{_V2_SERIF_BOLD}' size='9' color='{edge_col}'>"
+                f"{_fmt_signed(item['edge'], 2)}</font></para>",
+                styles["body"],
+            )
+            return [_chip(item["rank"], item["side"]), name_para, edge_para]
+
         legend_rows: list[list] = []
         if legend:
             half = (len(legend) + 1) // 2
             left_items = legend[:half]
             right_items = legend[half:]
             for idx in range(half):
-                left_cell = ""
-                right_cell = ""
-                if idx < len(left_items):
-                    rk, txt = left_items[idx]
-                    left_cell = (
-                        f"<font size='8' name='{_BOLD_FONT}' color='#cc5a00'>"
-                        f"<b>{rk:>2}</b></font>"
-                        f" &nbsp;<font size='8' color='#0a0e14'>"
-                        f"{_safe_text(txt)}</font>"
-                    )
-                if idx < len(right_items):
-                    rk, txt = right_items[idx]
-                    right_cell = (
-                        f"<font size='8' name='{_BOLD_FONT}' color='#cc5a00'>"
-                        f"<b>{rk:>2}</b></font>"
-                        f" &nbsp;<font size='8' color='#0a0e14'>"
-                        f"{_safe_text(txt)}</font>"
-                    )
-                legend_rows.append([
-                    Paragraph(left_cell, styles["body"]),
-                    Paragraph(right_cell, styles["body"]),
-                ])
+                left = _row_cells(left_items[idx]) if idx < len(left_items) else ["", "", ""]
+                right = _row_cells(right_items[idx]) if idx < len(right_items) else ["", "", ""]
+                legend_rows.append(left + [""] + right)
 
+        # Header row: title + inline color/axis legend.
         header = Paragraph(
-            f"<font size='7' name='{_BOLD_FONT}' color='#6b7686'>"
-            f"SIGNAL INDEX &nbsp;·&nbsp; "
-            f"<font color='#1f7a3d'>green = OVER</font> &nbsp; "
-            f"<font color='#b8392b'>red = UNDER</font> &nbsp;·&nbsp; "
-            f"y = |edge|, x = book depth"
+            f"<font size='7' name='{_BOLD_FONT}' color='#cc5a00'>"
+            f"<b>SIGNAL INDEX</b></font>"
+            f" &nbsp;<font size='6.5' name='{_BOLD_FONT}' color='#a3a8b1'>"
+            f"NUMBERED MARKERS"
             f"</font>",
             styles["body"],
         )
-        all_rows: list[list] = [[header, ""]] + legend_rows
-        cap_table = Table(all_rows, colWidths=[2.25 * inch, 2.35 * inch])
-        cap_table.setStyle(TableStyle([
+        cues = Paragraph(
+            f"<para align='right'>"
+            f"<font size='7' name='{_BOLD_FONT}' color='#1f7a3d'>\u25CF OVER</font>"
+            f" &nbsp;"
+            f"<font size='7' name='{_BOLD_FONT}' color='#b8392b'>\u25CF UNDER</font>"
+            f" &nbsp;"
+            f"<font size='6.5' name='{_BOLD_FONT}' color='#a3a8b1'>"
+            f"y=|edge|  x=books"
+            f"</font></para>",
+            styles["body"],
+        )
+
+        # Column widths: chip + name + edge | gutter | chip + name + edge
+        col_widths = [
+            0.30 * inch, 1.30 * inch, 0.65 * inch,
+            0.06 * inch,
+            0.30 * inch, 1.30 * inch, 0.65 * inch,
+        ]
+        all_rows: list[list] = [
+            [header, "", "", "", cues, "", ""],
+        ] + legend_rows
+        cap_table = Table(all_rows, colWidths=col_widths)
+
+        style_cmds: list = [
             ("BACKGROUND", (0, 0), (-1, -1), V2_BG_CREAM),
             ("LINEABOVE", (0, 0), (-1, 0), 0.5, V2_HAIRLINE),
-            ("SPAN", (0, 0), (1, 0)),
-            ("LEFTPADDING", (0, 0), (-1, -1), 10),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-            ("TOPPADDING", (0, 0), (-1, -1), 4),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-            ("TOPPADDING", (0, 0), (-1, 0), 8),
-            ("BOTTOMPADDING", (0, 0), (-1, 0), 6),
-            ("BOTTOMPADDING", (0, -1), (-1, -1), 8),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ]))
-        left_block: list = [quad, Spacer(1, 4), cap_table]
+            # Header spans
+            ("SPAN", (0, 0), (3, 0)),
+            ("SPAN", (4, 0), (6, 0)),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ("LEFTPADDING", (0, 0), (0, -1), 12),
+            ("RIGHTPADDING", (-1, 0), (-1, -1), 12),
+            ("TOPPADDING", (0, 0), (-1, 0), 9),
+            ("BOTTOMPADDING", (0, 0), (-1, 0), 7),
+            ("LINEBELOW", (0, 0), (-1, 0), 0.4, V2_HAIRLINE),
+            ("BOTTOMPADDING", (0, -1), (-1, -1), 9),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("VALIGN", (0, 0), (-1, 0), "MIDDLE"),
+            # Gutter column gets extra breathing room and a faint vertical rule
+            ("LINEAFTER", (3, 1), (3, -1), 0.4, V2_HAIRLINE),
+        ]
+        # Hairline between body rows (skip the header).
+        for r_idx in range(1, len(all_rows) - 1):
+            style_cmds.append(
+                ("LINEBELOW", (0, r_idx), (2, r_idx), 0.25,
+                 colors.HexColor("#e6e2da"))
+            )
+            style_cmds.append(
+                ("LINEBELOW", (4, r_idx), (6, r_idx), 0.25,
+                 colors.HexColor("#e6e2da"))
+            )
+        cap_table.setStyle(TableStyle(style_cmds))
+        left_block: list = [quad, Spacer(1, 6), cap_table]
     else:
         left_block = [_para("Not enough live edges for the conviction quadrant.",
                             styles["muted"])]
