@@ -104,7 +104,7 @@ New here? This is the smoothest path to **"oh, that's actually useful"** — and
 <td width="50px" align="center" valign="top"><h2>1️⃣</h2></td>
 <td valign="top">
 <strong>Open the live app — no install required</strong><br>
-Go to <a href="https://hooplytics.streamlit.app/"><strong>hooplytics.streamlit.app</strong></a>. The hosted Streamlit app loads instantly with a pre-shipped roster of stars and a high-accuracy <strong>RACE</strong> model bundle already in memory — zero training, zero waiting.
+Go to <a href="https://hooplytics.streamlit.app/"><strong>hooplytics.streamlit.app</strong></a>. The hosted Streamlit app loads instantly with a pre-shipped roster of stars and a high-accuracy <strong>RACE</strong> model bundle already in memory — zero training, zero waiting. Multiple bundles ship in <code>bundles/</code> and you can switch between them in the sidebar (see <a href="#-choosing-a-model-bundle">Choosing a model bundle</a>).
 <br><br>
 <sub>Prefer to run it locally? <code>pip install -e . && hooplytics-web</code> opens the same app at <code>http://localhost:8501</code>.</sub>
 </td>
@@ -305,18 +305,13 @@ Held-out model quality, ranking, residuals, and feature drivers.
 <tr>
 <td colspan="2" valign="top">
 <h4>📑 Roster Report (PDF)</h4>
-<p>One-click, print-ready scouting report built with ReportLab — no headless browser required. Pulls directly from the live model bundle, edge board, and (optional) AI scout context.</p>
-<p>🎨 <strong>Cover:</strong> Branded cover with slate date, player count, live signal count, and median R².</p>
-<p>📊 <strong>KPI strip:</strong> 6 tiles — Players, Model rows, Live signals, Strong signals, Avg |edge|, Median R².</p>
-<p>📌 <strong>Legend strip:</strong> ABOVE / BELOW signal key, confidence tier guide, and volatility chip reference.</p>
-<p>🥇 <strong>Bottom line up front:</strong> Top-ranked signal with player name, stat, projection vs line, confidence chip, and signal direction — the single most actionable read on the slate.</p>
-<p>📋 <strong>Slate brief:</strong> Deterministic slate summary callout + optional AI slate outlook paragraph.</p>
-<p>🔭 <strong>Signal Spotlight:</strong> Top 3 ranked signals with A/B/C tier badges, ABOVE/BELOW coloring, Hit%, and Confidence score.</p>
-<p>📈 <strong>Analytics visuals:</strong> R² lollipop · diverging signal bar · signal distribution histogram · slate summary panel.</p>
-<p>🧪 <strong>Model quality:</strong> Per-stat R², RMSE, MAE, and color-coded Tier column (Strong / Solid / Light / Noisy).</p>
-<p>📐 <strong>Model vs line gaps (Section 06):</strong> Full signal board — projection gaps, signed edges, Hit%, Confidence, ABOVE/BELOW side, and book counts across the roster.</p>
-<p>🧩 <strong>Signal stack (Section 07):</strong> Best Anchor + Differentiator + Secondary Add cards ranked by confidence and edge magnitude, with a correlation cluster warning table to highlight players whose stats move together.</p>
-<p>👤 <strong>Per-player blocks (Section 08):</strong> Recent-form pills · volatility and role stability chips · ABOVE/BELOW bias · projection-vs-line table with Hit% · outcome band (P25 / median / P75) · minutes projection outlook · historical lines table · data rationale · optional AI context.</p>
+<p>One-click, print-ready editorial scouting report built with ReportLab — no headless browser required. Pulls directly from the live model bundle, edge board, and (optional) AI scout context. Designed to read like a magazine: serif display type, cream paper, hairline rules, and color-coded OVER / UNDER signals throughout.</p>
+<p>📰 <strong>Tonight's Slate (cover):</strong> Headline call-out for the loudest mispricing, divergent edge skyline of every live signal, and KPI rail (players, live signals, median R²).</p>
+<p>🎯 <strong>Tonight's Setup:</strong> Anchor / Differentiator / Secondary cards with confidence chips, recent-form sparkline, and the ranked Top-4 signal cards.</p>
+<p>📊 <strong>Signal Board:</strong> Full ranked board of every live edge with side, projection vs. line, hit %, confidence, and book counts.</p>
+<p>🧭 <strong>Conviction Map:</strong> Numbered scatter (|edge| vs. book depth) with quadrant labels (SLEEPER / HEADLINE / SKIP / CROWD PLAY), a polished Signal Index legend mapping each marker to player · market · edge, and two AI Scout Picks with full untruncated rationale.</p>
+<p>🔬 <strong>Model Quality:</strong> Composite trust meter on the left and per-target reliability lollipops on the right.</p>
+<p>👤 <strong>Per-player profiles:</strong> Hero block with tonight's call · recent-form pills · last-4 resolved lines · sparklines · model projection vs. line table · full latest context and analyst notes from the AI scout.</p>
 <p>Open the <strong>Roster Report</strong> page, click <em>Generate PDF</em>, and download.</p>
 </td>
 </tr>
@@ -405,13 +400,13 @@ A player intelligence workbench is built to make data easier to *explore, explai
 | Area | Highlights |
 | :--- | :--- |
 | 🎛️ **Streamlit dashboard** | Eight purpose-built pages: Home, Player Projection, Analytics Dashboard, Compare Players, Player Line Lab, Model Diagnostics, Hooplytics Scout, Roster Report |
-| 📑 **PDF Roster Report** | One-click ReportLab PDF — 8 sections: branded cover, KPI strip, legend, Bottom Line Up Front, slate brief, Signal Spotlight, analytics visuals, model quality table, Model vs Line Gaps board (Hit% + Confidence), Signal Stack with correlation cluster warnings, and per-player blocks with outcome bands, minutes projection, volatility chips, and historical lines |
+| 📑 **PDF Roster Report** | Editorial, magazine-style ReportLab PDF — Tonight's Slate cover, Tonight's Setup card stack, ranked Signal Board, Conviction Map with Signal Index legend and AI Scout Picks, Model Quality trust meter, and per-player profiles with latest context, sparklines, and last-4 resolved lines |
 | 🤖 **Hooplytics Scout (AI)** | BYO-key OpenAI chatbot grounded in your local roster, projections, edge board, and model metrics — Hybrid or Strict grounded modes, structured Confidence + Risk factors |
 | 📡 **Live line context** | Auto-fetched lines from The Odds API across CLI and dashboard, with session-only BYO-key support in the web app |
 | 🎯 **Edge board** | Slate-wide projection-vs-line gap analysis, signed edges, MORE/LESS calls, and book counts — feeds the dashboard, the AI scout, and the PDF report |
 | 👤 **Player analysis** | Recent form, rolling trends, distributions, player profiles, season averages, and recent-window comparisons |
 | 🧠 **Modeling stack** | RACE blend (Ridge + kNN + Random Forest pipelines) across eight target stats, role and context features |
-| 📦 **Prebuilt RACE bundle** | High-accuracy `bundles/race_fast.joblib` (163K+ training rows) auto-loaded by the Streamlit app — zero cold-start training required |
+| 📦 **Prebuilt RACE bundles** | Multiple ready-to-use bundles ship in `bundles/` (e.g. `race_fast.joblib`, `race_playoffs.joblib`). The Streamlit app auto-loads one on launch and lets you switch between them from the sidebar — zero cold-start training required |
 | 🔬 **Diagnostics** | RMSE / MAE / R², predicted-vs-actual panels, residual views, feature importance, and per-stat health summaries |
 | ⚡ **CLI workflows** | Single-player projection, prop comparison, scenario inputs, live line board, roster persistence, and prebuilt-bundle training |
 | 📓 **Notebook workflow** | Rich exploratory narrative with tables, charts, code, and reproducible analysis in one place |
@@ -592,6 +587,23 @@ hooplytics project "Jalen Brunson" --last-n 10
 hooplytics lines --refresh               # fresh live line board
 ```
 
+### 🎚️ Choosing a model bundle
+
+Hooplytics ships multiple pretrained bundles in [`bundles/`](bundles/) so you can switch model behavior without retraining. The default app launch uses `race_fast.joblib`.
+
+**In the Streamlit sidebar:**
+
+1. Make sure **Use prebuilt model bundle** is checked (it is by default).
+2. A **Bundle** dropdown appears right below it listing every `.joblib` file found in `bundles/`.
+3. Pick a bundle — the app reloads automatically. All projections, the edge board, the AI scout, and the PDF report immediately reflect the new bundle.
+
+| Bundle | Best for |
+| :--- | :--- |
+| 🏃 **`race_fast.joblib`** | Default. Broad regular-season coverage trained on a large rolling window. Fast to load, balanced across all 8 stat targets. |
+| 🏆 **`race_playoffs.joblib`** | Playoff-tuned variant. Weighted toward higher-stakes, lower-pace games — useful for postseason slates. |
+
+> 💡 **Power users:** drop any additional `*.joblib` you trained with `hooplytics-train-bundle` into `bundles/` and it appears in the dropdown on next reload. To pin a non-default bundle headlessly, set `HOOPLYTICS_PRETRAINED_BUNDLE=/abs/path/to/your.joblib` in `.env` or your Streamlit secrets.
+
 ### 📓 Jupyter workflow
 
 ```bash
@@ -658,7 +670,8 @@ hooplytics/
 │   ├── assets/                   # Notebook-era visualizations
 │   └── screenshots/              # Streamlit dashboard captures
 ├── bundles/
-│   └── race_fast.joblib          # Prebuilt RACE bundle auto-loaded by the app
+│   ├── race_fast.joblib          # Default RACE bundle auto-loaded by the app
+│   └── race_playoffs.joblib      # Playoff-tuned RACE bundle (selectable in sidebar)
 ├── hooplytics/
 │   ├── cli.py                    # Typer CLI entry point
 │   ├── constants.py
