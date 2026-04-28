@@ -20,14 +20,15 @@ from .models import ModelBundle, load_models
 
 
 # ── Lazy default-artifact loaders ────────────────────────────────────────────
-_DEFAULT_CALIB: Calibration | None | object = object()  # sentinel: not yet loaded
-_DEFAULT_PLAYOFF_BUNDLE: ModelBundle | None | object = object()
+_UNSET = object()  # singleton sentinel: a fresh object() per call would never compare equal
+_DEFAULT_CALIB: Calibration | None | object = _UNSET
+_DEFAULT_PLAYOFF_BUNDLE: ModelBundle | None | object = _UNSET
 
 
 def _resolve_default_calibration() -> Calibration | None:
     """Return the repo-shipped calibration once and memoize the result."""
     global _DEFAULT_CALIB
-    if _DEFAULT_CALIB is not object():
+    if _DEFAULT_CALIB is not _UNSET:
         return _DEFAULT_CALIB  # type: ignore[return-value]
     env_path = os.getenv("HOOPLYTICS_CALIBRATION", "").strip()
     candidate = Path(env_path) if env_path else DEFAULT_CALIBRATION_PATH
@@ -38,7 +39,7 @@ def _resolve_default_calibration() -> Calibration | None:
 def _resolve_default_playoff_bundle() -> ModelBundle | None:
     """Return the repo-shipped playoff bundle once and memoize the result."""
     global _DEFAULT_PLAYOFF_BUNDLE
-    if _DEFAULT_PLAYOFF_BUNDLE is not object():
+    if _DEFAULT_PLAYOFF_BUNDLE is not _UNSET:
         return _DEFAULT_PLAYOFF_BUNDLE  # type: ignore[return-value]
     env_path = os.getenv("HOOPLYTICS_PLAYOFFS_BUNDLE", "").strip()
     if env_path and Path(env_path).exists():

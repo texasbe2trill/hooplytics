@@ -952,18 +952,10 @@ def _render_sidebar() -> tuple[str, str, str]:
         # API key
         st.markdown('<p class="hl-section">Live odds</p>', unsafe_allow_html=True)
         deployment_key = _deployment_odds_api_key()
-        if deployment_key:
-            st.caption(
-                "A deployment-configured Odds API key is active. Paste your own "
-                "key below to override it for this session \u2014 the deployment "
-                "key is never displayed."
-            )
-        else:
-            st.caption(
-                "Bring your own key from The Odds API for this session. The Streamlit app does "
-                "not load a deployment key into the UI, and your pasted key is not "
-                "written to the repository."
-            )
+        st.caption(
+            "Bring your own key from The Odds API for this session. "
+            "Your pasted key is not written to disk or the repository."
+        )
         if (
             st.session_state.session_odds_api_key_input
             != st.session_state.session_odds_api_key
