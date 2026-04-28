@@ -61,23 +61,60 @@ def _default_training_seasons() -> list[str]:
     return nba_seasons(start, end)
 
 
-def _discover_postseason_players(season: str) -> list[str]:
+def _discover_postseason_players(
+    season: str,
+    *,
+    timeout: float = 45.0,
+    attempts: int = 4,
+) -> tuple[list[str], str | None]:
+    """Return (players, error_message). error_message is None on success.
+
+    An empty player list with no error means the endpoint returned zero rows
+    (e.g. playoffs haven't started yet for that season).
+
+    stats.nba.com is rate-limited and frequently times out, so we retry with
+    exponential backoff before giving up.
+    """
+    import time
+
     try:
         from nba_api.stats.endpoints import leaguegamefinder
         from nba_api.stats.static import players as nba_players
+    except Exception as exc:
+        return [], f"{type(exc).__name__}: {exc}"
 
-        logs = leaguegamefinder.LeagueGameFinder(
-            player_or_team_abbreviation="P",
-            season_nullable=season,
-            season_type_nullable="Playoffs",
-            timeout=15,
-        ).get_data_frames()[0]
+    last_err: Exception | None = None
+    logs = None
+    for attempt in range(1, attempts + 1):
+        try:
+            logs = leaguegamefinder.LeagueGameFinder(
+                player_or_team_abbreviation="P",
+                season_nullable=season,
+                season_type_nullable="Playoffs",
+                timeout=timeout,
+            ).get_data_frames()[0]
+            break
+        except Exception as exc:
+            last_err = exc
+            if attempt >= attempts:
+                break
+            backoff = 2.0 * attempt
+            console.print(
+                f"[yellow]Postseason discovery for {season} attempt {attempt}/{attempts} "
+                f"failed ({type(exc).__name__}); retrying in {backoff:.0f}s...[/yellow]"
+            )
+            time.sleep(backoff)
+
+    if logs is None:
+        return [], f"{type(last_err).__name__}: {last_err}"
+
+    try:
         if logs.empty:
-            return []
+            return [], None
 
         name_col = "PLAYER_NAME" if "PLAYER_NAME" in logs.columns else "PLAYER"
         if name_col not in logs.columns:
-            return []
+            return [], f"unexpected columns from LeagueGameFinder: {list(logs.columns)}"
 
         postseason_names = sorted({str(n).strip() for n in logs[name_col].dropna().tolist() if str(n).strip()})
         active_names = {
@@ -86,28 +123,41 @@ def _discover_postseason_players(season: str) -> list[str]:
             if bool(p.get("is_active"))
         }
         filtered = [n for n in postseason_names if n in active_names]
-        return filtered if filtered else postseason_names
-    except Exception:
-        return []
+        return (filtered if filtered else postseason_names), None
+    except Exception as exc:
+        return [], f"{type(exc).__name__}: {exc}"
 
 
-def _resolve_players(source: PlayerSource, season: str) -> list[str]:
+def _resolve_players(source: PlayerSource, seasons: list[str]) -> list[str]:
     if source == PlayerSource.roster:
         from .cli import _load_roster
 
         return sorted(_load_roster().keys())
 
-    postseason = _discover_postseason_players(season)
-    if not postseason:
+    pool: set[str] = set()
+    errors: list[str] = []
+    for s in seasons:
+        names, err = _discover_postseason_players(s)
+        if names:
+            console.print(f"[dim]Postseason pool {s}: {len(names)} players.[/dim]")
+            pool.update(names)
+        elif err:
+            errors.append(f"{s}: {err}")
+            console.print(f"[yellow]Postseason discovery failed for {s} ({err}).[/yellow]")
+        else:
+            console.print(f"[yellow]Postseason discovery returned 0 players for {s}.[/yellow]")
+
+    if not pool:
+        detail = ("; ".join(errors)) if errors else "all seasons returned 0 rows"
         raise RuntimeError(
-            "Could not discover postseason-active players from nba_api. "
-            "Try --players-source roster or provide --player values manually."
+            "Could not discover postseason-active players from nba_api "
+            f"({detail}). Try --players-source roster or provide --player values manually."
         )
 
     if source == PlayerSource.postseason_plus_anchors:
-        return sorted(set(postseason) | set(TRAINING_ANCHOR_PLAYERS))
+        return sorted(pool | set(TRAINING_ANCHOR_PLAYERS))
 
-    return postseason
+    return sorted(pool)
 
 
 def _load_and_engineer_player_data(
@@ -273,10 +323,14 @@ def train_bundle(
         "--players-source",
         help="Player pool strategy.",
     ),
-    postseason_season: str = typer.Option(
-        _current_season(),
+    postseason_season: list[str] = typer.Option(
+        None,
         "--postseason-season",
-        help="Season used for postseason player discovery (e.g. 2025-26).",
+        help=(
+            "Season(s) used for postseason player discovery (repeatable, e.g. "
+            "--postseason-season 2024-25 --postseason-season 2025-26). "
+            "Defaults to the current season."
+        ),
     ),
     season: list[str] = typer.Option(
         None,
@@ -303,12 +357,27 @@ def train_bundle(
         "--allow-failed-gate",
         help="Save bundle even if R2 gate fails.",
     ),
+    playoffs_only: bool = typer.Option(
+        False,
+        "--playoffs-only",
+        help=(
+            "Train on Playoffs rows only. Sets the default output to "
+            "bundles/race_playoffs.joblib unless --output is specified."
+        ),
+    ),
 ) -> None:
     """Train and export a prebuilt model bundle with interactive progress."""
     seasons = season if season else _default_training_seasons()
 
+    # Switch the default output to the playoffs slot when the flag is set
+    # and the user didn't override --output explicitly.
+    if playoffs_only and output == Path("bundles/race_fast.joblib"):
+        output = Path("bundles/race_playoffs.joblib")
+
+    discovery_seasons = postseason_season if postseason_season else [_current_season()]
+
     try:
-        base_players = _resolve_players(players_source, postseason_season)
+        base_players = _resolve_players(players_source, discovery_seasons)
     except RuntimeError as exc:
         err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
@@ -336,6 +405,28 @@ def train_bundle(
 
     store = PlayerStore()
     data = _load_and_engineer_player_data(store, all_players, seasons)
+
+    if playoffs_only:
+        if "season_type" not in data.columns:
+            err_console.print(
+                "[red]Loaded game logs do not include a 'season_type' column — "
+                "cannot train a playoffs-only bundle. Update PlayerStore to attach "
+                "season_type before re-running.[/red]"
+            )
+            raise typer.Exit(1)
+        before = len(data)
+        data = data[
+            data["season_type"].astype(str).str.contains("Playoff", case=False, na=False)
+        ].reset_index(drop=True)
+        console.print(
+            f"[dim]Filtered to Playoffs rows: {len(data):,} of {before:,} ({len(data) / max(before, 1):.1%}).[/dim]"
+        )
+        if len(data) < 500:
+            err_console.print(
+                f"[red]Only {len(data)} playoff rows after filtering — not enough to "
+                "train a meaningful bundle. Add more seasons or player pool.[/red]"
+            )
+            raise typer.Exit(1)
 
     configs = _candidate_configs(mode)
     candidates: list[tuple[str, ModelBundle]] = []

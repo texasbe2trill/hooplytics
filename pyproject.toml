@@ -58,6 +58,7 @@ all = [
 hooplytics = "hooplytics.cli:main"
 hooplytics-web = "hooplytics.web.launcher:main"
 hooplytics-train-bundle = "hooplytics.train_bundle:main"
+hooplytics-build-calibration = "hooplytics.calibration_cli:main"
 
 [project.urls]
 Homepage = "https://github.com/texasbe2trill/hooplytics"
