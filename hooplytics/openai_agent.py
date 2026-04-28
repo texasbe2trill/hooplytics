@@ -640,13 +640,22 @@ Rules:
 edges_by_player or edges_top, you MUST give them a real more/less pick on \
 their loudest edge — never 'No play'. 'No play' is only for players with \
 zero edges and zero projections.
-- OPPONENT GROUNDING: extras.today_matchups is the ONLY trusted source for \
-who plays whom tonight. For each player, look up extras.today_matchups[player] \
-and cite that opponent (home_team / away_team / matchup) verbatim. If a \
-player has NO entry in extras.today_matchups, you MUST write 'Matchup \
-unconfirmed' in the matchup field and AVOID naming any opponent in news / \
-rationale. NEVER invent, guess, or recall an opponent from training data — \
-schedules from your training cutoff are stale.
+- OPPONENT GROUNDING (HARD RULE): extras.today_matchups and extras.todays_slate \
+are the ONLY trusted sources for tonight's NBA schedule. Your training data \
+is stale and almost certainly wrong about who plays whom and what team a \
+player is on. Before naming ANY team, opponent, or matchup — for slate-level \
+prose OR per-player prose — you MUST verify it against extras. \
+  • For per-player matchup/news/rationale: use extras.today_matchups[player] \
+    verbatim. The 'team' field is that player's CURRENT team; 'opponent' is \
+    tonight's actual opponent; 'side' tells you home/away. If the player has \
+    no entry, write 'Matchup unconfirmed' and DO NOT name any opponent. \
+  • For executive_summary and slate_outlook: only reference teams that appear \
+    in extras.todays_slate. Never assert a player plays for a team unless \
+    extras.today_matchups[player].team confirms it. \
+  • If extras.today_matchups[player].side == 'unknown', do not state home/away \
+    and do not name an opponent for that player. \
+  • NEVER recall a player's old team from memory (e.g. don't put Dillon \
+    Brooks on Houston if extras.today_matchups says Phoenix Suns).
 - Do NOT speculate about injury status, return dates, or availability. If \
 real news isn't given to you in the structured context, omit the topic \
 entirely — never write 'questionable', 'probable', 'doubtful', 'out', \

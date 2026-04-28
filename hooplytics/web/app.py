@@ -2942,7 +2942,10 @@ def _chatbot_grounding(roster: dict, api_key: str) -> dict[str, Any]:
         edge_df=edge_df if not edge_df.empty else None,
         projections=projections or None,
         extras={
-            "today_matchups": _today_matchup_map(_roster_key()),
+            "today_matchups": _enrich_matchups_with_team(
+                _today_matchup_map(_roster_key()), modeling_df,
+            ),
+            "todays_slate": _todays_slate(),
         },
     )
 
@@ -3283,6 +3286,105 @@ def _today_matchup_map(roster_key: str) -> dict[str, dict[str, str]]:
     return out
 
 
+# Map nba.com 3-letter team abbreviations to the full names used by The Odds
+# API so we can join player team affiliations to tonight's slate.
+_NBA_ABBR_TO_FULL: dict[str, str] = {
+    "ATL": "Atlanta Hawks", "BOS": "Boston Celtics", "BKN": "Brooklyn Nets",
+    "CHA": "Charlotte Hornets", "CHI": "Chicago Bulls", "CLE": "Cleveland Cavaliers",
+    "DAL": "Dallas Mavericks", "DEN": "Denver Nuggets", "DET": "Detroit Pistons",
+    "GSW": "Golden State Warriors", "HOU": "Houston Rockets", "IND": "Indiana Pacers",
+    "LAC": "Los Angeles Clippers", "LAL": "Los Angeles Lakers", "MEM": "Memphis Grizzlies",
+    "MIA": "Miami Heat", "MIL": "Milwaukee Bucks", "MIN": "Minnesota Timberwolves",
+    "NOP": "New Orleans Pelicans", "NYK": "New York Knicks", "OKC": "Oklahoma City Thunder",
+    "ORL": "Orlando Magic", "PHI": "Philadelphia 76ers", "PHX": "Phoenix Suns",
+    "POR": "Portland Trail Blazers", "SAC": "Sacramento Kings", "SAS": "San Antonio Spurs",
+    "TOR": "Toronto Raptors", "UTA": "Utah Jazz", "WAS": "Washington Wizards",
+}
+
+
+def _todays_slate() -> list[dict[str, str]]:
+    """Return tonight's full NBA slate from the latest cached props payload as
+    ``[{matchup, home_team, away_team, tipoff_iso}, ...]``. Used to ground the
+    slate-level AI prose so it can never invent a game.
+    """
+    if not _ODDS_CACHE_DIR.exists():
+        return []
+    files = sorted(_ODDS_CACHE_DIR.glob("nba_player_props_*.json"))
+    if not files:
+        return []
+    try:
+        payload = json.loads(files[-1].read_text())
+    except Exception:
+        return []
+    if not isinstance(payload, list):
+        return []
+
+    out: list[dict[str, str]] = []
+    for ev in payload:
+        if not isinstance(ev, dict):
+            continue
+        home = str(ev.get("home_team") or "").strip()
+        away = str(ev.get("away_team") or "").strip()
+        if not (home or away):
+            continue
+        matchup = str(ev.get("matchup") or f"{away} @ {home}").strip()
+        tipoff = ""
+        props = ev.get("props") or {}
+        if isinstance(props, dict):
+            tipoff = str(props.get("commence_time") or "").strip()
+        out.append({
+            "matchup": matchup,
+            "home_team": home,
+            "away_team": away,
+            "tipoff_iso": tipoff,
+        })
+    return out
+
+
+def _enrich_matchups_with_team(
+    matchup_map: dict[str, dict[str, str]],
+    modeling_df: pd.DataFrame,
+) -> dict[str, dict[str, str]]:
+    """Add ``team`` / ``opponent`` / ``side`` to each player's matchup entry by
+    cross-referencing their most recent ``team_abbr`` from the modeling frame.
+    Players whose most-recent team doesn't match either side of tonight's
+    matchup get ``team='unknown'`` so the AI knows not to assert a side.
+    """
+    if not matchup_map or modeling_df is None or modeling_df.empty:
+        return matchup_map
+    if "team_abbr" not in modeling_df.columns or "player" not in modeling_df.columns:
+        return matchup_map
+
+    # Most recent team per player.
+    df = modeling_df[["player", "team_abbr", "game_date"]].copy()
+    df["game_date"] = pd.to_datetime(df["game_date"], errors="coerce")
+    df = df.dropna(subset=["team_abbr"]).sort_values("game_date")
+    latest_abbr: dict[str, str] = (
+        df.groupby("player")["team_abbr"].last().to_dict()
+    )
+
+    enriched: dict[str, dict[str, str]] = {}
+    for player, info in matchup_map.items():
+        abbr = str(latest_abbr.get(player) or "").strip().upper()
+        team_full = _NBA_ABBR_TO_FULL.get(abbr, "")
+        home = info.get("home_team", "")
+        away = info.get("away_team", "")
+        side = "unknown"
+        opponent = ""
+        if team_full and team_full == home:
+            side, opponent = "home", away
+        elif team_full and team_full == away:
+            side, opponent = "away", home
+        enriched[player] = {
+            **info,
+            "team": team_full or "unknown",
+            "team_abbr": abbr or "",
+            "opponent": opponent,
+            "side": side,
+        }
+    return enriched
+
+
 def page_report(roster: dict, api_key: str) -> None:
     page_hero(
         "Roster Report",
@@ -3428,6 +3530,10 @@ def page_report(roster: dict, api_key: str) -> None:
     if include_ai and conn is not None and selected_model:
         with st.spinner("Generating AI rationale…"):
             try:
+                today_matchups = _enrich_matchups_with_team(
+                    _today_matchup_map(_roster_key()),
+                    modeling_df,
+                )
                 grounding = build_grounding_payload(
                     roster=roster,
                     bundle=bundle,
@@ -3435,7 +3541,8 @@ def page_report(roster: dict, api_key: str) -> None:
                     projections=projections or None,
                     recent_form=recent_form or None,
                     extras={
-                        "today_matchups": _today_matchup_map(_roster_key()),
+                        "today_matchups": today_matchups,
+                        "todays_slate": _todays_slate(),
                     },
                 )
                 ai_sections = generate_report_sections(
