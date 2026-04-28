@@ -2416,8 +2416,25 @@ def _player_history_table(
     most recent ``max_rows`` games (across markets) are shown to keep the
     PDF dense without overflowing.
     """
+    header_block = [
+        Spacer(1, 6),
+        Paragraph(
+            f"<font size='7.5' color='#cc5a00'><b>"
+            f"{player.upper()} &nbsp;|&nbsp; HISTORICAL LINES vs OUTCOMES"
+            f"</b></font>",
+            styles["body"],
+        ),
+    ]
+
     if history_df is None or not isinstance(history_df, pd.DataFrame) or history_df.empty:
-        return []
+        return header_block + [
+            Paragraph(
+                "<font size='8' color='#6b7280'><i>No resolved historical "
+                "lines for this player in the cached window. Backfill more "
+                "dates in the Odds tab to populate.</i></font>",
+                styles["body"],
+            ),
+        ]
 
     df = history_df.copy()
     if "game_date" in df.columns:
@@ -2425,7 +2442,13 @@ def _player_history_table(
         df = df.sort_values("game_date", ascending=False)
     df = df.head(max_rows)
     if df.empty:
-        return []
+        return header_block + [
+            Paragraph(
+                "<font size='8' color='#6b7280'><i>No resolved historical "
+                "lines for this player in the cached window.</i></font>",
+                styles["body"],
+            ),
+        ]
 
     rows: list[list[Any]] = [
         ["Date", "Market", "Line", "Actual", "Margin", "Result"]
@@ -2482,14 +2505,7 @@ def _player_history_table(
         "Resolved outcomes unavailable for this window."
     )
 
-    return [
-        Spacer(1, 6),
-        Paragraph(
-            f"<font size='7.5' color='#cc5a00'><b>"
-            f"{player.upper()} &nbsp;|&nbsp; HISTORICAL LINES vs OUTCOMES"
-            f"</b></font>",
-            styles["body"],
-        ),
+    return header_block + [
         Paragraph(summary, styles["body"]),
         Spacer(1, 3),
         table,

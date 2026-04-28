@@ -599,11 +599,11 @@ list five stats in a row — that duplicates the tables. Round naturally.
 Return ONLY a single JSON object — no prose outside the JSON, no markdown \
 fences. Schema:
 {
-  "executive_summary": "2-4 sentences setting tonight's slate posture: who's \
-the loudest signal, how confident the models are overall, what to watch.",
-  "slate_outlook": "1 paragraph (3-5 sentences) on the bigger picture: form \
-trends, model reliability, the matchups that swing the night, key risks \
-(rest, injury, blowout potential).",
+  "executive_summary": "2-3 tight sentences. The loudest signal, the slate \
+posture, the one thing to watch. No filler.",
+  "slate_outlook": "ONE short paragraph, 3 sentences MAX, ~60 words. Lead \
+with the directional tilt and why. One sentence on what would break the \
+thesis. No second paragraph. No restating the executive summary.",
   "players": {
     "<Player Name>": {
       "matchup": "≤9 words. Opponent + the single defining defensive trait \
