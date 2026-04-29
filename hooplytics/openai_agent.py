@@ -875,6 +875,226 @@ def generate_report_sections(
     }
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# Player Performance Analytics report — coaching-staff narrative
+# ════════════════════════════════════════════════════════════════════════════
+
+_PERFORMANCE_REPORT_SYSTEM_PROMPT = """\
+You are Hooplytics Performance Lab, writing the prose for a printable PDF \
+analytics report aimed at NBA coaching staffs and player-development \
+analysts. The report is strictly performance-focused — analyzing where \
+each player is creating value, where they are leaking value, and what \
+coaches should focus on to improve them.
+
+HARD GUARDRAILS:
+- This report is NOT about betting. NEVER write more/less, over/under, \
+  edge, line, projection, pick, lean, confidence (in the betting sense), \
+  parlay, slip, or anything that implies a wager. Speak as a player \
+  development coach or front-office analyst would.
+- Do NOT speculate about injury status, return dates, suspensions, \
+  contract situations, or trades. If real news isn't given to you in the \
+  structured context, omit the topic entirely.
+- Use roster, model metrics, recent form, and the per-player performance \
+  summary in the structured context as your authoritative source. Layer \
+  in real, current NBA reasoning — recent form arc, role/usage shifts, \
+  rotation fit, defensive matchups, team trends — naturally.
+- Do NOT label or annotate anything as "(local context)", "(general NBA \
+  context)", "LOCAL CONTEXT", or similar. Just write naturally. Never \
+  reveal that you were given structured data.
+
+Voice: confident, specific, opinionated. Sound like an NBA player \
+development coach reviewing tape and box-score trends with the head \
+coach. Active verbs. Concrete coaching levers (shot diet, rim pressure, \
+spacing, pick-and-roll reads, screen navigation, transition defense, \
+defensive rebounding, finishing through contact, etc.). Cite specific \
+numbers from the performance summary or recent form when they sharpen a \
+point — but don't list five stats in a row.
+
+Return ONLY a single JSON object — no prose outside the JSON, no \
+markdown fences. Schema:
+{
+  "roster_overview": "ONE short paragraph (3-4 sentences, ~70 words). \
+The biggest cross-roster takeaway: who is trending up, who is cooling, \
+and what the staff should prioritize this week. No filler.",
+  "players": {
+    "<Player Name>": {
+      "strengths": "1-2 sentences naming this player's clearest strengths \
+based on recent form and the performance summary. Cite a specific number \
+when relevant (e.g. 'TS% at 60.1', 'AST/TOV at 2.6', 'rebounding +1.4 \
+over season baseline').",
+      "growth_areas": "1-2 sentences naming the clearest growth areas. \
+Be specific (e.g. 'shot selection has drifted toward long twos', \
+'defensive closeouts have been late', 'turnover rate spikes when usage \
+climbs above 28%').",
+      "coaching_focus": "1 paragraph (3-4 sentences). What the coaching \
+staff should drill or scheme around in the next 5-10 games. Concrete and \
+actionable — film sessions, practice reps, lineup tweaks, role \
+adjustments. Close with the one thing to monitor.",
+      "matchup_context": "1-2 sentences of TODAY-relevant context if \
+extras.today_matchups[player] is present (current team + opponent + \
+home/away verbatim). If no entry exists in extras, write 'Matchup \
+unconfirmed' and stop — never invent an opponent. NEVER recall a \
+player's old team from memory."
+    }
+  }
+}
+
+Rules:
+- Include EVERY player from the roster.
+- Keep each player's strengths + growth_areas + coaching_focus combined \
+  under ~140 words.
+- Do not include any keys other than the schema above.
+- No betting/edge/line/over/under/pick language anywhere.
+- Never write the strings "(local context)", "(general NBA context)", \
+  "LOCAL CONTEXT", or "(external)".
+"""
+
+
+def generate_performance_sections(
+    *,
+    connection: OpenAIConnection,
+    model: str,
+    grounding_payload: dict[str, Any],
+    max_output_tokens: int = 4000,
+) -> dict[str, Any]:
+    """Generate structured coaching prose for the performance PDF builder.
+
+    Returns a dict with keys ``roster_overview`` (str) and ``players``
+    (``{name: {strengths, growth_areas, coaching_focus, matchup_context}}``).
+    Falls back to empty strings on parse failure so the PDF still renders.
+    """
+    if connection is None or connection.client is None:
+        raise RuntimeError("No active OpenAI connection.")
+    if not model:
+        raise ValueError("No OpenAI model selected.")
+
+    available_chat_models = filter_chat_models(connection.models or [])
+    if available_chat_models and model not in available_chat_models:
+        model = auto_select_model(available_chat_models) or available_chat_models[0]
+
+    messages = [
+        {"role": "system", "content": _PERFORMANCE_REPORT_SYSTEM_PROMPT},
+        {"role": "system", "content": format_grounding_block(grounding_payload)},
+        {
+            "role": "user",
+            "content": (
+                "Produce the JSON coaching report sections for the roster "
+                "in LOCAL CONTEXT. Return ONLY the JSON object."
+            ),
+        },
+    ]
+
+    client = connection.client
+
+    def _create(req_model: str):
+        kwargs: dict[str, Any] = {
+            "model": req_model,
+            "messages": messages,
+            "response_format": {"type": "json_object"},
+        }
+        try:
+            return client.chat.completions.create(
+                **kwargs, max_completion_tokens=max_output_tokens
+            )
+        except TypeError:
+            return client.chat.completions.create(
+                **kwargs, max_tokens=max_output_tokens
+            )
+
+    try:
+        resp = _create(model)
+    except Exception as exc:
+        msg = _redact(str(exc))
+        if "response_format" in msg.lower():
+            messages_no_fmt = list(messages)
+            messages_no_fmt[0] = {
+                "role": "system",
+                "content": _PERFORMANCE_REPORT_SYSTEM_PROMPT
+                + "\n\nReturn the JSON object as plain text — no code fences.",
+            }
+            try:
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=messages_no_fmt,
+                    max_completion_tokens=max_output_tokens,
+                )
+            except TypeError:
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=messages_no_fmt,
+                    max_tokens=max_output_tokens,
+                )
+        else:
+            raise RuntimeError(msg) from None
+
+    raw_text = ""
+    try:
+        choice = resp.choices[0]
+        message = getattr(choice, "message", None)
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            raw_text = content.strip()
+        elif isinstance(content, list):
+            chunks: list[str] = []
+            for part in content:
+                if isinstance(part, dict) and str(part.get("type", "")).lower() in {"text", "output_text"}:
+                    val = part.get("text")
+                    if isinstance(val, str):
+                        chunks.append(val)
+            raw_text = "\n".join(chunks).strip()
+    except Exception:
+        raw_text = ""
+
+    if not raw_text:
+        return {"roster_overview": "", "players": {}}
+
+    fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw_text, re.DOTALL)
+    if fenced:
+        raw_text = fenced.group(1)
+
+    try:
+        parsed = json.loads(raw_text)
+    except json.JSONDecodeError:
+        start = raw_text.find("{")
+        end = raw_text.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                parsed = json.loads(raw_text[start : end + 1])
+            except Exception:
+                parsed = {}
+        else:
+            parsed = {}
+
+    if not isinstance(parsed, dict):
+        return {"roster_overview": "", "players": {}}
+
+    players_raw = parsed.get("players")
+    players: dict[str, Any] = {}
+    if isinstance(players_raw, dict):
+        for k, v in players_raw.items():
+            if not isinstance(k, str):
+                continue
+            if isinstance(v, dict):
+                players[k] = {
+                    "strengths": _scrub_prose_leaks(str(v.get("strengths", "")).strip()),
+                    "growth_areas": _scrub_prose_leaks(str(v.get("growth_areas", "")).strip()),
+                    "coaching_focus": _scrub_prose_leaks(str(v.get("coaching_focus", "")).strip()),
+                    "matchup_context": _scrub_prose_leaks(str(v.get("matchup_context", "")).strip()),
+                }
+            elif isinstance(v, str) and v.strip():
+                players[k] = {
+                    "strengths": "",
+                    "growth_areas": "",
+                    "coaching_focus": _scrub_prose_leaks(v.strip()),
+                    "matchup_context": "",
+                }
+
+    return {
+        "roster_overview": _scrub_prose_leaks(str(parsed.get("roster_overview", "")).strip()),
+        "players": players,
+    }
+
+
 __all__ = [
     "OpenAIConnection",
     "SYSTEM_PROMPT",
@@ -886,6 +1106,7 @@ __all__ = [
     "evidence_chips",
     "filter_chat_models",
     "format_grounding_block",
+    "generate_performance_sections",
     "generate_report_sections",
     "list_available_models",
     "parse_chart_blocks",

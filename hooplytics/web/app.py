@@ -65,6 +65,7 @@ from hooplytics.openai_agent import (
     connect as openai_connect,
     evidence_chips,
     filter_chat_models,
+    generate_performance_sections,
     generate_report_sections,
     parse_chart_blocks,
 )
@@ -74,6 +75,10 @@ from hooplytics.predict import (
     project_next_game,
 )
 from hooplytics.report import build_pdf_report
+from hooplytics.report_performance import (
+    build_player_performance_report,
+    player_performance_summary,
+)
 from hooplytics.web import charts
 from hooplytics.web.styles import (
     chip,
@@ -289,6 +294,16 @@ def _live_lines(api_key: str, players_key: str, _bust: int = 0,
     return fetch_live_player_lines(
         api_key, json.loads(players_key), force_refresh=_force_refresh
     )
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 5)
+def _recent_scores(api_key: str, _bust: int = 0) -> pd.DataFrame:
+    """Cached wrapper around :func:`fetch_recent_scores` (1-day lookback)."""
+    if not api_key:
+        return pd.DataFrame()
+    from hooplytics.odds import fetch_recent_scores
+
+    return fetch_recent_scores(api_key, days_from=1)
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 24, max_entries=1)
@@ -1155,6 +1170,9 @@ def page_home(roster: dict, api_key: str) -> None:
     cols[2].metric("Models trained", len(bundle.estimators))
     cols[3].metric("Median R²", f"{median_r2:.2f}" if not np.isnan(median_r2) else "—")
 
+    # Last night's NBA results (Odds API /scores)
+    _render_recent_scores_panel(api_key)
+
     # Main grid: edges (wider) + model quality
     left, right = st.columns([3, 2], gap="large")
 
@@ -1595,6 +1613,60 @@ def _section_header(eyebrow: str, title: str, copy: str | None = None) -> None:
         f'<h2 class="hl-section-title">{title}</h2>'
         f'{body}'
         f'</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_recent_scores_panel(api_key: str) -> None:
+    """Render a compact "Last night's results" strip on the dashboard.
+
+    Pulls completed games from the Odds API ``/scores`` endpoint (1-day lookback,
+    2 quota credits, cached 5 min). Renders nothing when the key is missing,
+    no completed games are present, or the request degrades.
+    """
+    if not api_key:
+        return
+    try:
+        scores = _recent_scores(api_key, int(st.session_state.get("live_bust", 0)))
+    except Exception:  # noqa: BLE001 — degrade silently
+        return
+    if scores.empty or "completed" not in scores.columns:
+        return
+    done = scores[scores["completed"]].copy()
+    if done.empty:
+        return
+
+    # Sort by tip-off so the most recent games render first.
+    if "commence_time" in done.columns:
+        done["_ts"] = pd.to_datetime(done["commence_time"], errors="coerce")
+        done = done.sort_values("_ts", ascending=False)
+
+    tiles: list[str] = []
+    for _, row in done.head(8).iterrows():
+        home = str(row.get("home_team") or "")
+        away = str(row.get("away_team") or "")
+        hs = row.get("home_score")
+        as_ = row.get("away_score")
+        if pd.isna(hs) or pd.isna(as_):
+            continue
+        hs_i, as_i = int(hs), int(as_)
+        # Highlight the winner column.
+        home_cls = "hl-score-win" if hs_i > as_i else "hl-score-team"
+        away_cls = "hl-score-win" if as_i > hs_i else "hl-score-team"
+        tiles.append(
+            f'<div class="hl-score-tile">'
+            f'<div class="{away_cls}">{away} <span class="hl-mono">{as_i}</span></div>'
+            f'<div class="{home_cls}">{home} <span class="hl-mono">{hs_i}</span></div>'
+            f'</div>'
+        )
+    if not tiles:
+        return
+
+    st.markdown(
+        '<div class="hl-card" style="margin-top:0.6rem">'
+        '<p class="hl-card-title">Last night around the league</p>'
+        f'<div class="hl-score-grid">{"".join(tiles)}</div>'
+        '</div>',
         unsafe_allow_html=True,
     )
 
@@ -3411,8 +3483,9 @@ def _enrich_matchups_with_team(
 def page_report(roster: dict, api_key: str) -> None:
     page_hero(
         "Roster Report",
-        "Export a printable analytics report covering model quality, "
-        "live edges, per-player projections, and AI-written rationale.",
+        "Export a printable analytics report — game projections with edge "
+        "analysis, or a player-performance analytics report for coaching "
+        "staffs. Both share Hooplytics' editorial design system.",
     )
 
     if not roster:
@@ -3422,7 +3495,7 @@ def page_report(roster: dict, api_key: str) -> None:
         )
         return
 
-    # Resolve OpenAI connection (optional — report is also useful without prose).
+    # Resolve OpenAI connection (optional — both reports are useful without prose).
     openai_api_key = (
         (st.session_state.get("session_openai_api_key") or "").strip()
         or _deployment_openai_api_key()
@@ -3434,6 +3507,33 @@ def page_report(roster: dict, api_key: str) -> None:
     selected_model = st.session_state.get("openai_selected_model") or ""
     has_chat = bool(conn and selected_model)
 
+    # ── Report-type selector (default: Game Projections — preserves existing UX) ──
+    report_type = st.radio(
+        "Report type",
+        ["Game Projections", "Player Performance Analytics"],
+        horizontal=True,
+        key="report_type_choice",
+        captions=[
+            "Edge board, model leans, projections per player.",
+            "Coaching-focused player analytics — strengths, growth areas, trends.",
+        ],
+    )
+    divider()
+
+    if report_type == "Player Performance Analytics":
+        _render_performance_report(roster, conn, selected_model, has_chat)
+        return
+
+    _render_projections_report(roster, api_key, conn, selected_model, has_chat)
+
+
+def _render_projections_report(
+    roster: dict,
+    api_key: str,
+    conn: OpenAIConnection | None,
+    selected_model: str,
+    has_chat: bool,
+) -> None:
     # ── Configuration card ─────────────────────────────────────────────────
     with st.container():
         cols = st.columns([2, 1, 1])
@@ -3607,6 +3707,195 @@ def page_report(roster: dict, api_key: str) -> None:
         type="primary",
         width="stretch",
         key="report_download_btn",
+    )
+
+
+def _render_performance_report(
+    roster: dict,
+    conn: OpenAIConnection | None,
+    selected_model: str,
+    has_chat: bool,
+) -> None:
+    """Player Performance Analytics report — coaching-staff focused.
+
+    Strictly performance content: KPI scorecards, trend sparklines, shooting
+    & efficiency, strengths/weaknesses radar, consistency bands, role &
+    usage trends, hot/cold streak detection, and an optional AI-written
+    coaching note per player. No betting/edge content.
+    """
+    # ── Configuration row ──────────────────────────────────────────────────
+    with st.container():
+        cols = st.columns([2, 1, 1])
+        include_ai = cols[0].toggle(
+            "Include AI coaching narrative (uses OpenAI)",
+            value=has_chat,
+            disabled=not has_chat,
+            help=(
+                "Generates a roster overview plus per-player strengths, "
+                "growth areas, and a coaching focus paragraph using your "
+                "configured OpenAI key. One API call per export."
+                if has_chat
+                else "Add an OpenAI key in the sidebar to enable AI prose."
+            ),
+            key="perf_report_include_ai",
+        )
+        cols[1].markdown(
+            (pill("AI READY", "live") if has_chat else pill("DATA-ONLY", "warn")),
+            unsafe_allow_html=True,
+        )
+        cols[2].caption(
+            f"Model · {selected_model}" if has_chat else "Add OpenAI key for prose"
+        )
+
+    # ── Quick preview metrics ──────────────────────────────────────────────
+    overview_cols = st.columns(4)
+    overview_cols[0].metric("Players", len(roster))
+    # Cheap precount of total games available in the modeling frame.
+    modeling_df = _modeling_frame(_roster_key())
+    total_games = 0
+    if isinstance(modeling_df, pd.DataFrame) and not modeling_df.empty and "player" in modeling_df.columns:
+        total_games = int(modeling_df[modeling_df["player"].isin(roster.keys())].shape[0])
+    overview_cols[1].metric("Game logs", total_games)
+    seasons_set = sorted({s for ss in roster.values() for s in ss})
+    overview_cols[2].metric("Seasons", len(seasons_set) or 1)
+    overview_cols[3].metric("AI prose", "On" if (include_ai and has_chat) else "Off")
+
+    divider()
+
+    generate = st.button(
+        "Generate performance report",
+        type="primary",
+        width="stretch",
+        key="perf_report_generate_btn",
+    )
+    if not generate:
+        st.caption(
+            "Player Performance Analytics is built on demand. Toggle the AI "
+            "narrative above to include a coaching note per player."
+        )
+        return
+
+    # ── Gather per-player game logs + summaries ────────────────────────────
+    player_games: dict[str, pd.DataFrame] = {}
+    summaries: dict[str, dict[str, Any]] = {}
+    progress = st.progress(0.0, text="Aggregating game logs…")
+    players = list(roster.keys())
+    for i, player in enumerate(players, start=1):
+        try:
+            games = _player_games(_roster_key(), player)
+            if isinstance(games, pd.DataFrame) and not games.empty:
+                player_games[player] = games
+                summaries[player] = player_performance_summary(games)
+        except Exception:
+            pass
+        progress.progress(i / max(len(players), 1), text=f"Player {i}/{len(players)}…")
+    progress.empty()
+
+    if not player_games:
+        st.warning(
+            "No game logs are available for the rostered players in the "
+            "active seasons. Add seasons or players with NBA appearances."
+        )
+        return
+
+    # ── AI coaching prose (optional) ───────────────────────────────────────
+    ai_sections: dict[str, Any] | None = None
+    if include_ai and conn is not None and selected_model:
+        with st.spinner("Generating AI coaching narrative…"):
+            try:
+                today_matchups = _enrich_matchups_with_team(
+                    _today_matchup_map(_roster_key()),
+                    modeling_df,
+                )
+                # Build a recent-form mapping that mirrors the projections
+                # report's payload contract; the LLM uses it as anchor data.
+                recent_form: dict[str, dict[str, float]] = {}
+                for player, games in player_games.items():
+                    rf = _recent_form_for(player, games)
+                    if rf:
+                        recent_form[player] = rf
+
+                # Compact summary for the LLM grounding payload.
+                perf_summary_compact: dict[str, dict[str, Any]] = {}
+                for player, s in summaries.items():
+                    kpis = s.get("kpis", {}) or {}
+                    perf_summary_compact[player] = {
+                        "games_played": s.get("games_played", 0),
+                        "averages": {
+                            col: round(float(info.get("season_avg", float("nan"))), 2)
+                            for col, info in kpis.items()
+                            if info.get("season_avg") is not None
+                            and not (isinstance(info.get("season_avg"), float)
+                                     and np.isnan(info.get("season_avg")))
+                        },
+                        "recent_l10": {
+                            col: round(float(info.get("recent_avg", float("nan"))), 2)
+                            for col, info in kpis.items()
+                            if info.get("recent_avg") is not None
+                            and not (isinstance(info.get("recent_avg"), float)
+                                     and np.isnan(info.get("recent_avg")))
+                        },
+                        "shooting": {
+                            k: round(float(v), 3)
+                            for k, v in (s.get("shooting") or {}).items()
+                            if v is not None and not (isinstance(v, float) and np.isnan(v))
+                        },
+                        "streaks": {
+                            col: {"z": round(float(info.get("z", 0.0)), 2),
+                                  "recent_avg": round(float(info.get("recent_avg", 0.0)), 2),
+                                  "season_avg": round(float(info.get("season_avg", 0.0)), 2)}
+                            for col, info in (s.get("streaks") or {}).items()
+                            if info.get("z") is not None
+                            and not (isinstance(info.get("z"), float) and np.isnan(info.get("z")))
+                        },
+                    }
+
+                grounding = build_grounding_payload(
+                    roster=roster,
+                    bundle=_bundle_for_ui(),
+                    recent_form=recent_form or None,
+                    extras={
+                        "today_matchups": today_matchups,
+                        "todays_slate": _todays_slate(),
+                        "player_performance_summary": perf_summary_compact,
+                    },
+                )
+                ai_sections = generate_performance_sections(
+                    connection=conn,
+                    model=selected_model,
+                    grounding_payload=grounding,
+                )
+            except Exception as exc:
+                st.warning(f"AI narrative failed — exporting data-only report. ({exc})")
+                ai_sections = None
+
+    # ── Build PDF ──────────────────────────────────────────────────────────
+    bundle = _bundle_for_ui()
+    metrics_df = (
+        bundle.metrics if bundle is not None and bundle.metrics is not None
+        else None
+    )
+    try:
+        pdf_bytes = build_player_performance_report(
+            roster={p: list(s) for p, s in roster.items()},
+            player_games=player_games,
+            bundle_metrics=metrics_df,
+            ai_sections=ai_sections,
+        )
+    except Exception as exc:
+        st.error(f"PDF generation failed: {exc}")
+        return
+
+    filename = f"hooplytics_performance_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+    st.success(f"Performance report ready · {len(pdf_bytes) / 1024:.1f} KB")
+    st.download_button(
+        "Download PDF",
+        data=pdf_bytes,
+        file_name=filename,
+        mime="application/pdf",
+        type="primary",
+        width="stretch",
+        key="perf_report_download_btn",
     )
 
 

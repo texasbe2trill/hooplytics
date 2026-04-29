@@ -87,6 +87,7 @@ python3 -m venv .venv && source .venv/bin/activate && pip install -e .
 | 📈 &nbsp; Compare a projection vs. a live line | `hooplytics prop "Shai Gilgeous-Alexander" points` |
 | 📊 &nbsp; See the live line board | `hooplytics lines --refresh` |
 | 📑 &nbsp; Generate a printable scouting report | Open the dashboard → **Roster Report** → *Generate PDF* |
+| 🏋️ &nbsp; Generate a coaching performance report | Open the dashboard → **Roster Report** → *Player Performance Analytics* |
 | 🤖 &nbsp; Ask the AI scout a question | Open the dashboard → **Hooplytics Scout** |
 | ❓ &nbsp; See all CLI commands | `hooplytics --help` |
 | 📓 &nbsp; Open the notebook | `jupyter lab hooplytics.ipynb` |
@@ -315,6 +316,16 @@ Held-out model quality, ranking, residuals, and feature drivers.
 <p>Open the <strong>Roster Report</strong> page, click <em>Generate PDF</em>, and download.</p>
 </td>
 </tr>
+<tr>
+<td colspan="2" valign="top">
+<h4>🏋️ Player Performance Analytics (PDF)</h4>
+<p>A second printable report on the same Roster Report page — strictly performance-oriented (no betting edges, no projection-vs-line content). Designed for coaching staffs, player development, and anyone who wants the same magazine chrome focused on how a player is actually playing.</p>
+<p>📰 <strong>Cover:</strong> Roster headline scoreboard with PTS / REB / AST / TS% per player, deep-linked names that jump straight to that player's profile page.</p>
+<p>📋 <strong>Roster overview:</strong> Per-player season averages snapshot table plus a roster skill overlay radar so you can see every player's skill shape on a single chart.</p>
+<p>📈 <strong>Per-player profile (2 pages each):</strong> Dark hero band with headline averages · KPI scorecard strip with L10 deltas · Garmin-style activity rings (SCORING / PLAYMAKING / EFFICIENCY vs. roster leader) · ML next-game projection panel (linear-regression forecast with 80% prediction interval and trend arrows) · trend sparklines for 8 stats over the last 20 games with rolling-5 overlay · shooting & efficiency bars (FG% / 3P% / FT% / TS%) with roster-median markers · skill-axis radar · floor / median / ceiling consistency strip · role & usage trends · hot/cold streak detection (z-scored vs. season baseline) · three accent-topped coaching cards (Strengths / Growth / Focus) with optional AI-augmented narrative.</p>
+<p>Open the <strong>Roster Report</strong> page, switch the report-type toggle to <em>Player Performance Analytics</em>, and click <em>Generate performance report</em>.</p>
+</td>
+</tr>
 </table>
 
 <details>
@@ -401,11 +412,13 @@ A player intelligence workbench is built to make data easier to *explore, explai
 | :--- | :--- |
 | 🎛️ **Streamlit dashboard** | Eight purpose-built pages: Home, Player Projection, Analytics Dashboard, Compare Players, Player Line Lab, Model Diagnostics, Hooplytics Scout, Roster Report |
 | 📑 **PDF Roster Report** | Editorial, magazine-style ReportLab PDF — Tonight's Slate cover, Tonight's Setup card stack, ranked Signal Board, Conviction Map with Signal Index legend and AI Scout Picks, Model Quality trust meter, and per-player profiles with latest context, sparklines, and last-4 resolved lines |
+| 🏋️ **PDF Player Performance Analytics** | Second coach-focused PDF on the same page — KPI scorecards, Garmin-style activity rings, ML next-game projection with 80% prediction interval, trend sparklines, shooting & efficiency bars, skill-axis radar, floor/median/ceiling consistency, role & usage trends, hot/cold streak z-scores, and three accent-topped coaching cards (Strengths / Growth / Focus) |
 | 🤖 **Hooplytics Scout (AI)** | BYO-key OpenAI chatbot grounded in your local roster, projections, edge board, and model metrics — Hybrid or Strict grounded modes, structured Confidence + Risk factors |
 | 📡 **Live line context** | Auto-fetched lines from The Odds API across CLI and dashboard, with session-only BYO-key support in the web app |
 | 🎯 **Edge board** | Slate-wide projection-vs-line gap analysis, signed edges, MORE/LESS calls, and book counts — feeds the dashboard, the AI scout, and the PDF report |
 | 👤 **Player analysis** | Recent form, rolling trends, distributions, player profiles, season averages, and recent-window comparisons |
 | 🧠 **Modeling stack** | RACE blend (Ridge + kNN + Random Forest pipelines) across eight target stats, role and context features |
+| 🎚️ **Market-anchored calibration** | Two-layer calibration applied at inference (Huber per-market `actual ≈ a + b·line` + per-player residual mean clipped to ±20%) blended with the model via per-market weights — corrects systematic bias without retraining. Built with `hooplytics-build-calibration` and shipped as `bundles/calibration_v1.json` |
 | 📦 **Prebuilt RACE bundles** | Multiple ready-to-use bundles ship in `bundles/` (e.g. `race_fast.joblib`, `race_playoffs.joblib`). The Streamlit app auto-loads one on launch and lets you switch between them from the sidebar — zero cold-start training required |
 | 🔬 **Diagnostics** | RMSE / MAE / R², predicted-vs-actual panels, residual views, feature importance, and per-stat health summaries |
 | ⚡ **CLI workflows** | Single-player projection, prop comparison, scenario inputs, live line board, roster persistence, and prebuilt-bundle training |
@@ -442,6 +455,7 @@ Hooplytics ships with a Typer-based CLI that renders to **Rich** tables and pane
 | `hooplytics lines` | Live line board for the tracked roster, sorted by projection gap |
 | `hooplytics train` | Pre-warm and cache the model bundle |
 | `hooplytics-train-bundle` | Interactive prebuilt bundle trainer with progress bars and R2 validation gates |
+| `hooplytics-build-calibration` | Fit the market-anchored calibration artifact (`bundles/calibration_v1.json`) from cached odds + game logs |
 | `hooplytics roster list` | Show the tracked roster |
 | `hooplytics roster add` | Add a player to the tracked roster |
 | `hooplytics roster remove` | Remove a player from the tracked roster |
@@ -473,6 +487,9 @@ hooplytics train
 
 # Build and ship a prebuilt Streamlit bundle (defaults to bundles/race_fast.joblib)
 hooplytics-train-bundle --mode exhaustive --players-source postseason-plus-anchors
+
+# Fit the market-anchored calibration artifact from cached odds (used automatically by predict)
+hooplytics-build-calibration build --season 2024-25 --season 2025-26 --verbose
 ```
 
 > 🔑 `hooplytics lines` and live-enabled `prop` / `decisions` need `ODDS_API_KEY` (from `.env` or your shell). All commands support `--help`, and most reporting commands support `--json` for scripting.
@@ -671,7 +688,8 @@ hooplytics/
 │   └── screenshots/              # Streamlit dashboard captures
 ├── bundles/
 │   ├── race_fast.joblib          # Default RACE bundle auto-loaded by the app
-│   └── race_playoffs.joblib      # Playoff-tuned RACE bundle (selectable in sidebar)
+│   ├── race_playoffs.joblib      # Playoff-tuned RACE bundle (selectable in sidebar)
+│   └── calibration_v1.json       # Market-anchored calibration artifact (auto-applied by predict)
 ├── hooplytics/
 │   ├── cli.py                    # Typer CLI entry point
 │   ├── constants.py
@@ -683,8 +701,11 @@ hooplytics/
 │   ├── models.py                 # 8-stat RACE model training
 │   ├── odds.py                   # The Odds API client
 │   ├── openai_agent.py           # Hooplytics Scout (BYO-key OpenAI grounding)
-│   ├── predict.py                # Projection + line comparison
+│   ├── predict.py                # Projection + line comparison (auto-applies calibration)
+│   ├── calibration.py            # Two-layer market-anchored calibration
+│   ├── calibration_cli.py        # `hooplytics-build-calibration` entry point
 │   ├── report.py                 # PDF Roster Report builder (ReportLab)
+│   ├── report_performance.py     # PDF Player Performance Analytics builder (ReportLab)
 │   ├── train_bundle.py           # Interactive prebuilt-bundle trainer
 │   └── web/
 │       ├── app.py                # Streamlit multi-page app
@@ -701,8 +722,7 @@ hooplytics/
 - 🎬 Fresh Streamlit dashboard screenshots and rendered demos for the Roster Report and Hooplytics Scout pages
 - 📡 Richer book-level line telemetry inside the Streamlit app
 - 🧪 Expanded Player Line Lab sensitivity views
-- 🔬 Better model calibration and confidence summaries
-- 📑 Saveable / shareable PDF report templates with custom branding
+-  Saveable / shareable PDF report templates with custom branding
 - 📦 More reproducible demo datasets for first-time users
 - 👥 Broader player and season presets for faster onboarding
 

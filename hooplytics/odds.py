@@ -19,6 +19,7 @@ from .constants import (
     ODDS_CACHE_DIR,
     ODDS_HIST_CACHE_DIR,
     ODDS_HISTORICAL_BASE,
+    ODDS_HISTORICAL_REGIONS,
     ODDS_MARKETS,
     ODDS_PLAYER_PROPS_CUTOFF,
     ODDS_REGIONS,
@@ -354,7 +355,7 @@ def fetch_historical_odds_for_date(
                 params={
                     "apiKey": api_key,
                     "date": query_ts,
-                    "regions": ODDS_REGIONS,
+                    "regions": ODDS_HISTORICAL_REGIONS,
                     "markets": ",".join(api_markets),
                     "bookmakers": ",".join(NA_BOOKMAKERS),
                     "oddsFormat": "decimal",
@@ -698,4 +699,132 @@ def load_cached_historical_odds(
     # cache directory churns.
     _HIST_ODDS_CACHE.clear()
     _HIST_ODDS_CACHE[fingerprint] = result
+    return result
+
+
+# ── Scores ───────────────────────────────────────────────────────────────────
+
+def fetch_recent_scores(
+    api_key: str,
+    *,
+    days_from: int = 1,
+    timeout: float = 8.0,
+) -> pd.DataFrame:
+    """Fetch live, upcoming, and recently completed NBA games with scores.
+
+    Wraps the Odds API ``/scores`` endpoint. Returns one row per game with
+    home/away teams, scores when available, and completion status. Useful for
+    automated actuals-vs-prediction tracking without an additional NBA stats
+    API call.
+
+    Parameters
+    ----------
+    api_key
+        The Odds API key.
+    days_from
+        Include completed games from up to this many days ago (1-3). Costs
+        2 quota credits when set; 1 credit for live/upcoming only.
+    timeout
+        HTTP timeout in seconds.
+
+    Returns
+    -------
+    DataFrame with columns ``[id, commence_time, home_team, away_team,
+    home_score, away_score, completed, last_update]``. Empty on no key,
+    quota exhaustion, or network error.
+    """
+    cols = [
+        "id", "commence_time", "home_team", "away_team",
+        "home_score", "away_score", "completed", "last_update",
+    ]
+    if not api_key:
+        return pd.DataFrame(columns=cols)
+
+    params: dict[str, str | int] = {"apiKey": api_key, "dateFormat": "iso"}
+    if days_from:
+        params["daysFrom"] = max(1, min(3, int(days_from)))
+
+    try:
+        resp = requests.get(f"{ODDS_BASE}/scores", params=params, timeout=timeout)
+    except Exception:  # noqa: BLE001
+        return pd.DataFrame(columns=cols)
+
+    if resp.status_code in (401, 429) or not resp.ok:
+        return pd.DataFrame(columns=cols)
+
+    payload = resp.json()
+    if not isinstance(payload, list):
+        return pd.DataFrame(columns=cols)
+
+    rows: list[dict] = []
+    for ev in payload:
+        scores = {s.get("name"): s.get("score") for s in (ev.get("scores") or [])}
+        home = ev.get("home_team")
+        away = ev.get("away_team")
+        rows.append({
+            "id": ev.get("id"),
+            "commence_time": ev.get("commence_time"),
+            "home_team": home,
+            "away_team": away,
+            "home_score": _safe_int(scores.get(home)),
+            "away_score": _safe_int(scores.get(away)),
+            "completed": bool(ev.get("completed", False)),
+            "last_update": ev.get("last_update"),
+        })
+    return pd.DataFrame(rows, columns=cols)
+
+
+def _safe_int(value: object) -> int | float:
+    """Coerce a score string/number to int; NaN if missing or unparseable."""
+    if value is None or value == "":
+        return float("nan")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+# ── Market discovery ─────────────────────────────────────────────────────────
+
+def fetch_event_available_markets(
+    api_key: str,
+    event_id: str,
+    *,
+    timeout: float = 8.0,
+) -> dict[str, list[str]]:
+    """Discover which player-prop markets each book has open for an event.
+
+    Wraps the Odds API ``/events/{eventId}/markets`` endpoint (1 quota credit
+    regardless of market count). Use this before calling the per-event odds
+    endpoint to skip events/books that don't yet have the markets you want,
+    avoiding wasted quota on the more expensive odds call.
+
+    Returns a mapping of ``{bookmaker_key: [market_key, …]}``. Empty dict on
+    no key, error, or unsupported event.
+    """
+    if not api_key or not event_id:
+        return {}
+
+    try:
+        resp = requests.get(
+            f"{ODDS_BASE}/events/{event_id}/markets",
+            params={"apiKey": api_key, "regions": ODDS_REGIONS},
+            timeout=timeout,
+        )
+    except Exception:  # noqa: BLE001
+        return {}
+
+    if resp.status_code in (401, 429) or not resp.ok:
+        return {}
+
+    payload = resp.json()
+    if not isinstance(payload, dict):
+        return {}
+
+    result: dict[str, list[str]] = {}
+    for bm in payload.get("bookmakers", []) or []:
+        key = bm.get("key")
+        if not key:
+            continue
+        result[key] = [m.get("key", "") for m in (bm.get("markets") or []) if m.get("key")]
     return result

@@ -353,6 +353,29 @@ h1, h2, h3, h4, h5 {{
   margin-right: 0.4rem; vertical-align: middle;
 }}
 
+/* Score tiles (Last night around the league) */
+.hl-score-grid {{
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.55rem;
+}}
+.hl-score-tile {{
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--hl-hairline);
+  border-radius: 10px;
+  padding: 0.6rem 0.8rem;
+  display: flex; flex-direction: column; gap: 0.25rem;
+  font-size: 0.88rem;
+}}
+.hl-score-team {{
+  display: flex; justify-content: space-between; gap: 0.5rem;
+  color: var(--hl-ink-quiet);
+}}
+.hl-score-win {{
+  display: flex; justify-content: space-between; gap: 0.5rem;
+  color: var(--hl-ink); font-weight: 600;
+}}
+
 /* Pills */
 .hl-pill {{
   display: inline-block;

@@ -36,6 +36,10 @@ MARKET_LINE_COLS: list[str] = [
     "market_rebounds_line",
     "market_assists_line",
     "market_threepm_line",
+    "market_turnovers_line",
+    "market_pra_line",
+    "market_steals_line",
+    "market_blocks_line",
     "market_books_count",
 ]
 
@@ -48,12 +52,20 @@ MARKET_DERIVED_COLS: list[str] = [
     "market_rebounds_over_prob",
     "market_assists_over_prob",
     "market_threepm_over_prob",
+    "market_turnovers_over_prob",
+    "market_pra_over_prob",
+    "market_steals_over_prob",
+    "market_blocks_over_prob",
     # Per-book line dispersion — high std == soft / disagreeing market.
     "market_points_line_std",
     "market_rebounds_line_std",
     "market_assists_line_std",
     "market_threepm_line_std",
-    # Average overround across the four markets (proxy for vig / liquidity).
+    "market_turnovers_line_std",
+    "market_pra_line_std",
+    "market_steals_line_std",
+    "market_blocks_line_std",
+    # Average overround across the markets (proxy for vig / liquidity).
     "market_overround",
     # Market-vs-recent-form deltas (line minus rolling rate).
     "market_points_vs_l5",
@@ -62,6 +74,14 @@ MARKET_DERIVED_COLS: list[str] = [
     "market_rebounds_vs_l10",
     "market_assists_vs_l5",
     "market_assists_vs_l10",
+    "market_turnovers_vs_l5",
+    "market_turnovers_vs_l10",
+    "market_pra_vs_l5",
+    "market_pra_vs_l10",
+    "market_steals_vs_l5",
+    "market_steals_vs_l10",
+    "market_blocks_vs_l5",
+    "market_blocks_vs_l10",
 ]
 
 MARKET_FEATURE_COLS: list[str] = MARKET_LINE_COLS + MARKET_DERIVED_COLS
@@ -70,15 +90,23 @@ MARKET_FEATURE_COLS: list[str] = MARKET_LINE_COLS + MARKET_DERIVED_COLS
 # threepm has no fg3m_l5/l10 baseline so it is intentionally excluded from the
 # vs-form delta features.
 _MODEL_TO_COL: dict[str, str] = {
-    "points":   "market_points_line",
-    "rebounds": "market_rebounds_line",
-    "assists":  "market_assists_line",
-    "threepm":  "market_threepm_line",
+    "points":    "market_points_line",
+    "rebounds":  "market_rebounds_line",
+    "assists":   "market_assists_line",
+    "threepm":   "market_threepm_line",
+    "turnovers": "market_turnovers_line",
+    "pra":       "market_pra_line",
+    "steals":    "market_steals_line",
+    "blocks":    "market_blocks_line",
 }
 _MODEL_TO_STAT: dict[str, str] = {
-    "points":   "pts",
-    "rebounds": "reb",
-    "assists":  "ast",
+    "points":    "pts",
+    "rebounds":  "reb",
+    "assists":   "ast",
+    "turnovers": "tov",
+    "pra":       "pra",
+    "steals":    "stl",
+    "blocks":    "blk",
 }
 
 
