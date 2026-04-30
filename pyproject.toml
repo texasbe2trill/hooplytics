@@ -38,6 +38,7 @@ dependencies = [
 web = [
     "streamlit>=1.36",
     "openai>=1.40",
+    "anthropic>=0.40",
 ]
 notebook = [
     "matplotlib>=3.9",

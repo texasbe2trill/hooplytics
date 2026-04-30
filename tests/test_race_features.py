@@ -125,7 +125,9 @@ def test_train_models_fallback_when_context_missing() -> None:
     df = _toy_df()
     df = add_pregame_features(df)
     # Deliberately do not call build_context_features; training should still run.
-    bundle = train_models(df, time_aware_validation=True)
+    # fast_mode keeps the smoke test under a few seconds while exercising the
+    # same fallback path.
+    bundle = train_models(df, time_aware_validation=True, fast_mode=True)
 
     assert bundle.metrics is not None
     assert not bundle.metrics.empty

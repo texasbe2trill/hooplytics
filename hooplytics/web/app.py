@@ -57,16 +57,22 @@ _TRAINING_ANCHOR_PLAYERS: list[str] = [
 from hooplytics.data import NBADataUnavailable, PlayerStore, nba_seasons
 from hooplytics.models import ModelBundle, ensure_models, load_models
 from hooplytics.odds import fetch_live_player_lines, ingest_historical_odds, load_cached_historical_odds
-from hooplytics.openai_agent import (
+from hooplytics.ai_agent import (
+    AnthropicConnection,
+    Connection as AIConnection,
     OpenAIConnection,
+    PROVIDER_LABELS,
+    PROVIDERS,
     auto_select_model,
     build_grounding_payload,
     chat_complete,
-    connect as openai_connect,
+    connect as ai_connect,
     evidence_chips,
+    explain_edge,
     filter_chat_models,
     generate_performance_sections,
     generate_report_sections,
+    generate_slate_brief,
     parse_chart_blocks,
 )
 from hooplytics.predict import (
@@ -146,6 +152,26 @@ def _deployment_openai_api_key() -> str:
         return str(st.secrets.get("OPENAI_API_KEY", "")).strip()
     except Exception:
         return ""
+
+
+def _deployment_anthropic_api_key() -> str:
+    """Resolve a deployment-configured Anthropic API key without exposing it.
+
+    Order: ANTHROPIC_API_KEY env var, then Streamlit secrets["ANTHROPIC_API_KEY"].
+    """
+    key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        return str(st.secrets.get("ANTHROPIC_API_KEY", "")).strip()
+    except Exception:
+        return ""
+
+
+def _deployment_ai_api_key(provider: str) -> str:
+    if provider == "anthropic":
+        return _deployment_anthropic_api_key()
+    return _deployment_openai_api_key()
 
 
 @st.cache_resource(show_spinner=False)
@@ -498,6 +524,9 @@ def _init_state() -> None:
         st.session_state.odds_api_status = ""  # "", "ok", "error"
     if "odds_api_error" not in st.session_state:
         st.session_state.odds_api_error = ""
+    # AI provider selector (default: OpenAI — preserves prior behavior).
+    if "ai_provider" not in st.session_state:
+        st.session_state.ai_provider = "openai"
     # OpenAI / chatbot session state
     if "session_openai_api_key" not in st.session_state:
         st.session_state.session_openai_api_key = ""
@@ -513,6 +542,21 @@ def _init_state() -> None:
         st.session_state.openai_connect_status = ""  # "", "ok", "error"
     if "openai_connect_error" not in st.session_state:
         st.session_state.openai_connect_error = ""
+    # Anthropic / Claude session state (mirror of OpenAI fields)
+    if "session_anthropic_api_key" not in st.session_state:
+        st.session_state.session_anthropic_api_key = ""
+    if "session_anthropic_api_key_input" not in st.session_state:
+        st.session_state.session_anthropic_api_key_input = (
+            st.session_state.session_anthropic_api_key
+        )
+    if "anthropic_models" not in st.session_state:
+        st.session_state.anthropic_models = []
+    if "anthropic_selected_model" not in st.session_state:
+        st.session_state.anthropic_selected_model = ""
+    if "anthropic_connect_status" not in st.session_state:
+        st.session_state.anthropic_connect_status = ""
+    if "anthropic_connect_error" not in st.session_state:
+        st.session_state.anthropic_connect_error = ""
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []  # list[{role, content, evidence?}]
     if "chat_strict_grounded" not in st.session_state:
@@ -541,36 +585,104 @@ def _sync_session_openai_api_key() -> None:
     st.session_state.session_openai_api_key = new_key
 
 
+def _sync_session_anthropic_api_key() -> None:
+    new_key = st.session_state.session_anthropic_api_key_input.strip()
+    if new_key != st.session_state.session_anthropic_api_key:
+        st.session_state.anthropic_models = []
+        st.session_state.anthropic_selected_model = ""
+        st.session_state.anthropic_connect_status = ""
+        st.session_state.anthropic_connect_error = ""
+    st.session_state.session_anthropic_api_key = new_key
+
+
 @st.cache_resource(show_spinner=False)
 def _openai_connect_cached(api_key: str) -> OpenAIConnection:
     """Cache one OpenAIConnection per key for the session (key never logged)."""
-    return openai_connect(api_key)
+    return ai_connect(api_key, "openai")  # type: ignore[return-value]
 
 
-def _resolve_openai_connection(api_key: str) -> OpenAIConnection | None:
-    """Return a cached OpenAIConnection, refreshing session model state on success."""
+@st.cache_resource(show_spinner=False)
+def _anthropic_connect_cached(api_key: str) -> AnthropicConnection:
+    """Cache one AnthropicConnection per key for the session (key never logged)."""
+    return ai_connect(api_key, "anthropic")  # type: ignore[return-value]
+
+
+def _ai_state_keys(provider: str) -> dict[str, str]:
+    if provider == "anthropic":
+        return {
+            "models": "anthropic_models",
+            "selected_model": "anthropic_selected_model",
+            "status": "anthropic_connect_status",
+            "error": "anthropic_connect_error",
+        }
+    return {
+        "models": "openai_models",
+        "selected_model": "openai_selected_model",
+        "status": "openai_connect_status",
+        "error": "openai_connect_error",
+    }
+
+
+def _resolve_ai_connection(api_key: str, provider: str) -> AIConnection | None:
+    """Return a cached connection for the given provider, syncing session state."""
     if not api_key:
         return None
+    keys = _ai_state_keys(provider)
+    cache_fn = (
+        _anthropic_connect_cached
+        if provider == "anthropic"
+        else _openai_connect_cached
+    )
     try:
-        conn = _openai_connect_cached(api_key)
+        conn = cache_fn(api_key)
     except Exception as exc:
-        st.session_state.openai_connect_status = "error"
-        st.session_state.openai_connect_error = str(exc)
+        st.session_state[keys["status"]] = "error"
+        st.session_state[keys["error"]] = str(exc)
         return None
-    st.session_state.openai_connect_status = "ok"
-    st.session_state.openai_connect_error = ""
-    # Always sync with filtered chat-capable models from the latest connection
-    # so stale session values cannot keep non-chat options in the selector.
-    st.session_state.openai_models = list(conn.models)
-    if not st.session_state.openai_selected_model:
-        st.session_state.openai_selected_model = (
+    st.session_state[keys["status"]] = "ok"
+    st.session_state[keys["error"]] = ""
+    st.session_state[keys["models"]] = list(conn.models)
+    if not st.session_state[keys["selected_model"]]:
+        st.session_state[keys["selected_model"]] = (
             conn.default_model or (conn.models[0] if conn.models else "")
         )
-    elif conn.models and st.session_state.openai_selected_model not in conn.models:
-        st.session_state.openai_selected_model = (
+    elif conn.models and st.session_state[keys["selected_model"]] not in conn.models:
+        st.session_state[keys["selected_model"]] = (
             conn.default_model or conn.models[0]
         )
     return conn
+
+
+def _resolve_openai_connection(api_key: str) -> OpenAIConnection | None:
+    """Backward-compatible alias for the OpenAI-only resolver."""
+    return _resolve_ai_connection(api_key, "openai")  # type: ignore[return-value]
+
+
+def _active_ai_provider() -> str:
+    return st.session_state.get("ai_provider", "openai") or "openai"
+
+
+def _active_ai_api_key() -> str:
+    """Return the in-effect AI key for the active provider (session > deployment)."""
+    provider = _active_ai_provider()
+    if provider == "anthropic":
+        return (
+            (st.session_state.get("session_anthropic_api_key") or "").strip()
+            or _deployment_anthropic_api_key()
+        )
+    return (
+        (st.session_state.get("session_openai_api_key") or "").strip()
+        or _deployment_openai_api_key()
+    )
+
+
+def _resolve_active_ai_connection() -> AIConnection | None:
+    return _resolve_ai_connection(_active_ai_api_key(), _active_ai_provider())
+
+
+def _active_ai_selected_model() -> str:
+    keys = _ai_state_keys(_active_ai_provider())
+    return st.session_state.get(keys["selected_model"], "") or ""
 
 
 def _apply_sidebar_seasons_to_roster() -> None:
@@ -1027,92 +1139,145 @@ def _render_sidebar() -> tuple[str, str, str]:
 
         divider()
 
-        # OpenAI key + model picker (powers the Hooplytics Scout tab)
+        # AI provider + key + model picker (powers Scout, AI prose, coaching narrative)
         st.markdown('<p class="hl-section">Hooplytics Scout</p>', unsafe_allow_html=True)
-        deployment_openai_key = _deployment_openai_api_key()
-        if deployment_openai_key:
+
+        provider_options = list(PROVIDERS)
+        provider_idx = (
+            provider_options.index(st.session_state.ai_provider)
+            if st.session_state.ai_provider in provider_options
+            else 0
+        )
+        provider = st.radio(
+            "AI provider",
+            options=provider_options,
+            format_func=lambda p: PROVIDER_LABELS.get(p, p),
+            index=provider_idx,
+            key="ai_provider_radio",
+            horizontal=True,
+            help=(
+                "Choose which AI provider powers Hooplytics Scout, the AI "
+                "rationale in the Roster Report, and the coaching narrative. "
+                "Bring your own OpenAI or Anthropic Claude key."
+            ),
+        )
+        if provider != st.session_state.ai_provider:
+            st.session_state.ai_provider = provider
+
+        if provider == "anthropic":
+            deployment_ai_key = _deployment_anthropic_api_key()
+            key_label = "Anthropic API key"
+            key_input_widget = "session_anthropic_api_key_input"
+            key_input_placeholder = "Paste your Claude API key (sk-ant-...)"
+            sync_callback = _sync_session_anthropic_api_key
+            session_key_attr = "session_anthropic_api_key"
+            cache_clear_fn = _anthropic_connect_cached
+            keys = _ai_state_keys("anthropic")
+            model_select_widget_key = "anthropic_model_select"
+            model_help = "Auto-selects the best available Claude model on connect."
+            connect_btn_key = "anthropic_connect_btn"
+            clear_btn_key = "anthropic_clear_key_btn"
+            connect_spinner_label = "Connecting to Anthropic\u2026"
+            error_prefix = "Anthropic"
+        else:
+            deployment_ai_key = _deployment_openai_api_key()
+            key_label = "OpenAI API key"
+            key_input_widget = "session_openai_api_key_input"
+            key_input_placeholder = "Paste your OpenAI API key (sk-...)"
+            sync_callback = _sync_session_openai_api_key
+            session_key_attr = "session_openai_api_key"
+            cache_clear_fn = _openai_connect_cached
+            keys = _ai_state_keys("openai")
+            model_select_widget_key = "openai_model_select"
+            model_help = "Auto-selects the best available GPT-style model on connect."
+            connect_btn_key = "openai_connect_btn"
+            clear_btn_key = "openai_clear_key_btn"
+            connect_spinner_label = "Connecting to OpenAI\u2026"
+            error_prefix = "OpenAI"
+
+        if deployment_ai_key:
             st.caption(
-                "A deployment-configured OpenAI key is active. Paste your own key "
-                "below to override it for this session \u2014 the deployment key "
+                f"A deployment-configured {error_prefix} key is active. Paste your own "
+                "key below to override it for this session \u2014 the deployment key "
                 "is never displayed."
             )
         else:
             st.caption(
-                "Bring your own OpenAI key to enable the Hooplytics Scout tab. The key "
-                "stays in session memory and is never written to disk or logs."
+                f"Bring your own {error_prefix} key to enable the Hooplytics Scout "
+                "tab and AI prose. The key stays in session memory and is never "
+                "written to disk or logs."
             )
+
         st.text_input(
-            "OpenAI API key",
+            key_label,
             type="password",
-            key="session_openai_api_key_input",
-            on_change=_sync_session_openai_api_key,
+            key=key_input_widget,
+            on_change=sync_callback,
             label_visibility="collapsed",
-            placeholder="Paste your OpenAI API key (sk-...)",
+            placeholder=key_input_placeholder,
         )
-        openai_api_key = (
-            st.session_state.session_openai_api_key.strip() or deployment_openai_key
+        active_ai_key = (
+            (st.session_state.get(session_key_attr) or "").strip()
+            or deployment_ai_key
         )
 
-        # Auto-connect exactly once per key. Status is set to "ok"/"error" by
-        # _resolve_openai_connection so this branch cannot re-enter and cause a
-        # render loop on subsequent reruns.
-        if openai_api_key and st.session_state.openai_connect_status == "":
-            with st.spinner("Connecting to OpenAI\u2026"):
-                _resolve_openai_connection(openai_api_key)
+        # Auto-connect exactly once per key change for the active provider.
+        if active_ai_key and st.session_state[keys["status"]] == "":
+            with st.spinner(connect_spinner_label):
+                _resolve_ai_connection(active_ai_key, provider)
             st.rerun()
 
         oa_cols = st.columns(3)
         if oa_cols[0].button(
             "Reconnect",
             width="stretch",
-            disabled=not openai_api_key,
-            key="openai_connect_btn",
+            disabled=not active_ai_key,
+            key=connect_btn_key,
         ):
-            # Force a fresh discovery on explicit reconnect.
             try:
-                _openai_connect_cached.clear()  # type: ignore[attr-defined]
+                cache_clear_fn.clear()  # type: ignore[attr-defined]
             except Exception:
                 pass
-            st.session_state.openai_models = []
-            st.session_state.openai_selected_model = ""
-            st.session_state.openai_connect_status = ""
-            st.session_state.openai_connect_error = ""
-            _resolve_openai_connection(openai_api_key)
+            st.session_state[keys["models"]] = []
+            st.session_state[keys["selected_model"]] = ""
+            st.session_state[keys["status"]] = ""
+            st.session_state[keys["error"]] = ""
+            _resolve_ai_connection(active_ai_key, provider)
             st.rerun()
-        if oa_cols[1].button("Clear key", width="stretch", key="openai_clear_key_btn"):
-            st.session_state.session_openai_api_key = ""
-            st.session_state.openai_models = []
-            st.session_state.openai_selected_model = ""
-            st.session_state.openai_connect_status = ""
-            st.session_state.openai_connect_error = ""
-            # Safely reset widget-bound state.
-            for _wk in ("session_openai_api_key_input", "openai_model_select"):
+        if oa_cols[1].button("Clear key", width="stretch", key=clear_btn_key):
+            st.session_state[session_key_attr] = ""
+            st.session_state[keys["models"]] = []
+            st.session_state[keys["selected_model"]] = ""
+            st.session_state[keys["status"]] = ""
+            st.session_state[keys["error"]] = ""
+            for _wk in (key_input_widget, model_select_widget_key):
                 st.session_state.pop(_wk, None)
             try:
-                _openai_connect_cached.clear()  # type: ignore[attr-defined]
+                cache_clear_fn.clear()  # type: ignore[attr-defined]
             except Exception:
                 pass
             st.rerun()
         status_pill = (
             pill("CONNECTED", "live")
-            if st.session_state.openai_connect_status == "ok"
+            if st.session_state[keys["status"]] == "ok"
             else pill("ERROR", "warn")
-            if st.session_state.openai_connect_status == "error"
+            if st.session_state[keys["status"]] == "error"
             else pill("OFFLINE", "warn")
         )
         oa_cols[2].markdown(status_pill, unsafe_allow_html=True)
 
-        if st.session_state.openai_connect_status == "error":
+        if st.session_state[keys["status"]] == "error":
             st.caption(
-                f"OpenAI: {st.session_state.openai_connect_error or 'connection failed'}"
+                f"{error_prefix}: "
+                f"{st.session_state[keys['error']] or 'connection failed'}"
             )
 
-        models = filter_chat_models(st.session_state.openai_models or [])
-        if models != list(st.session_state.openai_models or []):
-            st.session_state.openai_models = list(models)
+        models = filter_chat_models(st.session_state[keys["models"]] or [], provider)
+        if models != list(st.session_state[keys["models"]] or []):
+            st.session_state[keys["models"]] = list(models)
         if models:
-            current = st.session_state.openai_selected_model or (
-                auto_select_model(models) or models[0]
+            current = st.session_state[keys["selected_model"]] or (
+                auto_select_model(models, provider) or models[0]
             )
             if current not in models:
                 current = models[0]
@@ -1120,10 +1285,10 @@ def _render_sidebar() -> tuple[str, str, str]:
                 "Model",
                 options=models,
                 index=models.index(current),
-                key="openai_model_select",
-                help="Auto-selects the best available GPT-style model on connect.",
+                key=model_select_widget_key,
+                help=model_help,
             )
-            st.session_state.openai_selected_model = picked
+            st.session_state[keys["selected_model"]] = picked
 
         st.checkbox(
             "Strict grounded mode (no general reasoning)",
@@ -1131,10 +1296,103 @@ def _render_sidebar() -> tuple[str, str, str]:
             help="When on, the chatbot will only answer from local Hooplytics data.",
         )
 
-    return page, api_key, openai_api_key
+        # Backwards-compat tuple values (only the OpenAI key is returned for the
+        # legacy callers; the active provider's key is resolved on demand inside
+        # each page via _active_ai_api_key()).
+        openai_api_key_for_caller = (
+            (st.session_state.get("session_openai_api_key") or "").strip()
+            or _deployment_openai_api_key()
+        )
+
+    return page, api_key, openai_api_key_for_caller
 
 
 # ── Pages ────────────────────────────────────────────────────────────────────
+
+
+def _slate_brief_cache_key(date_str: str, roster_key: str, provider: str, model: str) -> str:
+    """Stable cache key — day-bucketed so the Slate Brief regenerates daily."""
+    return f"{date_str}|{provider}|{model}|{roster_key}"
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 6, max_entries=8)
+def _cached_slate_brief(_cache_key: str, _payload_blob: str, _provider: str, _model: str) -> str:
+    """Day-cached slate brief. Underscore args bypass hashing of the connection."""
+    # Resolve a fresh connection inside the cached function so cache key is the
+    # explicit (key, payload, provider, model) tuple, not the live client object.
+    api_key = _active_ai_api_key()
+    conn = _resolve_ai_connection(api_key, _provider)
+    if conn is None:
+        return ""
+    payload = json.loads(_payload_blob)
+    return generate_slate_brief(connection=conn, model=_model, grounding_payload=payload)
+
+
+def _render_slate_brief_panel(roster: dict, api_key: str) -> None:
+    """Render the Daily Slate Brief card at the top of the home page."""
+    provider = _active_ai_provider()
+    provider_label = PROVIDER_LABELS.get(provider, "AI")
+    ai_key = _active_ai_api_key()
+    selected_model = _active_ai_selected_model()
+    if not (ai_key and selected_model):
+        return  # silently skip if AI not configured — keeps home page useful offline
+
+    edge_df = _build_edge_board(roster, api_key)
+    if not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
+        return  # need an edge board to write a brief about
+
+    today_matchups = _enrich_matchups_with_team(
+        _today_matchup_map(_roster_key()),
+        _modeling_frame(_roster_key()),
+    )
+    payload = build_grounding_payload(
+        roster=roster,
+        bundle=_bundle_for_ui(),
+        edge_df=edge_df,
+        extras={
+            "today_matchups": today_matchups,
+            "todays_slate": _todays_slate(),
+        },
+    )
+    payload_blob = json.dumps(payload, default=str, sort_keys=True)
+    today = datetime.now().strftime("%Y-%m-%d")
+    cache_key = _slate_brief_cache_key(today, _roster_key(), provider, selected_model)
+
+    st.markdown(
+        '<div class="hl-card" style="margin-top:1.25rem;">'
+        '<p class="hl-card-title">Daily Slate Brief</p>'
+        f'<p class="hl-subtle" style="margin-bottom:0.5rem;">Generated by {provider_label} '
+        f'· model {selected_model} · refreshes once per day.</p>',
+        unsafe_allow_html=True,
+    )
+    cols = st.columns([6, 1])
+    refresh_clicked = cols[1].button(
+        "Refresh",
+        key="slate_brief_refresh_btn",
+        help="Regenerate the brief now (uses one API call).",
+    )
+    if refresh_clicked:
+        try:
+            _cached_slate_brief.clear()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+    try:
+        with st.spinner("Generating brief…"):
+            brief = _cached_slate_brief(cache_key, payload_blob, provider, selected_model)
+    except Exception as exc:
+        st.caption(f"Brief unavailable: {exc}")
+        st.markdown('</div>', unsafe_allow_html=True)
+        return
+
+    if brief:
+        cols[0].markdown(
+            f'<p style="font-size:0.95rem;line-height:1.5;margin:0;">{brief}</p>',
+            unsafe_allow_html=True,
+        )
+    else:
+        cols[0].caption("No brief produced — try Refresh.")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 def page_home(roster: dict, api_key: str) -> None:
@@ -1169,6 +1427,9 @@ def page_home(roster: dict, api_key: str) -> None:
     cols[1].metric("Game rows", f"{len(modeling_df):,}")
     cols[2].metric("Models trained", len(bundle.estimators))
     cols[3].metric("Median R²", f"{median_r2:.2f}" if not np.isnan(median_r2) else "—")
+
+    # Daily AI Slate Brief — only renders when an AI provider is configured.
+    _render_slate_brief_panel(roster, api_key)
 
     # Last night's NBA results (Odds API /scores)
     _render_recent_scores_panel(api_key)
@@ -1948,6 +2209,190 @@ def _render_dashboard_explorer(signal_df: pd.DataFrame) -> None:
                 )
 
 
+def _edge_row_to_dict(row: pd.Series) -> dict[str, Any]:
+    """Compact, JSON-serializable subset of an edge row for the explainer prompt.
+
+    Accepts either the raw edge-board schema (``model``, ``side``, ``edge``,
+    ``prediction``) or the normalized signal-frame schema (``metric``,
+    ``direction``, ``gap``, ``projection``).
+    """
+    keep_keys = (
+        "player", "model", "metric", "market", "side", "direction",
+        "line", "prediction", "projection",
+        "edge", "gap", "confidence", "books", "matchup",
+    )
+    out: dict[str, Any] = {}
+    for k in keep_keys:
+        if k in row.index:
+            v = row[k]
+            try:
+                if pd.isna(v):
+                    continue
+            except (TypeError, ValueError):
+                pass
+            if isinstance(v, (int, float)):
+                out[k] = round(float(v), 3)
+            else:
+                out[k] = str(v)
+    return out
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 30, max_entries=64)
+def _cached_edge_explanation(
+    _row_blob: str,
+    _payload_blob: str,
+    _provider: str,
+    _model: str,
+    _cache_bucket: str,
+) -> str:
+    """Cache one explanation per (edge row, provider, model, day-bucket)."""
+    api_key = _active_ai_api_key()
+    conn = _resolve_ai_connection(api_key, _provider)
+    if conn is None:
+        return ""
+    edge_row = json.loads(_row_blob)
+    payload = json.loads(_payload_blob)
+    return explain_edge(
+        connection=conn, model=_model,
+        edge_row=edge_row, grounding_payload=payload,
+    )
+
+
+def _render_edge_explainer_panel(roster: dict, signal_df: pd.DataFrame) -> None:
+    """Pick any edge row → get a 2-3 sentence AI explanation."""
+    if signal_df is None or signal_df.empty:
+        return
+    provider = _active_ai_provider()
+    provider_label = PROVIDER_LABELS.get(provider, "AI")
+    ai_key = _active_ai_api_key()
+    selected_model = _active_ai_selected_model()
+
+    _section_header(
+        "Section 04.5", "AI edge explainer",
+        f"Pick any signal and get a 2-3 sentence read on why the edge exists "
+        f"and what would invalidate it. Powered by {provider_label}.",
+    )
+    if not (ai_key and selected_model):
+        st.caption(
+            f"Add a {provider_label} key in the sidebar to enable per-edge explanations."
+        )
+        return
+
+    # Build a "Player · Market · Side · Edge" label for each row, in order of
+    # absolute edge so the loudest signals come first.
+    df = signal_df.copy()
+    # Pick the gap column that exists (signal_df uses ``gap``; raw uses ``edge``).
+    gap_col = "gap" if "gap" in df.columns else ("edge" if "edge" in df.columns else None)
+    if gap_col is not None:
+        df = df.sort_values(
+            by=gap_col,
+            key=lambda s: pd.to_numeric(s, errors="coerce").abs(),
+            ascending=False,
+        )
+    options: list[tuple[str, int]] = []
+    for idx, row in df.head(40).iterrows():
+        label_parts = [str(row.get("player", "—"))]
+        # Stat/market — signal_df uses ``metric``; raw uses ``model``/``market``.
+        market = (
+            str(row.get("metric", row.get("model", row.get("market", "")))).strip()
+        )
+        if market:
+            label_parts.append(market.upper())
+        # Side: raw frame uses ``side`` ("MORE"/"LESS"); signal_frame uses
+        # ``direction`` ("Above line"/"Below line"). Map both to ABOVE/BELOW.
+        raw_side = str(row.get("side", "")).strip().lower()
+        raw_direction = str(row.get("direction", "")).strip().lower()
+        if raw_side in {"more", "above"} or "above" in raw_direction:
+            side_label = "ABOVE"
+        elif raw_side in {"less", "below", "under"} or "below" in raw_direction:
+            side_label = "BELOW"
+        else:
+            side_label = ""
+        if side_label:
+            label_parts.append(side_label)
+        # Edge magnitude — read from whichever column exists.
+        try:
+            edge_val = float(row.get(gap_col, float("nan"))) if gap_col else float("nan")
+            if not np.isnan(edge_val):
+                label_parts.append(f"{edge_val:+.2f}")
+        except (TypeError, ValueError):
+            pass
+        # Optional line for extra context.
+        try:
+            line_val = float(row.get("line", float("nan")))
+            if not np.isnan(line_val):
+                label_parts.append(f"line {line_val:g}")
+        except (TypeError, ValueError):
+            pass
+        options.append((" · ".join(label_parts), idx))
+
+    if not options:
+        st.caption("No live edge rows available to explain.")
+        return
+
+    label_to_idx = {lbl: idx for lbl, idx in options}
+    pick = st.selectbox(
+        "Pick an edge to explain",
+        options=[lbl for lbl, _ in options],
+        key="edge_explainer_pick",
+    )
+    if not pick:
+        return
+    chosen_idx = label_to_idx[pick]
+    chosen_row = df.loc[chosen_idx]
+    edge_dict = _edge_row_to_dict(chosen_row)
+
+    if st.button("Explain this edge", key="edge_explainer_btn", type="primary"):
+        # Day-bucketed cache so the same edge answered today doesn't re-bill.
+        today = datetime.now().strftime("%Y-%m-%d")
+        row_blob = json.dumps(edge_dict, sort_keys=True)
+        # Build a per-player grounding slice so the explainer has form context.
+        try:
+            edge_df_full = _build_edge_board(roster, "")  # use cached frame
+        except Exception:
+            edge_df_full = pd.DataFrame()
+        try:
+            games = _player_games(_roster_key(), str(chosen_row.get("player", "")))
+            recent_form_windows = _recent_form_windows(str(chosen_row.get("player", "")), games)
+        except Exception:
+            recent_form_windows = {}
+        today_matchups = _enrich_matchups_with_team(
+            _today_matchup_map(_roster_key()),
+            _modeling_frame(_roster_key()),
+        )
+        payload = build_grounding_payload(
+            roster={str(chosen_row.get("player", "")): roster.get(str(chosen_row.get("player", "")), [])},
+            bundle=_bundle_for_ui(),
+            edge_df=edge_df_full if isinstance(edge_df_full, pd.DataFrame) and not edge_df_full.empty else None,
+            recent_form_windows={str(chosen_row.get("player", "")): recent_form_windows} if recent_form_windows else None,
+            extras={
+                "today_matchups": {
+                    p: m for p, m in today_matchups.items()
+                    if p == str(chosen_row.get("player", ""))
+                },
+                "todays_slate": _todays_slate(),
+            },
+        )
+        payload_blob = json.dumps(payload, default=str, sort_keys=True)
+        try:
+            with st.spinner("Generating explanation…"):
+                text = _cached_edge_explanation(
+                    row_blob, payload_blob, provider, selected_model, today,
+                )
+        except Exception as exc:
+            st.error(f"Explainer failed: {exc}")
+            return
+        if text:
+            st.markdown(
+                '<div class="hl-card" style="margin-top:0.75rem;">'
+                f'<p style="font-size:0.95rem;line-height:1.55;margin:0;">{text}</p>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.caption("No explanation produced — try again or change models.")
+
+
 def page_edge_board(roster: dict, api_key: str) -> None:
     last_refresh = datetime.now().strftime("%b %d · %H:%M")
 
@@ -2064,6 +2509,9 @@ def page_edge_board(roster: dict, api_key: str) -> None:
                         "Once larger projection gaps emerge they will surface here.")
         else:
             _render_signal_cards(extreme, top_n=len(extreme))
+
+    # 6.5. AI edge explainer (only when AI provider configured)
+    _render_edge_explainer_panel(roster, signal_df)
 
     # 7. Detailed explorer
     _section_header(
@@ -3167,6 +3615,20 @@ def _recent_form_for(player: str, games: pd.DataFrame, last_n: int = 10) -> dict
     return out
 
 
+def _recent_form_windows(player: str, games: pd.DataFrame) -> dict[str, dict[str, float]]:
+    """Return explicit-window form averages so AI prose can cite the right span.
+
+    Keys are window labels (``last_5``, ``last_10``) and values are
+    ``{stat: avg}`` dicts. Empty windows are omitted.
+    """
+    out: dict[str, dict[str, float]] = {}
+    for label, n in (("last_5", 5), ("last_10", 10)):
+        avgs = _recent_form_for(player, games, last_n=n)
+        if avgs:
+            out[label] = avgs
+    return out
+
+
 # Mapping from Odds API market name to the box-score stat column used to score
 # the line as an Over / Under outcome in the report's "Lines vs Outcomes" panel.
 _HISTORY_MODEL_TO_STAT: dict[str, str] = {
@@ -3495,16 +3957,14 @@ def page_report(roster: dict, api_key: str) -> None:
         )
         return
 
-    # Resolve OpenAI connection (optional — both reports are useful without prose).
-    openai_api_key = (
-        (st.session_state.get("session_openai_api_key") or "").strip()
-        or _deployment_openai_api_key()
-    )
-    conn: OpenAIConnection | None = None
-    if openai_api_key:
-        conn = _resolve_openai_connection(openai_api_key)
+    # Resolve AI connection (optional — both reports are useful without prose).
+    # Honors the active provider (OpenAI or Anthropic) selected in the sidebar.
+    conn: AIConnection | None = None
+    ai_api_key = _active_ai_api_key()
+    if ai_api_key:
+        conn = _resolve_active_ai_connection()
 
-    selected_model = st.session_state.get("openai_selected_model") or ""
+    selected_model = _active_ai_selected_model()
     has_chat = bool(conn and selected_model)
 
     # ── Report-type selector (default: Game Projections — preserves existing UX) ──
@@ -3530,23 +3990,24 @@ def page_report(roster: dict, api_key: str) -> None:
 def _render_projections_report(
     roster: dict,
     api_key: str,
-    conn: OpenAIConnection | None,
+    conn: AIConnection | None,
     selected_model: str,
     has_chat: bool,
 ) -> None:
+    provider_label = PROVIDER_LABELS.get(_active_ai_provider(), "AI")
     # ── Configuration card ─────────────────────────────────────────────────
     with st.container():
         cols = st.columns([2, 1, 1])
         include_ai = cols[0].toggle(
-            "Include AI-written rationale (uses OpenAI)",
+            f"Include AI-written rationale (uses {provider_label})",
             value=has_chat,
             disabled=not has_chat,
             help=(
                 "Generates an executive summary, slate outlook, and a paragraph "
-                "of analyst-style rationale per player using your configured "
-                "OpenAI key. One API call per export."
+                f"of analyst-style rationale per player using your configured "
+                f"{provider_label} key. One API call per export."
                 if has_chat
-                else "Add an OpenAI key in the sidebar to enable AI prose."
+                else f"Add a {provider_label} key in the sidebar to enable AI prose."
             ),
         )
         cols[1].markdown(
@@ -3554,7 +4015,7 @@ def _render_projections_report(
             unsafe_allow_html=True,
         )
         cols[2].caption(
-            f"Model · {selected_model}" if has_chat else "Add OpenAI key for prose"
+            f"Model · {selected_model}" if has_chat else f"Add {provider_label} key for prose"
         )
 
     # ── Preview / status ───────────────────────────────────────────────────
@@ -3622,6 +4083,7 @@ def _render_projections_report(
 
     projections: dict[str, pd.DataFrame] = {}
     recent_form: dict[str, dict[str, float]] = {}
+    recent_form_windows: dict[str, dict[str, dict[str, float]]] = {}
     player_games: dict[str, pd.DataFrame] = {}
     progress = st.progress(0.0, text="Computing projections…")
     players = list(roster.keys())
@@ -3641,6 +4103,9 @@ def _render_projections_report(
         try:
             games = _player_games(_roster_key(), player)
             recent_form[player] = _recent_form_for(player, games)
+            windows = _recent_form_windows(player, games)
+            if windows:
+                recent_form_windows[player] = windows
             if isinstance(games, pd.DataFrame) and not games.empty:
                 player_games[player] = games
         except Exception:
@@ -3663,6 +4128,7 @@ def _render_projections_report(
                     edge_df=edge_df if isinstance(edge_df, pd.DataFrame) and not edge_df.empty else None,
                     projections=projections or None,
                     recent_form=recent_form or None,
+                    recent_form_windows=recent_form_windows or None,
                     extras={
                         "today_matchups": today_matchups,
                         "todays_slate": _todays_slate(),
@@ -3712,7 +4178,7 @@ def _render_projections_report(
 
 def _render_performance_report(
     roster: dict,
-    conn: OpenAIConnection | None,
+    conn: AIConnection | None,
     selected_model: str,
     has_chat: bool,
 ) -> None:
@@ -3723,19 +4189,20 @@ def _render_performance_report(
     usage trends, hot/cold streak detection, and an optional AI-written
     coaching note per player. No betting/edge content.
     """
+    provider_label = PROVIDER_LABELS.get(_active_ai_provider(), "AI")
     # ── Configuration row ──────────────────────────────────────────────────
     with st.container():
         cols = st.columns([2, 1, 1])
         include_ai = cols[0].toggle(
-            "Include AI coaching narrative (uses OpenAI)",
+            f"Include AI coaching narrative (uses {provider_label})",
             value=has_chat,
             disabled=not has_chat,
             help=(
                 "Generates a roster overview plus per-player strengths, "
                 "growth areas, and a coaching focus paragraph using your "
-                "configured OpenAI key. One API call per export."
+                f"configured {provider_label} key. One API call per export."
                 if has_chat
-                else "Add an OpenAI key in the sidebar to enable AI prose."
+                else f"Add a {provider_label} key in the sidebar to enable AI prose."
             ),
             key="perf_report_include_ai",
         )
@@ -3744,7 +4211,7 @@ def _render_performance_report(
             unsafe_allow_html=True,
         )
         cols[2].caption(
-            f"Model · {selected_model}" if has_chat else "Add OpenAI key for prose"
+            f"Model · {selected_model}" if has_chat else f"Add {provider_label} key for prose"
         )
 
     # ── Quick preview metrics ──────────────────────────────────────────────
@@ -3807,13 +4274,17 @@ def _render_performance_report(
                     _today_matchup_map(_roster_key()),
                     modeling_df,
                 )
-                # Build a recent-form mapping that mirrors the projections
-                # report's payload contract; the LLM uses it as anchor data.
+                # Build recent-form mappings that mirror the projections
+                # report's payload contract; the LLM uses these as anchor data.
                 recent_form: dict[str, dict[str, float]] = {}
+                recent_form_windows: dict[str, dict[str, dict[str, float]]] = {}
                 for player, games in player_games.items():
                     rf = _recent_form_for(player, games)
                     if rf:
                         recent_form[player] = rf
+                    windows = _recent_form_windows(player, games)
+                    if windows:
+                        recent_form_windows[player] = windows
 
                 # Compact summary for the LLM grounding payload.
                 perf_summary_compact: dict[str, dict[str, Any]] = {}
@@ -3854,6 +4325,7 @@ def _render_performance_report(
                     roster=roster,
                     bundle=_bundle_for_ui(),
                     recent_form=recent_form or None,
+                    recent_form_windows=recent_form_windows or None,
                     extras={
                         "today_matchups": today_matchups,
                         "todays_slate": _todays_slate(),
@@ -3900,12 +4372,17 @@ def _render_performance_report(
 
 
 def page_chatbot(roster: dict, api_key: str) -> None:
-    openai_api_key = (
-        (st.session_state.get("session_openai_api_key") or "").strip()
-        or _deployment_openai_api_key()
+    provider = _active_ai_provider()
+    provider_label = PROVIDER_LABELS.get(provider, "AI")
+    ai_api_key = _active_ai_api_key()
+    keys = _ai_state_keys(provider)
+    keys_url = (
+        "console.anthropic.com/settings/keys"
+        if provider == "anthropic"
+        else "platform.openai.com/api-keys"
     )
 
-    if not openai_api_key:
+    if not ai_api_key:
         # ── Beautiful landing state ──────────────────────────────────────────
         st.markdown(
             '<div class="hl-scout-landing">'
@@ -3918,7 +4395,7 @@ def page_chatbot(roster: dict, api_key: str) -> None:
             '<div class="hl-scout-step">'
             '<div class="hl-scout-step-num">1</div>'
             '<div class="hl-scout-step-text">Get an API key at '
-            "<strong>platform.openai.com/api-keys</strong></div>"
+            f"<strong>{keys_url}</strong></div>"
             "</div>"
             '<div class="hl-scout-step">'
             '<div class="hl-scout-step-num">2</div>'
@@ -3944,22 +4421,22 @@ def page_chatbot(roster: dict, api_key: str) -> None:
             insight_card("Model insight", "R\u00b2 quality checks and 5-game player form trends.", icon="\u25cb")
         return
 
-    connection = _resolve_openai_connection(openai_api_key)
+    connection = _resolve_ai_connection(ai_api_key, provider)
     if connection is None:
-        err = st.session_state.get("openai_connect_error", "")
+        err = st.session_state.get(keys["error"], "")
         st.markdown(
             '<div class="hl-scout-hero" style="border-color:rgba(255,107,107,0.28);'
             'background:linear-gradient(160deg,rgba(255,107,107,0.07),rgba(255,255,255,0));">'
             '<div class="hl-scout-hero-eyebrow" style="color:var(--hl-neg);">'
             "\u26a0 CONNECTION ERROR</div>"
-            '<h2 style="font-size:1.3rem;color:var(--hl-neg);">Could not reach OpenAI</h2>'
+            f'<h2 style="font-size:1.3rem;color:var(--hl-neg);">Could not reach {provider_label}</h2>'
             f"<p>{err or 'Click Connect in the sidebar to retry. Verify your API key has access.'}</p>"
             "</div>",
             unsafe_allow_html=True,
         )
         return
 
-    model = st.session_state.get("openai_selected_model", "") or (
+    model = st.session_state.get(keys["selected_model"], "") or (
         connection.default_model or ""
     )
     if not model:
@@ -4070,7 +4547,7 @@ def page_chatbot(roster: dict, api_key: str) -> None:
             history.append(
                 {
                     "role": "assistant",
-                    "content": f"OpenAI error: {exc}",
+                    "content": f"{provider_label} error: {exc}",
                     "evidence": [],
                 }
             )

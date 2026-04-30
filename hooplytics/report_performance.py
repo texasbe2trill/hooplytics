@@ -68,6 +68,7 @@ from hooplytics.report import (
     POS_GREEN,
     WHITE,
     String,
+    _ActivePlayerMarker,
     _AnchorFlowable,
     _BODY_FONT,
     _BOLD_FONT,
@@ -548,6 +549,153 @@ def _comparison_radar(
     return d
 
 
+def _recent_games_tiles(
+    games: pd.DataFrame,
+    summary: dict[str, Any],
+    *,
+    width: float = 7.0 * inch,
+    height: float = 1.5 * inch,
+    last_n: int = 10,
+) -> Drawing | None:
+    """Last-N games as a horizontal strip of mini-tiles.
+
+    Each tile shows date, opponent (3-letter abbreviation), the player's PTS
+    in large color-coded type (green = above season avg, red = below, ink =
+    neutral), a thin bar showing PTS as a fraction of season ceiling, and a
+    REB · AST line. Sized to fill the gap below the Consistency strip when
+    the role/coaching block is bumped to a fresh page.
+    """
+    if not isinstance(games, pd.DataFrame) or games.empty:
+        return None
+    if "pts" not in games.columns:
+        return None
+
+    df = games.copy()
+    if "game_date" in df.columns:
+        df["_date"] = pd.to_datetime(df["game_date"], errors="coerce")
+        df = df.sort_values("_date").tail(last_n).reset_index(drop=True)
+    else:
+        df = df.tail(last_n).reset_index(drop=True)
+
+    if df.empty:
+        return None
+
+    n = len(df)
+    pts_season = (
+        (summary or {}).get("kpis", {}).get("pts", {}).get("season_avg")
+    )
+    try:
+        pts_season = float(pts_season) if pts_season is not None else 0.0
+    except (TypeError, ValueError):
+        pts_season = 0.0
+    pts_max_data = float(pd.to_numeric(df["pts"], errors="coerce").max() or 0.0)
+    # Max scale: top of the largest of (season ceiling × 1.4, recent max, 25).
+    pts_max = max(pts_season * 1.4, pts_max_data, 25.0)
+
+    d = Drawing(width, height)
+    # Outer panel
+    d.add(Rect(0, 0, width, height,
+               strokeColor=PANEL_BORDER, strokeWidth=0.4, fillColor=WHITE))
+
+    pad_t, pad_b = 4, 4
+    tile_w = width / n
+    inner_h = height - pad_t - pad_b
+
+    # Color thresholds for PTS — green if 1+ pt above season, red if 1+ below.
+    pos_color = colors.HexColor("#1f9d6c")
+    neg_color = colors.HexColor("#cc5a00")
+    track_color = colors.HexColor("#f1efe9")
+
+    for i, row in df.iterrows():
+        x_left = i * tile_w
+        x_mid = x_left + tile_w / 2
+        y_bot = pad_b
+        y_top = height - pad_t
+
+        # Hairline divider between tiles
+        if i > 0:
+            d.add(Line(x_left, y_bot + 4, x_left, y_top - 4,
+                       strokeColor=PANEL_BORDER, strokeWidth=0.3))
+
+        # Date (top)
+        date_val = row.get("_date") if "_date" in df.columns else None
+        try:
+            date_str = date_val.strftime("%m/%d") if pd.notna(date_val) else "—"
+        except (AttributeError, ValueError):
+            date_str = "—"
+        d.add(String(x_mid, y_top - 9, date_str,
+                     fontName=_BODY_FONT, fontSize=6.5,
+                     fillColor=INK_MUTED, textAnchor="middle"))
+
+        # Opponent (3-letter abbr from MATCHUP "TM @ OPP" or "TM vs. OPP")
+        opp = ""
+        prefix = ""
+        if "MATCHUP" in df.columns:
+            m = str(row.get("MATCHUP", "") or "")
+            tokens = m.replace("vs.", "vs").split()
+            if len(tokens) >= 3:
+                opp = tokens[-1][:3].upper()
+                # "@" indicates away game; "vs" indicates home.
+                prefix = "@" if "@" in m else "vs"
+        if opp:
+            d.add(String(x_mid, y_top - 20,
+                         f"{prefix} {opp}".strip(),
+                         fontName=_BOLD_FONT, fontSize=7.5,
+                         fillColor=INK_DARK, textAnchor="middle"))
+
+        # PTS (big number, color-coded vs season avg)
+        try:
+            pts_v = float(row.get("pts", 0) or 0.0)
+        except (TypeError, ValueError):
+            pts_v = 0.0
+        if pts_season > 0:
+            if pts_v >= pts_season + 1.5:
+                pts_color = pos_color
+            elif pts_v <= pts_season - 1.5:
+                pts_color = neg_color
+            else:
+                pts_color = INK_DARK
+        else:
+            pts_color = INK_DARK
+        d.add(String(x_mid, y_bot + inner_h * 0.42,
+                     f"{int(round(pts_v))}",
+                     fontName=_BOLD_FONT, fontSize=18,
+                     fillColor=pts_color, textAnchor="middle"))
+        # Tiny "PTS" caption directly below the number so the metric is
+        # unmistakable even when scanning a single tile out of context.
+        d.add(String(x_mid, y_bot + inner_h * 0.42 - 9,
+                     "PTS",
+                     fontName=_BOLD_FONT, fontSize=6,
+                     fillColor=INK_FAINT, textAnchor="middle"))
+
+        # PTS bar (track + fill) — narrow, just below the big number
+        bar_y = y_bot + 16
+        bar_h = 4
+        bar_max_w = tile_w - 16
+        bar_x = x_left + 8
+        d.add(Rect(bar_x, bar_y, bar_max_w, bar_h,
+                   strokeColor=None, fillColor=track_color))
+        bar_w = bar_max_w * max(0.0, min(1.0, pts_v / pts_max))
+        d.add(Rect(bar_x, bar_y, bar_w, bar_h,
+                   strokeColor=None, fillColor=pts_color))
+
+        # REB · AST below the bar
+        try:
+            reb_v = float(row.get("reb", 0) or 0.0)
+        except (TypeError, ValueError):
+            reb_v = 0.0
+        try:
+            ast_v = float(row.get("ast", 0) or 0.0)
+        except (TypeError, ValueError):
+            ast_v = 0.0
+        d.add(String(x_mid, y_bot + 4,
+                     f"{int(round(reb_v))}r · {int(round(ast_v))}a",
+                     fontName=_BODY_FONT, fontSize=7,
+                     fillColor=INK_MUTED, textAnchor="middle"))
+
+    return d
+
+
 def _distribution_strip(
     summary: dict[str, Any],
     *,
@@ -1021,25 +1169,34 @@ def _trend_cell(games: pd.DataFrame, col: str, label: str, summary: dict[str, An
         f"&nbsp;&nbsp;<font size='7' color='#6b7686'>SEASON {season_t} · L10 {recent_t}{delta_html}</font>",
         ParagraphStyle("spark_head", parent=styles["body"], leading=11, textColor=INK_BODY),
     )
-    chart = _trend_sparkline(s.tail(20), width=3.3 * inch, height=0.55 * inch)
+    chart = _trend_sparkline(s.tail(20), width=3.3 * inch, height=0.45 * inch)
     cell = Table([[header], [chart]], colWidths=[3.3 * inch], rowHeights=[0.18 * inch, None])
     cell.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), WHITE),
         ("BOX", (0, 0), (-1, -1), 0.4, PANEL_BORDER),
         ("LEFTPADDING", (0, 0), (-1, -1), 8),
         ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-        ("TOPPADDING", (0, 0), (0, 0), 6),
-        ("BOTTOMPADDING", (0, 0), (0, 0), 2),
+        ("TOPPADDING", (0, 0), (0, 0), 4),
+        ("BOTTOMPADDING", (0, 0), (0, 0), 1),
         ("TOPPADDING", (0, 1), (0, 1), 0),
-        ("BOTTOMPADDING", (0, 1), (0, 1), 6),
+        ("BOTTOMPADDING", (0, 1), (0, 1), 4),
     ]))
     return cell
 
 
 def _trend_panel(games: pd.DataFrame, summary: dict[str, Any], styles: dict) -> Table | None:
-    """Two-column grid of richer sparkline cards (last 20 games)."""
+    """Two-column grid of richer sparkline cards (last 20 games).
+
+    Trend shows the six primary stats only — STL and BLK already appear in
+    the Activity Rings and the Hot/Cold table, so duplicating them here just
+    consumed vertical real estate. Three rows × two columns keeps Page A
+    within budget so the Recent Points tiles can fit on the same page.
+    """
+    primary_stats = {"pts", "reb", "ast", "pra", "min", "fantasy_score"}
     cells: list[Any] = []
     for col, label in _KPI_STATS:
+        if col not in primary_stats:
+            continue
         c = _trend_cell(games, col, label, summary, styles)
         if c is not None:
             cells.append(c)
@@ -1055,8 +1212,8 @@ def _trend_panel(games: pd.DataFrame, summary: dict[str, Any], styles: dict) -> 
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LEFTPADDING", (0, 0), (-1, -1), 0),
         ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
     ]))
     return t
 
@@ -1248,12 +1405,12 @@ def _coaching_hero_cards(
     # style, so Paragraphs render into (col_w - 16) of usable width.
     body_style = ParagraphStyle(
         "coach_card_body", parent=styles["body"], fontName=_BODY_FONT,
-        fontSize=8.2, leading=11.5, textColor=INK_BODY, alignment=TA_LEFT,
+        fontSize=7.7, leading=10.4, textColor=INK_BODY, alignment=TA_LEFT,
     )
     head_style = ParagraphStyle(
         "coach_card_head", parent=styles["body"], fontName=_BOLD_FONT,
-        fontSize=8.0, leading=11, textColor=INK_BODY, alignment=TA_LEFT,
-        spaceAfter=2,
+        fontSize=8.0, leading=10, textColor=INK_BODY, alignment=TA_LEFT,
+        spaceAfter=1,
     )
 
     def _build(label: str, body: str, accent: colors.Color) -> Table:
@@ -1267,12 +1424,12 @@ def _coaching_hero_cards(
             ("BACKGROUND", (0, 0), (-1, -1), WHITE),
             ("BOX", (0, 0), (-1, -1), 0.4, PANEL_BORDER),
             ("LINEABOVE", (0, 0), (-1, 0), 2.0, accent),
-            ("LEFTPADDING", (0, 0), (-1, -1), 8),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-            ("TOPPADDING", (0, 0), (-1, 0), 8),
-            ("BOTTOMPADDING", (0, 0), (-1, 0), 4),
+            ("LEFTPADDING", (0, 0), (-1, -1), 7),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+            ("TOPPADDING", (0, 0), (-1, 0), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, 0), 2),
             ("TOPPADDING", (0, 1), (-1, 1), 0),
-            ("BOTTOMPADDING", (0, 1), (-1, 1), 8),
+            ("BOTTOMPADDING", (0, 1), (-1, 1), 6),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ]))
         return card
@@ -1572,36 +1729,75 @@ def _roster_overview_flowables(
         flow.append(_html_callout_box([_safe_text(ai_overview)], styles, accent=BRAND_ORANGE))
         flow.append(Spacer(1, 8))
 
-    # Snapshot table: per-player season averages across primary stats.
+    # Snapshot table: per-player season averages PLUS L10 averages so the
+    # AI prose's "over his last 10" claims line up with what the table shows.
+    # Each stat cell renders as two stacked numbers: large = season, small = L10.
+    cell_style = ParagraphStyle(
+        "perf_overview_cell",
+        fontName=_BODY_FONT,
+        fontSize=9,
+        leading=10.5,
+        textColor=INK_DARK,
+        alignment=TA_CENTER,
+        spaceBefore=0,
+        spaceAfter=0,
+    )
+
     rows: list[list[Any]] = [
-        ["Player", "GP", "PTS", "REB", "AST", "PRA", "MIN", "FAN", "TS%"],
+        ["Player", "GP",
+         Paragraph(f"<font size='8' color='#7e7e7e'>SEASON · L10</font><br/>"
+                   f"<font name='{_BOLD_FONT}' size='9'>PTS</font>", cell_style),
+         Paragraph(f"<font size='8' color='#7e7e7e'>SEASON · L10</font><br/>"
+                   f"<font name='{_BOLD_FONT}' size='9'>REB</font>", cell_style),
+         Paragraph(f"<font size='8' color='#7e7e7e'>SEASON · L10</font><br/>"
+                   f"<font name='{_BOLD_FONT}' size='9'>AST</font>", cell_style),
+         Paragraph(f"<font size='8' color='#7e7e7e'>SEASON · L10</font><br/>"
+                   f"<font name='{_BOLD_FONT}' size='9'>PRA</font>", cell_style),
+         Paragraph(f"<font size='8' color='#7e7e7e'>SEASON · L10</font><br/>"
+                   f"<font name='{_BOLD_FONT}' size='9'>MIN</font>", cell_style),
+         Paragraph(f"<font size='8' color='#7e7e7e'>SEASON · L10</font><br/>"
+                   f"<font name='{_BOLD_FONT}' size='9'>FAN</font>", cell_style),
+         "TS%"],
     ]
     for player in roster.keys():
         s = summaries.get(player) or {}
         kpis = s.get("kpis", {})
         shoot = s.get("shooting", {})
 
-        def _val(col: str) -> str:
-            v = kpis.get(col, {}).get("season_avg")
-            if v is None or (isinstance(v, float) and math.isnan(v)):
-                return "—"
-            return f"{v:.1f}"
+        def _two_line(col: str) -> Paragraph:
+            info = kpis.get(col, {}) or {}
+            sv = info.get("season_avg")
+            rv = info.get("recent_avg")
+
+            def _fmt(v: Any) -> str:
+                if v is None or (isinstance(v, float) and math.isnan(v)):
+                    return "—"
+                return f"{v:.1f}"
+
+            season_str = _fmt(sv)
+            l10_str = _fmt(rv)
+            return Paragraph(
+                f"<font name='{_BOLD_FONT}' size='10'>{season_str}</font>"
+                f"<font color='#9a9a9a'> · </font>"
+                f"<font color='#7e7e7e' size='8.5'>{l10_str}</font>",
+                cell_style,
+            )
 
         ts = shoot.get("ts_pct")
         ts_text = "—" if ts is None or (isinstance(ts, float) and math.isnan(ts)) else f"{ts*100:.1f}%"
         rows.append([
             _safe_text(player),
             str(s.get("games_played", 0)),
-            _val("pts"), _val("reb"), _val("ast"), _val("pra"),
-            _val("min"), _val("fantasy_score"), ts_text,
+            _two_line("pts"), _two_line("reb"), _two_line("ast"), _two_line("pra"),
+            _two_line("min"), _two_line("fantasy_score"), ts_text,
         ])
 
     if len(rows) > 1:
         t = _styled_table(
             rows,
-            col_widths=[1.7 * inch, 0.5 * inch, 0.55 * inch, 0.55 * inch,
-                        0.55 * inch, 0.55 * inch, 0.55 * inch, 0.55 * inch, 0.65 * inch],
-            align_right_cols=[1, 2, 3, 4, 5, 6, 7, 8],
+            col_widths=[1.7 * inch, 0.4 * inch, 0.65 * inch, 0.65 * inch,
+                        0.65 * inch, 0.65 * inch, 0.65 * inch, 0.65 * inch, 0.55 * inch],
+            align_right_cols=[1, 8],
         )
         flow.append(t)
         flow.append(Spacer(1, 12))
@@ -1686,6 +1882,9 @@ def _player_profile_flowables(
     flow.append(PageBreak())
     # Bookmark this page so the cover roster can deep-link to it.
     flow.append(_AnchorFlowable(_player_anchor_key(player), player, level=0))
+    # Stamp the active player on the canvas so the page chrome renders the
+    # player's name in the header band on every page of this section.
+    flow.append(_ActivePlayerMarker(player))
     # The dark hero band is the player title — no separate section header so
     # we don’t double up on the player name.
     flow.append(_player_hero_band(player, summary, games, styles))
@@ -1770,7 +1969,27 @@ def _player_profile_flowables(
         flow.append(trend)
     else:
         flow.append(_para("Not enough recent games to plot trends.", styles["muted"]))
-    flow.append(Spacer(1, 10))
+    flow.append(Spacer(1, 8))
+
+    # Recent points by game — fills the bottom of page A. Each tile is a
+    # game in chronological order with the player's POINTS in big type plus
+    # date, opponent, and a compact REB | AST footer. The eyebrow names the
+    # metric explicitly so a reader skimming the page never has to guess
+    # what the big numbers represent.
+    tiles = _recent_games_tiles(games, summary, width=7.0 * inch, height=1.4 * inch)
+    if tiles is not None:
+        tiles_wrap = Table([[tiles]], colWidths=[7.0 * inch])
+        tiles_wrap.setStyle(TableStyle([
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        flow.append(KeepTogether([
+            _para("POINTS BY GAME · LAST 10", styles["eyebrow"]),
+            Spacer(1, 2),
+            tiles_wrap,
+        ]))
 
     # ─── PAGE 2: shooting + radar, consistency, role + hot/cold, coaching
     flow.append(PageBreak())
@@ -1790,12 +2009,12 @@ def _player_profile_flowables(
         summary.get("shooting", {}) if summary else {},
         baseline_shoot or None,
         width=3.4 * inch,
-        height=1.6 * inch,
+        height=1.35 * inch,
     )
     radar_drawing = _radar_chart(
         _radar_components(summary, roster_baseline),
         width=3.4 * inch,
-        height=1.9 * inch,
+        height=1.55 * inch,
     )
     side_by_side = Table(
         [[shoot_drawing, radar_drawing]],
@@ -1807,8 +2026,8 @@ def _player_profile_flowables(
         ("BOX", (0, 0), (-1, -1), 0.4, PANEL_BORDER),
         ("LEFTPADDING", (0, 0), (-1, -1), 8),
         ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-        ("TOPPADDING", (0, 0), (-1, -1), 8),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
         ("LINEBETWEEN", (0, 0), (0, -1), 0.4, PANEL_BORDER),
     ]))
     flow.append(KeepTogether([
@@ -1816,24 +2035,24 @@ def _player_profile_flowables(
         Spacer(1, 2),
         side_by_side,
     ]))
-    flow.append(Spacer(1, 6))
+    flow.append(Spacer(1, 4))
 
     # Consistency strip.
-    dist = _distribution_strip(summary, width=7.0 * inch, height=1.55 * inch)
+    dist = _distribution_strip(summary, width=7.0 * inch, height=1.25 * inch)
     dist_table = Table([[dist]], colWidths=[7.0 * inch])
     dist_table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), WHITE),
         ("BOX", (0, 0), (-1, -1), 0.4, PANEL_BORDER),
         ("LEFTPADDING", (0, 0), (-1, -1), 4),
         ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-        ("TOPPADDING", (0, 0), (-1, -1), 6),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
     ]))
     flow.append(KeepTogether([
         _para("CONSISTENCY · FLOOR / MEDIAN / CEILING", styles["eyebrow"]),
         dist_table,
     ]))
-    flow.append(Spacer(1, 6))
+    flow.append(Spacer(1, 4))
 
     # Role / usage table + hot/cold table side by side to use full width.
     role_rows: list[list[Any]] = [["", "Season", "Last 10", "Δ"]]
@@ -1887,6 +2106,11 @@ def _player_profile_flowables(
             Spacer(1, 2),
             hot,
         ])
+    # Build a single bottom-half block: role/hot tables side-by-side AT TOP,
+    # then COACHING NOTE cards directly underneath. The whole thing is wrapped
+    # in one KeepTogether so it always lands on the same page — we never get
+    # the "tables on page N, coaching note orphaned on page N+1" split.
+    bottom_block: list[Any] = []
     if pair_cells:
         if len(pair_cells) == 2:
             cell_l = Table([[x] for x in pair_cells[0]], colWidths=[3.4 * inch])
@@ -1904,24 +2128,23 @@ def _player_profile_flowables(
                 ("LEFTPADDING", (0, 0), (-1, -1), 0),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 0),
             ]))
-            flow.append(KeepTogether(pair))
-            flow.append(Spacer(1, 6))
+            bottom_block.append(pair)
         else:
             for blk in pair_cells:
-                for item in blk:
-                    flow.append(item)
-                flow.append(Spacer(1, 6))
+                bottom_block.extend(blk)
 
-    # Coaching narrative as three accent-topped hero cards (Strengths /
-    # Growth / Focus). Falls back to a deterministic version when no AI
-    # section is present. Appended inline (no KeepTogether wrap) so the
-    # cards flow directly under the role/hot tables instead of getting
-    # bumped to a fresh page.
     cards = _coaching_hero_cards(summary, ai_section, styles, total_width=7.0 * inch)
     if cards is not None:
-        flow.append(_para("COACHING NOTE", styles["eyebrow"]))
-        flow.append(Spacer(1, 3))
-        flow.append(cards)
+        if bottom_block:
+            bottom_block.append(Spacer(1, 5))
+        bottom_block.extend([
+            _para("COACHING NOTE", styles["eyebrow"]),
+            Spacer(1, 2),
+            cards,
+        ])
+
+    if bottom_block:
+        flow.append(KeepTogether(bottom_block))
     return flow
 
 
@@ -2027,7 +2250,11 @@ def build_player_performance_report(
         PageTemplate(
             id="perf_body",
             frames=[body_frame],
-            onPage=lambda c, d: _draw_page_chrome(c, d, meta),
+            # ``onPageEnd`` fires AFTER flowables are placed so the chrome
+            # reads the latest ``_hl_active_player`` set by an
+            # ``_ActivePlayerMarker`` on this page (rather than a stale
+            # value from the previous page). Visual layout is unchanged.
+            onPageEnd=lambda c, d: _draw_page_chrome(c, d, meta),
         ),
     ])
 

@@ -158,6 +158,7 @@ class OpenAIConnection:
     client: Any
     models: list[str] = field(default_factory=list)
     default_model: str | None = None
+    provider: str = "openai"
 
 
 def _import_openai():
@@ -224,12 +225,19 @@ def build_grounding_payload(
     edge_df: pd.DataFrame | None = None,
     projections: dict[str, pd.DataFrame] | None = None,
     recent_form: dict[str, dict[str, float]] | None = None,
+    recent_form_windows: dict[str, dict[str, dict[str, float]]] | None = None,
     extras: dict[str, Any] | None = None,
     edge_limit: int = 60,
     projection_limit: int = 8,
     per_player_edge_limit: int = 8,
 ) -> dict[str, Any]:
-    """Assemble a compact, JSON-friendly payload for prompt grounding."""
+    """Assemble a compact, JSON-friendly payload for prompt grounding.
+
+    ``recent_form`` (legacy) is treated as the L10 averages.
+    ``recent_form_windows`` (preferred) is ``{player: {window_label: {stat: avg}}}``
+    where ``window_label`` is e.g. ``"last_5"`` or ``"last_10"``. When both are
+    supplied, ``recent_form_windows`` wins.
+    """
     payload: dict[str, Any] = {}
 
     if roster:
@@ -286,9 +294,29 @@ def build_grounding_payload(
         if proj_out:
             payload["projections"] = proj_out
 
-    if recent_form:
-        # Round to one decimal so the prompt body stays compact.
-        rf_out: dict[str, dict[str, float]] = {}
+    # Prefer the explicit windowed form when supplied; otherwise treat the
+    # legacy ``recent_form`` arg as the L10 averages so existing call sites
+    # keep behaving identically.
+    windowed: dict[str, dict[str, dict[str, float]]] = {}
+    if recent_form_windows:
+        for player, windows in recent_form_windows.items():
+            if not isinstance(windows, dict):
+                continue
+            cleaned_windows: dict[str, dict[str, float]] = {}
+            for label, stats in windows.items():
+                if not isinstance(stats, dict):
+                    continue
+                cleaned: dict[str, float] = {}
+                for k, v in stats.items():
+                    try:
+                        cleaned[str(k)] = round(float(v), 2)
+                    except (TypeError, ValueError):
+                        continue
+                if cleaned:
+                    cleaned_windows[str(label)] = cleaned
+            if cleaned_windows:
+                windowed[player] = cleaned_windows
+    elif recent_form:
         for player, stats in recent_form.items():
             if not isinstance(stats, dict):
                 continue
@@ -299,14 +327,55 @@ def build_grounding_payload(
                 except (TypeError, ValueError):
                     continue
             if cleaned:
-                rf_out[player] = cleaned
-        if rf_out:
-            payload["recent_form"] = rf_out
+                windowed[player] = {"last_10": cleaned}
+
+    if windowed:
+        # Keep legacy ``recent_form`` key (= last_10) for any downstream prompt
+        # template that still references it, plus the explicit windowed shape
+        # so newer prompts can cite the right span.
+        payload["recent_form_by_window"] = windowed
+        payload["recent_form"] = {
+            player: windows.get("last_10") or next(iter(windows.values()))
+            for player, windows in windowed.items()
+        }
 
     if extras:
         payload["extras"] = extras
 
     return payload
+
+
+_DATA_DICTIONARY = """\
+DATA DICTIONARY (read this BEFORE writing prose — do not invent fields):
+- roster.players: full list of players this report covers.
+- model_bundle.metrics: per-target R²/RMSE for the trained model. Use to talk \
+about model trust, not as player stats.
+- edges_top: rows from the live edge board, sorted by |edge| desc. Each row's \
+'edge' is signed (+ = MORE/ABOVE, - = LESS/BELOW); 'line' is the posted \
+sportsbook line; 'prediction' is the raw model projection. The 'adj. \
+threshold' column is internal only — DO NOT MENTION IT in prose.
+- edges_by_player[player]: same rows filtered to one player.
+- projections[player]: the raw next-game model projections for that player. \
+Use the 'prediction' value for "model lands at X" framing.
+- recent_form[player]: the player's L10 (last-10-game) averages. Window is \
+ALWAYS L10 here.
+- recent_form_by_window[player]: explicit window mapping, e.g. \
+{"last_5": {...}, "last_10": {...}}. When you cite a number from a window, \
+NAME the window in prose ("over his last 5", "over the last 10").
+- extras.today_matchups[player]: tonight's opponent + home/away for that \
+player. Authoritative — never guess opponents.
+- extras.todays_slate: tonight's full NBA slate.
+
+NUMERIC CITATION RULES:
+1. Every number you cite must appear verbatim in LOCAL CONTEXT or be a \
+trivial restatement (e.g. line - prediction → edge magnitude). Do NOT round \
+8.0 to "9", do NOT round 19.3 to "20" — write 8.0, 19.3.
+2. If a stat for a player isn't in LOCAL CONTEXT, omit the topic. Never \
+estimate, never carry numbers from your training data.
+3. Never write the strings "adj. threshold", "adjusted threshold", \
+"adjusted line", or any related framing — they confuse the reader because \
+the printed report does not show that column.
+"""
 
 
 def format_grounding_block(payload: dict[str, Any]) -> str:
@@ -317,7 +386,12 @@ def format_grounding_block(payload: dict[str, Any]) -> str:
     # Cap context size to keep prompts predictable. ~16k chars ≈ ~4k tokens.
     if len(body) > 16000:
         body = body[:16000] + "\n... [truncated]"
-    return "LOCAL CONTEXT (authoritative):\n```json\n" + body + "\n```"
+    return (
+        _DATA_DICTIONARY
+        + "\nLOCAL CONTEXT (authoritative):\n```json\n"
+        + body
+        + "\n```"
+    )
 
 
 def evidence_chips(payload: dict[str, Any]) -> list[str]:
@@ -348,9 +422,10 @@ def _truncate_user_input(text: str) -> str:
 
 
 def _redact(text: str) -> str:
-    """Strip anything that looks like a bearer token / OpenAI key."""
+    """Strip anything that looks like a bearer token / OpenAI / Anthropic key."""
     if not text:
         return text
+    text = re.sub(r"sk-ant-[A-Za-z0-9_\-]{10,}", "sk-ant-***redacted***", text)
     text = re.sub(r"sk-[A-Za-z0-9_\-]{10,}", "sk-***redacted***", text)
     text = re.sub(r"Bearer\s+[A-Za-z0-9_\-\.]+", "Bearer ***redacted***", text)
     return text
@@ -653,6 +728,16 @@ real news isn't given to you in the structured context, omit the topic \
 entirely — never write 'questionable', 'probable', 'doubtful', 'out', \
 'game-time decision', or any made-up status. Talk about role / minutes / \
 form trends instead.
+- NUMERIC HONESTY (HARD RULE): every stat you cite must appear verbatim in \
+LOCAL CONTEXT. Do NOT round-trip ("8.0 reb" must stay "8.0", not become \
+"9"). If you reference recent form, NAME the window: "over his last 5" \
+(read from recent_form_by_window.last_5) or "over the last 10" (= \
+recent_form / recent_form_by_window.last_10). When in doubt, omit the \
+number.
+- NEVER use the phrases "adj. threshold", "adjusted threshold", \
+"adjusted line", or describe a "threshold pushing the call" — that column \
+is internal scoring math and the printed PDF never displays it. Frame \
+calls as "model at X.X vs the line at Y.Y" instead.
 - Use recent_form values (pts/reb/ast/pra/min averages) as concrete anchors \
 in the news and rationale. Cite specific numbers from recent_form when \
 relevant.
@@ -945,8 +1030,14 @@ Rules:
   under ~140 words.
 - Do not include any keys other than the schema above.
 - No betting/edge/line/over/under/pick language anywhere.
+- NUMERIC HONESTY (HARD RULE): every stat you cite must appear verbatim in \
+  LOCAL CONTEXT. Do not round 8.0 to "9" or 19.3 to "20" — quote the \
+  number as written. When citing recent form, NAME the window ("over his \
+  last 5" / "over the last 10") so the reader knows which span you mean.
 - Never write the strings "(local context)", "(general NBA context)", \
   "LOCAL CONTEXT", or "(external)".
+- Never reference the "adj. threshold" / "adjusted threshold" field — \
+  it is internal-only and not shown in the printed report.
 """
 
 
@@ -1095,6 +1186,191 @@ def generate_performance_sections(
     }
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# Short-form prose helpers (slate brief, edge explainer, news adjuster)
+# ════════════════════════════════════════════════════════════════════════════
+
+_SLATE_BRIEF_SYSTEM_PROMPT = """\
+You write the Hooplytics Daily Slate Brief — ONE paragraph (3-5 sentences, \
+~70-90 words) summarizing tonight's NBA slate posture for a sharp reader. \
+Lead with the loudest signal on the board (player + market + side + edge \
+size). Add one sentence on slate posture (which way the model is leaning \
+overall). Add one sentence on which player on the roster is the most \
+trusted call and why. Close with the single biggest risk for tonight.
+
+Voice: confident, specific, no hedging, no filler. No emojis. No markdown \
+fences. Active verbs. Sound like a respected NBA analyst on a podcast.
+
+NUMERIC HONESTY: every stat you cite must appear verbatim in LOCAL CONTEXT. \
+Never write "adj. threshold" or "adjusted threshold" — frame calls as \
+"model at X.X vs the line at Y.Y". If you cite recent form, name the window \
+("over his last 5", "over the last 10").
+
+Return ONLY the paragraph as plain text — no headings, no JSON, no code \
+fences, no preamble.
+"""
+
+
+_EDGE_EXPLAINER_SYSTEM_PROMPT = """\
+You write a 2-3 sentence explanation for a SINGLE edge row from the \
+Hooplytics live edge board. The user clicked a row — explain why this edge \
+exists and what would invalidate it.
+
+Voice: direct, specific, no filler. No emojis, no markdown fences. Open \
+with the lean and edge size. Cite the player's relevant recent form (name \
+the window: "last 5" or "last 10") in ONE clause. Close with the single \
+biggest risk to the call.
+
+NUMERIC HONESTY: every stat you cite must appear verbatim in LOCAL CONTEXT. \
+Never reference "adj. threshold" / "adjusted threshold" — use \
+"model at X.X vs line Y.Y". If a number isn't in LOCAL CONTEXT, omit it.
+
+Return ONLY the 2-3 sentence paragraph as plain text. No JSON.
+"""
+
+
+def _create_chat_completion_simple(
+    *,
+    client: Any,
+    model: str,
+    system_prompt: str,
+    user_message: str,
+    max_output_tokens: int,
+    response_format_json: bool = False,
+) -> str:
+    """Run a single chat completion and return the assistant text.
+
+    Compact helper for short-form generators (slate brief, explainer, news).
+    Handles ``max_completion_tokens``/``max_tokens`` fallback and the
+    ``response_format`` retry path used by the report generators.
+    """
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+    kwargs: dict[str, Any] = {"model": model, "messages": messages}
+    if response_format_json:
+        kwargs["response_format"] = {"type": "json_object"}
+
+    def _create(**extra: Any):
+        try:
+            return client.chat.completions.create(
+                **kwargs, max_completion_tokens=max_output_tokens, **extra
+            )
+        except TypeError:
+            return client.chat.completions.create(
+                **kwargs, max_tokens=max_output_tokens, **extra
+            )
+
+    try:
+        resp = _create()
+    except Exception as exc:
+        msg = _redact(str(exc))
+        if response_format_json and "response_format" in msg.lower():
+            kwargs.pop("response_format", None)
+            kwargs["messages"] = [
+                {"role": "system", "content": system_prompt + "\n\nReturn the JSON object as plain text."},
+                {"role": "user", "content": user_message},
+            ]
+            try:
+                resp = _create()
+            except Exception as retry_exc:
+                raise RuntimeError(_redact(str(retry_exc))) from None
+        else:
+            raise RuntimeError(msg) from None
+
+    try:
+        choice = resp.choices[0]
+        message = getattr(choice, "message", None)
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            chunks: list[str] = []
+            for part in content:
+                ptype = (
+                    str(part.get("type", "")).lower()
+                    if isinstance(part, dict)
+                    else str(getattr(part, "type", "")).lower()
+                )
+                if ptype not in {"text", "output_text"}:
+                    continue
+                val = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+                if isinstance(val, str) and val.strip():
+                    chunks.append(val.strip())
+            return "\n\n".join(chunks).strip()
+    except Exception:
+        return ""
+    return ""
+
+
+def generate_slate_brief(
+    *,
+    connection: OpenAIConnection,
+    model: str,
+    grounding_payload: dict[str, Any],
+    max_output_tokens: int = 600,
+) -> str:
+    """Return ONE-paragraph daily slate brief grounded in the edge board."""
+    if connection is None or connection.client is None:
+        raise RuntimeError("No active OpenAI connection.")
+    if not model:
+        raise ValueError("No OpenAI model selected.")
+    available_chat_models = filter_chat_models(connection.models or [])
+    if available_chat_models and model not in available_chat_models:
+        model = auto_select_model(available_chat_models) or available_chat_models[0]
+
+    user_message = (
+        "Write tonight's Hooplytics Daily Slate Brief based on the LOCAL "
+        "CONTEXT below.\n\n"
+        + format_grounding_block(grounding_payload)
+    )
+    text = _create_chat_completion_simple(
+        client=connection.client,
+        model=model,
+        system_prompt=_SLATE_BRIEF_SYSTEM_PROMPT,
+        user_message=user_message,
+        max_output_tokens=max_output_tokens,
+    )
+    return _scrub_prose_leaks(text)
+
+
+def explain_edge(
+    *,
+    connection: OpenAIConnection,
+    model: str,
+    edge_row: dict[str, Any],
+    grounding_payload: dict[str, Any],
+    max_output_tokens: int = 400,
+) -> str:
+    """Return a 2-3 sentence explanation for a single edge row."""
+    if connection is None or connection.client is None:
+        raise RuntimeError("No active OpenAI connection.")
+    if not model:
+        raise ValueError("No OpenAI model selected.")
+    available_chat_models = filter_chat_models(connection.models or [])
+    if available_chat_models and model not in available_chat_models:
+        model = auto_select_model(available_chat_models) or available_chat_models[0]
+
+    edge_block = "EDGE ROW (the one to explain):\n```json\n" + json.dumps(
+        edge_row, default=str, indent=2
+    ) + "\n```"
+    user_message = (
+        "Explain the following edge row.\n\n"
+        + edge_block
+        + "\n\n"
+        + format_grounding_block(grounding_payload)
+    )
+    text = _create_chat_completion_simple(
+        client=connection.client,
+        model=model,
+        system_prompt=_EDGE_EXPLAINER_SYSTEM_PROMPT,
+        user_message=user_message,
+        max_output_tokens=max_output_tokens,
+    )
+    return _scrub_prose_leaks(text)
+
+
 __all__ = [
     "OpenAIConnection",
     "SYSTEM_PROMPT",
@@ -1104,10 +1380,12 @@ __all__ = [
     "chat_complete",
     "connect",
     "evidence_chips",
+    "explain_edge",
     "filter_chat_models",
     "format_grounding_block",
     "generate_performance_sections",
     "generate_report_sections",
+    "generate_slate_brief",
     "list_available_models",
     "parse_chart_blocks",
 ]

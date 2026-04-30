@@ -61,38 +61,42 @@ def synthetic_data() -> pd.DataFrame:
     return add_pregame_features(df)
 
 
-def test_train_models_produces_eight_estimators(synthetic_data: pd.DataFrame) -> None:
-    bundle = train_models(synthetic_data)
+@pytest.fixture(scope="module")
+def trained_bundle(synthetic_data: pd.DataFrame):
+    """Train once per module — fast_mode is sufficient for smoke assertions."""
+    return train_models(synthetic_data, fast_mode=True)
+
+
+def test_train_models_produces_eight_estimators(trained_bundle) -> None:
+    bundle = trained_bundle
     assert set(bundle.estimators) == set(MODEL_SPECS)
     assert bundle.metrics is not None and len(bundle.metrics) == len(MODEL_SPECS)
     assert bundle.n_train > 0 and bundle.n_test > 0
 
 
-def test_predict_scenario(synthetic_data: pd.DataFrame) -> None:
-    bundle = train_models(synthetic_data)
+def test_predict_scenario(trained_bundle) -> None:
     scenario = {c: 5.0 for c in ALL_COLS}
     scenario.update({"min": 32, "fg_pct": 0.5, "fg3_pct": 0.4, "ft_pct": 0.85})
-    df = predict_scenario(scenario, bundle)
+    df = predict_scenario(scenario, trained_bundle)
     assert not df.empty
     assert {"model", "prediction"}.issubset(df.columns)
 
 
 def test_ensure_models_roundtrip(tmp_path: Path, synthetic_data: pd.DataFrame) -> None:
     cache = tmp_path / "models"
-    b1 = ensure_models(synthetic_data, cache_dir=cache)
-    b2 = ensure_models(synthetic_data, cache_dir=cache)  # should hit cache
+    b1 = ensure_models(synthetic_data, cache_dir=cache, fast_mode=True)
+    b2 = ensure_models(synthetic_data, cache_dir=cache, fast_mode=True)  # should hit cache
     # Same hash → same file → identical estimator dict keys
     assert set(b1.estimators) == set(b2.estimators)
     files = list(cache.glob("models_*.joblib"))
     assert len(files) == 1
 
 
-def test_project_next_game(synthetic_data: pd.DataFrame) -> None:
-    bundle = train_models(synthetic_data)
+def test_project_next_game(trained_bundle, synthetic_data: pd.DataFrame) -> None:
     store = PlayerStore()
     modeling_df = store.modeling_frame(synthetic_data)
     proj = project_next_game(
-        "Player A", bundle=bundle, store=store,
+        "Player A", bundle=trained_bundle, store=store,
         last_n=10, modeling_df=modeling_df,
     )
     assert not proj.empty

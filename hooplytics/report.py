@@ -267,6 +267,36 @@ class _AnchorFlowable(Flowable):
             pass
 
 
+class _ActivePlayerMarker(Flowable):
+    """Zero-height marker that stamps the active player on the canvas.
+
+    Each per-player block drops one of these as its first flowable. The page
+    chrome callback reads ``canvas._hl_active_player`` to render the player's
+    name in the header band, so a reader on page 7 always knows whose
+    analytics they are looking at without having to scroll back.
+
+    Flowables draw in order, so within a single page the LAST marker drawn
+    wins — which is the correct behaviour when a page contains the tail of
+    one player's profile and the start of another (the reader sees the
+    incoming player's name, matching where the bulk of the page belongs).
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__()
+        self.name = name
+        self.width = 0
+        self.height = 0
+
+    def wrap(self, available_width: float, available_height: float) -> tuple[float, float]:
+        return (0, 0)
+
+    def draw(self) -> None:  # pragma: no cover - rendering side effect
+        try:
+            self.canv._hl_active_player = self.name
+        except Exception:
+            pass
+
+
 def _short(text: Any, limit: int = 18) -> str:
     s = str(text or "")
     return s if len(s) <= limit else s[: limit - 1] + "..."
@@ -364,11 +394,29 @@ def _draw_page_chrome(canvas, doc, meta: _ReportMeta) -> None:
     canvas.drawString(0.6 * inch, height - 0.42 * inch, "HOOPLYTICS")
     canvas.setFont(_BODY_FONT, 8)
     canvas.setFillColor(INK_MUTED)
+    title_x = 0.6 * inch + 1.1 * inch
     canvas.drawString(
-        0.6 * inch + 1.1 * inch,
+        title_x,
         height - 0.42 * inch,
         "Roster Analytics Report",
     )
+
+    # Active player tag — set by ``_ActivePlayerMarker`` flowables. Rendered
+    # in brand orange next to the report title so the reader always knows
+    # whose section they are reading without having to scroll back to the
+    # player profile header.
+    active_player = getattr(canvas, "_hl_active_player", None)
+    if active_player:
+        title_w = canvas.stringWidth("Roster Analytics Report", _BODY_FONT, 8)
+        sep_x = title_x + title_w + 6
+        canvas.setFillColor(INK_FAINT)
+        canvas.drawString(sep_x, height - 0.42 * inch, "·")
+        canvas.setFont(_BOLD_FONT, 8.5)
+        canvas.setFillColor(BRAND_ORANGE_DEEP)
+        canvas.drawString(sep_x + 8, height - 0.42 * inch, str(active_player))
+
+    canvas.setFont(_BODY_FONT, 8)
+    canvas.setFillColor(INK_MUTED)
     canvas.drawRightString(
         width - 0.6 * inch,
         height - 0.42 * inch,
@@ -4516,7 +4564,7 @@ def _v2_slate_radar(
     max_abs = float(df["_abs"].max()) or 1.0
 
     d = Drawing(width, height)
-    pad_l = 2.05 * inch    # space for player + market labels
+    pad_l = 2.3 * inch     # space for player + market labels (wider names)
     pad_r = 0.55 * inch    # space for edge value
     pad_t = 38             # space for ABOVE/BELOW headers
     pad_b = 26             # space for caption
@@ -4605,13 +4653,37 @@ def _v2_slate_radar(
                      ms,
                      fontName=_BOLD_FONT, fontSize=6.5,
                      fillColor=INK_MUTED, textAnchor="end"))
-        # Edge value at bar tip.
-        side_x = tip_x + 4 if e >= 0 else tip_x - 4
-        anchor = "start" if e >= 0 else "end"
-        d.add(String(side_x, y_center - 3,
-                     _fmt_signed(e, 2),
-                     fontName=_V2_SERIF_BOLD, fontSize=9,
-                     fillColor=col, textAnchor=anchor))
+        # Edge value placement: when the bar is wide enough, draw the value
+        # INSIDE the bar near the tip (white) so it never overlaps with the
+        # player name label on the left margin. When the bar is narrow, fall
+        # back to the previous outside-the-tip placement.
+        edge_text = _fmt_signed(e, 2)
+        # Approximate text width in points (Helvetica ~ 0.55 em-width at 9pt).
+        text_w = max(18, int(len(edge_text) * 5.4))
+        # Inside-bar placement is feasible only if the bar is wider than the
+        # text plus a little padding.
+        if abs(bw) >= text_w + 8:
+            inside = True
+        else:
+            inside = False
+        if inside:
+            if e >= 0:
+                lx = tip_x - 4
+                anchor = "end"
+            else:
+                lx = tip_x + 4
+                anchor = "start"
+            d.add(String(lx, y_center - 3,
+                         edge_text,
+                         fontName=_V2_SERIF_BOLD, fontSize=9,
+                         fillColor=colors.white, textAnchor=anchor))
+        else:
+            side_x = tip_x + 4 if e >= 0 else tip_x - 4
+            anchor = "start" if e >= 0 else "end"
+            d.add(String(side_x, y_center - 3,
+                         edge_text,
+                         fontName=_V2_SERIF_BOLD, fontSize=9,
+                         fillColor=col, textAnchor=anchor))
 
     # Caption strip below.
     d.add(String(cx, 8,
@@ -5787,14 +5859,19 @@ def _v2_conviction_map_flowables(
     flow: list = []
     flow.append(PageBreak())
     flow.append(_AnchorFlowable("v2-conviction", "Conviction Map", level=0))
-    flow.append(_para("PAGE THREE  ·  WHERE TO PLAY, WHERE TO PASS", styles["v2_section_eyebrow"]))
-    flow.append(_para("Conviction Map.", styles["v2_section_title"]))
-    flow.append(_para(
-        "Each signal plotted by its edge size (vertical) and market depth "
-        "(horizontal). Top-right wins.",
-        styles["v2_section_dek"],
-    ))
-    flow.append(Spacer(1, 6))
+    # Build the section title block as flowables; we'll wrap it together with
+    # the chart layout below in a single KeepTogether so the heading never
+    # gets orphaned on its own page above the actual conviction quadrant.
+    title_block: list = [
+        _para("PAGE THREE  ·  WHERE TO PLAY, WHERE TO PASS", styles["v2_section_eyebrow"]),
+        _para("Conviction Map.", styles["v2_section_title"]),
+        _para(
+            "Each signal plotted by its edge size (vertical) and market depth "
+            "(horizontal). Top-right wins.",
+            styles["v2_section_dek"],
+        ),
+        Spacer(1, 6),
+    ]
 
     quad, legend = _v2_edge_confidence_quadrant(
         edge_df, sigma_lookup, width=4.6 * inch, height=4.0 * inch,
@@ -6018,7 +6095,9 @@ def _v2_conviction_map_flowables(
         ("LEFTPADDING", (1, 0), (1, 0), 8),
         ("RIGHTPADDING", (1, 0), (1, 0), 0),
     ]))
-    flow.append(layout)
+    # Bundle title + layout so the section heading never orphans onto a
+    # page above the chart it introduces.
+    flow.append(KeepTogether(title_block + [layout]))
     flow.append(Spacer(1, 10))
 
     # Legend intentionally omitted — the numbered points map 1:1 to the
@@ -6037,14 +6116,16 @@ def _v2_model_quality_flowables(
     flow: list = []
     flow.append(PageBreak())
     flow.append(_AnchorFlowable("v2-models", "Model Quality", level=0))
-    flow.append(_para("PAGE FOUR  ·  HOW MUCH TO TRUST THE BOARD", styles["v2_section_eyebrow"]))
-    flow.append(_para("Model Quality.", styles["v2_section_title"]))
-    flow.append(_para(
-        "Composite trust on the left; per-target reliability on the right. "
-        "Higher R² explains more game-to-game variance.",
-        styles["v2_section_dek"],
-    ))
-    flow.append(Spacer(1, 8))
+    title_block: list = [
+        _para("PAGE FOUR  ·  HOW MUCH TO TRUST THE BOARD", styles["v2_section_eyebrow"]),
+        _para("Model Quality.", styles["v2_section_title"]),
+        _para(
+            "Composite trust on the left; per-target reliability on the right. "
+            "Higher R² explains more game-to-game variance.",
+            styles["v2_section_dek"],
+        ),
+        Spacer(1, 8),
+    ]
 
     gauge = _v2_reliability_gauge(metrics, width=3.4 * inch, height=2.5 * inch)
     multiples = _v2_reliability_multiples(metrics, width=3.8 * inch, height=2.5 * inch)
@@ -6059,8 +6140,11 @@ def _v2_model_quality_flowables(
             ("LEFTPADDING", (0, 0), (-1, -1), 0),
             ("RIGHTPADDING", (0, 0), (-1, -1), 0),
         ]))
-        flow.append(layout)
+        # Title and chart land on the same page — never orphan the heading.
+        flow.append(KeepTogether(title_block + [layout]))
         flow.append(Spacer(1, 14))
+    else:
+        flow.extend(title_block)
 
     if isinstance(metrics, pd.DataFrame) and not metrics.empty:
         name_col = next((c for c in ("model", "name") if c in metrics.columns), None)
@@ -6137,6 +6221,9 @@ def _v2_player_profile_block(
         ch.lower() if ch.isalnum() else "-" for ch in player
     ).strip("-")
     flow.append(_AnchorFlowable(slug, player, level=1))
+    # Stamp the active player so the page chrome renders the player's name
+    # in the header band on every page of this section.
+    flow.append(_ActivePlayerMarker(player))
 
     pdf_player = None
     if isinstance(edge_df, pd.DataFrame) and not edge_df.empty and "player" in edge_df.columns:
@@ -6544,7 +6631,13 @@ def build_pdf_report(
         PageTemplate(
             id="body",
             frames=[body_frame],
-            onPage=lambda c, d: _draw_page_chrome(c, d, meta),
+            # ``onPageEnd`` fires AFTER all flowables on the page have been
+            # placed, so the chrome reads the latest ``_hl_active_player``
+            # set by ``_ActivePlayerMarker`` flowables on this page. Drawing
+            # chrome at the end is purely a sequencing change — the chrome
+            # uses absolute coordinates, so it still appears at the top of
+            # the page visually.
+            onPageEnd=lambda c, d: _draw_page_chrome(c, d, meta),
         ),
     ])
 
