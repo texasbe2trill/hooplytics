@@ -37,7 +37,7 @@
 <td width="33%" valign="top">
 
 ### 🎛️ Streamlit dashboard
-Click-driven analytics for the modern fan. Eight purpose-built pages, an AI scout, and a printable PDF report.
+Click-driven analytics for the modern fan. Eight purpose-built pages, an AI scout (OpenAI **or** Claude), and printable PDF reports.
 
 ```bash
 hooplytics-web
@@ -89,6 +89,8 @@ python3 -m venv .venv && source .venv/bin/activate && pip install -e .
 | 📑 &nbsp; Generate a printable scouting report | Open the dashboard → **Roster Report** → *Generate PDF* |
 | 🏋️ &nbsp; Generate a coaching performance report | Open the dashboard → **Roster Report** → *Player Performance Analytics* |
 | 🤖 &nbsp; Ask the AI scout a question | Open the dashboard → **Hooplytics Scout** |
+| 📰 &nbsp; Read tonight's AI slate brief | Open the dashboard → **Home** (needs an AI key) |
+| 🔍 &nbsp; Explain why a specific edge exists | Open the dashboard → **Analytics Dashboard** → *Edge Explainer* |
 | ❓ &nbsp; See all CLI commands | `hooplytics --help` |
 | 📓 &nbsp; Open the notebook | `jupyter lab hooplytics.ipynb` |
 
@@ -149,7 +151,7 @@ Go to <em>Roster Report</em> → click <strong>Generate PDF</strong>. You get a 
 <td align="center" valign="top"><h2>7️⃣</h2></td>
 <td valign="top">
 <strong>(Optional) Talk to <em>Hooplytics Scout</em></strong><br>
-Paste your OpenAI key in the sidebar, click <strong>Connect</strong>, and ask things like <em>“Give me a MORE/LESS read on the largest edge tonight, with confidence and risk factors.”</em> The Scout is grounded in your local data and structured for confidence + risk, not hot takes.
+Pick your AI provider in the sidebar (<strong>OpenAI</strong> or <strong>Anthropic Claude</strong>), paste a key, click <strong>Connect</strong>, and ask things like <em>“Give me a MORE/LESS read on the largest edge tonight, with confidence and risk factors.”</em> The Scout is grounded in your local data and structured for confidence + risk, not hot takes.
 </td>
 </tr>
 </table>
@@ -244,7 +246,7 @@ The Streamlit app ships with **eight** purpose-built pages, each focused on a di
 <img src="docs/screenshots/home.png" alt="Home" />
 
 #### 🏠 Home
-Portfolio-style overview of roster coverage, model outputs, and high-level telemetry.
+Portfolio-style overview of roster coverage, model outputs, and high-level telemetry. With an AI key configured, an **AI Slate Brief** panel renders a one-paragraph daily read on the loudest mispricings — cached for the day so it costs one API call.
 
 </td>
 <td width="50%" valign="top" align="center">
@@ -252,7 +254,7 @@ Portfolio-style overview of roster coverage, model outputs, and high-level telem
 <img src="docs/screenshots/analytics-dashboard.png" alt="Analytics Dashboard" />
 
 #### 📊 Analytics Dashboard
-Command center for projection gaps, signal quality, coverage, and live line telemetry.
+Command center for projection gaps, signal quality, coverage, and live line telemetry. Pick any signal in the **Edge Explainer** dropdown for a 2–3 sentence AI breakdown of why that edge exists — line, projection, recent form, and matchup context, all from local data.
 
 </td>
 </tr>
@@ -295,9 +297,9 @@ Held-out model quality, ranking, residuals, and feature drivers.
 <tr>
 <td colspan="2" valign="top">
 <h4>🤖 Hooplytics Scout</h4>
-<p>Bring-your-own-key OpenAI chatbot grounded in your local roster, projections, model metrics, and live edge rows. Hybrid mode by default — general NBA reasoning is allowed but explicitly labeled. Toggle <strong>Strict grounded</strong> in the sidebar to force answers that only cite local data. Pick suggestions always include structured <strong>Confidence</strong> and <strong>Risk factors</strong> sections, never a guarantee.</p>
-<p>🔑 <strong>Key setup:</strong> Paste your OpenAI key in the sidebar, or set <code>OPENAI_API_KEY</code> in <code>.env</code> / Streamlit secrets.</p>
-<p>🤝 <strong>Connect:</strong> Click <strong>Connect</strong> — available chat models are fetched from your key and the best GPT-style model is auto-selected.</p>
+<p>Bring-your-own-key chatbot grounded in your local roster, projections, model metrics, and live edge rows. Toggle <strong>OpenAI</strong> or <strong>Anthropic Claude</strong> in the sidebar — both providers run the same prompts and grounding payload, so picks read identically regardless of which one you bring. Hybrid mode by default lets the model layer in general NBA reasoning (explicitly labeled); flip <strong>Strict grounded</strong> to force local-only answers. Pick suggestions always include structured <strong>Confidence</strong> and <strong>Risk factors</strong>, never a guarantee.</p>
+<p>🔑 <strong>Key setup:</strong> Paste an OpenAI or Claude key in the sidebar, or set <code>OPENAI_API_KEY</code> / <code>ANTHROPIC_API_KEY</code> in <code>.env</code> or Streamlit secrets.</p>
+<p>🤝 <strong>Connect:</strong> Click <strong>Connect</strong> — available chat models are fetched from your key and the best GPT- or Claude-family model is auto-selected.</p>
 <p>💬 <strong>Ask anything:</strong> <em>"Give me a MORE/LESS read on the largest edge tonight, with confidence and risk factors."</em></p>
 <p>🔒 <strong>Grounding modes:</strong> <strong>Hybrid</strong> (default) allows labeled general NBA reasoning · <strong>Strict</strong> only cites local data.</p>
 <p>🛡️ <strong>Privacy:</strong> Your key stays in session memory only — never written to disk or printed in logs.</p>
@@ -306,7 +308,7 @@ Held-out model quality, ranking, residuals, and feature drivers.
 <tr>
 <td colspan="2" valign="top">
 <h4>📑 Roster Report (PDF)</h4>
-<p>One-click, print-ready editorial scouting report built with ReportLab — no headless browser required. Pulls directly from the live model bundle, edge board, and (optional) AI scout context. Designed to read like a magazine: serif display type, cream paper, hairline rules, and color-coded OVER / UNDER signals throughout.</p>
+<p>One-click, print-ready editorial scouting report built with ReportLab — no headless browser required. Pulls directly from the live model bundle, edge board, and (optional) AI scout context (OpenAI or Claude — provider swap is invisible to the report). Designed to read like a magazine: serif display type, cream paper, hairline rules, and color-coded OVER / UNDER signals throughout. Every per-player page tags the active player in the page chrome so a reader can never get lost.</p>
 <p>📰 <strong>Tonight's Slate (cover):</strong> Headline call-out for the loudest mispricing, divergent edge skyline of every live signal, and KPI rail (players, live signals, median R²).</p>
 <p>🎯 <strong>Tonight's Setup:</strong> Anchor / Differentiator / Secondary cards with confidence chips, recent-form sparkline, and the ranked Top-4 signal cards.</p>
 <p>📊 <strong>Signal Board:</strong> Full ranked board of every live edge with side, projection vs. line, hit %, confidence, and book counts.</p>
@@ -319,10 +321,11 @@ Held-out model quality, ranking, residuals, and feature drivers.
 <tr>
 <td colspan="2" valign="top">
 <h4>🏋️ Player Performance Analytics (PDF)</h4>
-<p>A second printable report on the same Roster Report page — strictly performance-oriented (no betting edges, no projection-vs-line content). Designed for coaching staffs, player development, and anyone who wants the same magazine chrome focused on how a player is actually playing.</p>
+<p>A second printable report on the same Roster Report page — strictly performance-oriented (no betting edges, no projection-vs-line content). Designed for coaching staffs, player development, and anyone who wants the same magazine chrome focused on how a player is actually playing. Two pages per player; every page chrome tags the active player.</p>
 <p>📰 <strong>Cover:</strong> Roster headline scoreboard with PTS / REB / AST / TS% per player, deep-linked names that jump straight to that player's profile page.</p>
-<p>📋 <strong>Roster overview:</strong> Per-player season averages snapshot table plus a roster skill overlay radar so you can see every player's skill shape on a single chart.</p>
-<p>📈 <strong>Per-player profile (2 pages each):</strong> Dark hero band with headline averages · KPI scorecard strip with L10 deltas · Garmin-style activity rings (SCORING / PLAYMAKING / EFFICIENCY vs. roster leader) · ML next-game projection panel (linear-regression forecast with 80% prediction interval and trend arrows) · trend sparklines for 8 stats over the last 20 games with rolling-5 overlay · shooting & efficiency bars (FG% / 3P% / FT% / TS%) with roster-median markers · skill-axis radar · floor / median / ceiling consistency strip · role & usage trends · hot/cold streak detection (z-scored vs. season baseline) · three accent-topped coaching cards (Strengths / Growth / Focus) with optional AI-augmented narrative.</p>
+<p>📋 <strong>Roster overview:</strong> Per-player snapshot table showing <strong>season + L10 stacked</strong> for PTS / REB / AST / PRA / MIN / FAN, plus a roster skill overlay radar so you can see every player's skill shape on a single chart.</p>
+<p>📈 <strong>Per-player profile · Page A:</strong> Dark hero band with headline averages · KPI scorecard strip with L10 deltas · Garmin-style activity rings (SCORING / PLAYMAKING / EFFICIENCY vs. roster leader) · ML next-game projection panel (linear-regression forecast with 80% prediction interval and trend arrows) · trend sparklines for 6 primary stats over the last 20 games with rolling-5 overlay · <strong>Points by Game · Last 10</strong> tile strip (date, opponent, PTS color-coded vs season average, mini bar, REB / AST footer).</p>
+<p>📊 <strong>Per-player profile · Page B:</strong> Shooting & efficiency bars (FG% / 3P% / FT% / TS%) with roster-median markers · skill-axis radar · floor / median / ceiling consistency strip · role & usage trends · hot/cold streak detection (z-scored vs. season baseline) · three accent-topped coaching cards (Strengths / Growth / Focus) with optional AI-augmented narrative (OpenAI or Claude).</p>
 <p>Open the <strong>Roster Report</strong> page, switch the report-type toggle to <em>Player Performance Analytics</em>, and click <em>Generate performance report</em>.</p>
 </td>
 </tr>
@@ -411,9 +414,11 @@ A player intelligence workbench is built to make data easier to *explore, explai
 | Area | Highlights |
 | :--- | :--- |
 | 🎛️ **Streamlit dashboard** | Eight purpose-built pages: Home, Player Projection, Analytics Dashboard, Compare Players, Player Line Lab, Model Diagnostics, Hooplytics Scout, Roster Report |
-| 📑 **PDF Roster Report** | Editorial, magazine-style ReportLab PDF — Tonight's Slate cover, Tonight's Setup card stack, ranked Signal Board, Conviction Map with Signal Index legend and AI Scout Picks, Model Quality trust meter, and per-player profiles with latest context, sparklines, and last-4 resolved lines |
-| 🏋️ **PDF Player Performance Analytics** | Second coach-focused PDF on the same page — KPI scorecards, Garmin-style activity rings, ML next-game projection with 80% prediction interval, trend sparklines, shooting & efficiency bars, skill-axis radar, floor/median/ceiling consistency, role & usage trends, hot/cold streak z-scores, and three accent-topped coaching cards (Strengths / Growth / Focus) |
-| 🤖 **Hooplytics Scout (AI)** | BYO-key OpenAI chatbot grounded in your local roster, projections, edge board, and model metrics — Hybrid or Strict grounded modes, structured Confidence + Risk factors |
+| 📑 **PDF Roster Report** | Editorial, magazine-style ReportLab PDF — Tonight's Slate cover, Tonight's Setup card stack, ranked Signal Board, Conviction Map with Signal Index legend and AI Scout Picks, Model Quality trust meter, and per-player profiles with latest context, sparklines, last-4 resolved lines, and active-player tag in the page chrome |
+| 🏋️ **PDF Player Performance Analytics** | Second coach-focused PDF on the same page — 2 pages per player. KPI scorecards, Garmin-style activity rings, ML next-game projection with 80% prediction interval, trend sparklines, **Points by Game · Last 10** tile strip, shooting & efficiency bars, skill-axis radar, floor/median/ceiling consistency, role & usage trends, hot/cold streak z-scores, and three accent-topped coaching cards (Strengths / Growth / Focus) |
+| 🤖 **Hooplytics Scout (AI)** | BYO-key chatbot — pick **OpenAI** or **Anthropic Claude** in the sidebar; both providers run the same grounded prompts. Hybrid or Strict grounded modes, structured Confidence + Risk factors |
+| 📰 **AI Slate Brief** | One-paragraph daily read of tonight's loudest mispricings on the Home page. Cached per-day so it costs a single API call, regardless of how many times you refresh. |
+| 🔍 **AI Edge Explainer** | Pick any signal in the Analytics Dashboard dropdown and get a 2–3 sentence breakdown grounded in line, projection, recent form, and matchup context. |
 | 📡 **Live line context** | Auto-fetched lines from The Odds API across CLI and dashboard, with session-only BYO-key support in the web app |
 | 🎯 **Edge board** | Slate-wide projection-vs-line gap analysis, signed edges, MORE/LESS calls, and book counts — feeds the dashboard, the AI scout, and the PDF report |
 | 👤 **Player analysis** | Recent form, rolling trends, distributions, player profiles, season averages, and recent-window comparisons |
@@ -545,20 +550,28 @@ Minimal install for Streamlit Cloud or web-only deploys. Does not include notebo
 
 ## 🔐 Configuration
 
-The Odds API is used as **optional** market and line context. Three safe ways to supply a key:
+Three optional API keys — none of them are required to launch the app.
+
+| Variable | What it powers |
+| :--- | :--- |
+| `ODDS_API_KEY` | Live line context, edge board, prop comparisons (The Odds API) |
+| `OPENAI_API_KEY` | Hooplytics Scout, AI Slate Brief, AI Edge Explainer, AI prose in both PDFs |
+| `ANTHROPIC_API_KEY` | Same as above, but routed through Anthropic Claude when the sidebar provider is set to Claude |
+
+Three safe ways to supply any of them:
 
 | Method | How |
 | :--- | :--- |
-| 📄 **Local `.env`** | Copy `.env.example` → `.env`, set `ODDS_API_KEY=your_key` |
-| 🐚 **Shell session** | `export ODDS_API_KEY=your_key` |
+| 📄 **Local `.env`** | Copy `.env.example` → `.env`, set `ODDS_API_KEY=…`, `OPENAI_API_KEY=…`, `ANTHROPIC_API_KEY=…` |
+| 🐚 **Shell session** | `export ODDS_API_KEY=…` (etc.) |
 | 🌐 **Streamlit sidebar** | Paste your key into the sidebar password field — session-only, never stored |
 
 ```bash
 cp .env.example .env
-# then edit .env and set ODDS_API_KEY=your_key_here
+# then edit .env and set the keys you want to use
 ```
 
-> 🔓 If no key is configured, Hooplytics still works. You simply lose the optional live line context.
+> 🔓 If no AI key is configured, the AI features (Scout, Slate Brief, Edge Explainer, PDF prose) cleanly disable and the rest of the app keeps working. If no Odds API key is set, you just lose the live-line column.
 
 ---
 
@@ -577,8 +590,8 @@ This launches the full multi-page dashboard at `http://localhost:8501`. A pre-tr
 <td valign="top" width="33%">
 <strong>🔑 Sidebar setup (optional)</strong><br>
 • Paste your <strong>Odds API key</strong> to enable live lines and the edge board.<br>
-• Paste your <strong>OpenAI key</strong> under <em>Hooplytics Scout</em> to enable the AI assistant.<br>
-• Both keys are session-only — never written to disk.
+• Under <em>Hooplytics Scout</em>, pick <strong>OpenAI</strong> or <strong>Anthropic Claude</strong> and paste the matching key.<br>
+• Keys are session-only — never written to disk.
 </td>
 <td valign="top" width="33%">
 <strong>📍 Where to go first</strong><br>
@@ -700,7 +713,9 @@ hooplytics/
 │   ├── features_role.py          # Role / usage features
 │   ├── models.py                 # 8-stat RACE model training
 │   ├── odds.py                   # The Odds API client
-│   ├── openai_agent.py           # Hooplytics Scout (BYO-key OpenAI grounding)
+│   ├── ai_agent.py               # Provider-agnostic AI dispatcher (OpenAI ↔ Claude)
+│   ├── openai_agent.py           # OpenAI transport: chat, slate brief, edge explainer, PDF prose
+│   ├── anthropic_agent.py        # Anthropic Claude transport (mirrors openai_agent's API)
 │   ├── predict.py                # Projection + line comparison (auto-applies calibration)
 │   ├── calibration.py            # Two-layer market-anchored calibration
 │   ├── calibration_cli.py        # `hooplytics-build-calibration` entry point
@@ -719,12 +734,23 @@ hooplytics/
 
 ## 🗺️ Roadmap
 
-- 🎬 Fresh Streamlit dashboard screenshots and rendered demos for the Roster Report and Hooplytics Scout pages
-- 📡 Richer book-level line telemetry inside the Streamlit app
-- 🧪 Expanded Player Line Lab sensitivity views
--  Saveable / shareable PDF report templates with custom branding
-- 📦 More reproducible demo datasets for first-time users
-- 👥 Broader player and season presets for faster onboarding
+#### 🤖 AI & chat
+- 🌊 **Streaming Scout responses** — render tokens as they arrive in Hooplytics Scout for a snappier read on long replies. Both the OpenAI and Anthropic SDKs already support `stream=True`; wire it through the dispatcher and surface via `st.write_stream`.
+- 🔀 **Side-by-side provider comparison** — send the same prompt to OpenAI and Claude in parallel and diff the picks. The provider abstraction already supports this; just needs a UI toggle for second-opinion mode.
+- 🗣️ **Conversational Line Lab** — natural-language "what-ifs" on the scenario explorer ("what changes if pace drops 4?", "show me a back-to-back scenario"). Mutates the scenario dict and re-projects in place.
+- 📝 **Post-game recap memo** — daily auto-generated readout pairing yesterday's model calls with actual outcomes ("model said 24.3 PRA on a 21.5 line, player went 28; the OVER lean held"). Closes the trust loop and makes the model's tracking visible.
+- 🧑‍🎨 **Custom system prompts** — power-user override for Scout / PDF prose (per-roster voice, risk tolerance, format preferences) without forking the codebase.
+
+#### 📦 Data & analytics
+- 🏷️ **Player archetype clustering** — auto-tag players ("primary creator", "stretch big", "off-ball wing") from role + shooting embeddings, surfaced in the grounding payload so AI prose can reason about role-shape directly.
+- 🔁 **Backtesting framework** — replay the edge board logic against a historical date and score what the would-be calls actually did. Pairs naturally with the calibration QA workflow.
+- 👥 **Multi-roster profiles** — save and switch between named rosters from the sidebar (DFS lineup, season-long fantasy, futures slate) without losing each one's bundle / model state.
+- 📡 Richer book-level line telemetry inside the Streamlit app — per-book vig, line movement, and fastest-mover attribution.
+
+#### 🎨 UX & polish
+- 🎬 Fresh Streamlit dashboard screenshots and rendered demos for the Roster Report, Performance Analytics, and Hooplytics Scout pages.
+- 🎨 Saveable / shareable PDF report templates with custom branding (team colors, logo, footer).
+- 📦 Reproducible demo datasets plus broader player and season presets for faster onboarding.
 
 ---
 
