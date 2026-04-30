@@ -685,6 +685,57 @@ def _active_ai_selected_model() -> str:
     return st.session_state.get(keys["selected_model"], "") or ""
 
 
+def _ai_unavailable_reason() -> str | None:
+    """Return a one-line, user-facing reason AI is unavailable, else ``None``.
+
+    Used by the report pages to surface the exact failure right next to the
+    "Include AI rationale" toggle instead of silently disabling it. This
+    converts "PDF generated with no error and no prose" into "PDF generated
+    with a clearly explained reason," which is the difference between a
+    debuggable issue and a frustrating dead end on Streamlit Cloud.
+    """
+    provider = _active_ai_provider()
+    provider_label = PROVIDER_LABELS.get(provider, "AI")
+    keys = _ai_state_keys(provider)
+
+    # No key configured anywhere.
+    if not _active_ai_api_key():
+        return (
+            f"AI prose disabled — no {provider_label} key is set. Paste one "
+            f"in the sidebar under Hooplytics Scout, or configure "
+            f"{'ANTHROPIC_API_KEY' if provider == 'anthropic' else 'OPENAI_API_KEY'} "
+            "in Streamlit Cloud secrets."
+        )
+
+    status = st.session_state.get(keys["status"], "")
+    err = st.session_state.get(keys["error"], "")
+
+    # A connection attempt fired and failed — surface the underlying cause.
+    if status == "error":
+        return (
+            f"AI prose disabled — {provider_label} connection failed: "
+            f"{err or 'unknown error'}. Click Reconnect in the sidebar."
+        )
+
+    # Connection state is missing or inconclusive (e.g., spinner mid-flight or
+    # a Streamlit Cloud rehydration that lost session state).
+    if status != "ok":
+        return (
+            f"AI prose disabled — {provider_label} connection has not "
+            "completed. Open the sidebar and click Reconnect to retry."
+        )
+
+    # Connection looks healthy but no model was picked / models list empty.
+    if not _active_ai_selected_model():
+        return (
+            f"AI prose disabled — no {provider_label} chat model is "
+            "available. Open the sidebar and pick a model from the Model "
+            "dropdown."
+        )
+
+    return None
+
+
 def _apply_sidebar_seasons_to_roster() -> None:
     """Apply sidebar season input to all rostered players.
 
@@ -3995,6 +4046,12 @@ def _render_projections_report(
     has_chat: bool,
 ) -> None:
     provider_label = PROVIDER_LABELS.get(_active_ai_provider(), "AI")
+    # Surface a precise reason when AI is unavailable — otherwise the toggle
+    # silently greys out and the resulting PDF has no prose with no warning.
+    if not has_chat:
+        reason = _ai_unavailable_reason()
+        if reason:
+            st.warning(reason)
     # ── Configuration card ─────────────────────────────────────────────────
     with st.container():
         cols = st.columns([2, 1, 1])
@@ -4115,6 +4172,15 @@ def _render_projections_report(
 
     # ── AI prose (optional) ────────────────────────────────────────────────
     ai_sections: dict[str, Any] | None = None
+    # When the user asked for AI but the prerequisites disappeared between
+    # toggle-render and generate-click, surface why instead of falling back
+    # silently. This is the failure mode that produced "PDF with no prose
+    # and no error" reports on Streamlit Cloud.
+    if include_ai and (conn is None or not selected_model):
+        st.warning(
+            _ai_unavailable_reason()
+            or "AI rationale skipped — connection or model is unavailable."
+        )
     if include_ai and conn is not None and selected_model:
         with st.spinner("Generating AI rationale…"):
             try:
@@ -4190,6 +4256,12 @@ def _render_performance_report(
     coaching note per player. No betting/edge content.
     """
     provider_label = PROVIDER_LABELS.get(_active_ai_provider(), "AI")
+    # Surface a precise reason when AI is unavailable so the user knows why
+    # the toggle is disabled instead of inferring it from a tiny grey caption.
+    if not has_chat:
+        reason = _ai_unavailable_reason()
+        if reason:
+            st.warning(reason)
     # ── Configuration row ──────────────────────────────────────────────────
     with st.container():
         cols = st.columns([2, 1, 1])
@@ -4267,6 +4339,13 @@ def _render_performance_report(
 
     # ── AI coaching prose (optional) ───────────────────────────────────────
     ai_sections: dict[str, Any] | None = None
+    # Same defensive surface as the projections report: never let a generation
+    # request silently no-op because the connection or model dropped out.
+    if include_ai and (conn is None or not selected_model):
+        st.warning(
+            _ai_unavailable_reason()
+            or "AI narrative skipped — connection or model is unavailable."
+        )
     if include_ai and conn is not None and selected_model:
         with st.spinner("Generating AI coaching narrative…"):
             try:
