@@ -1731,32 +1731,42 @@ def _roster_overview_flowables(
 
     # Snapshot table: per-player season averages PLUS L10 averages so the
     # AI prose's "over his last 10" claims line up with what the table shows.
-    # Each stat cell renders as two stacked numbers: large = season, small = L10.
+    # Each stat cell stacks the two values vertically (season on top, L10
+    # below in muted small type) — inline "22.8 · 19.9" was unpredictably
+    # wrapping in narrow columns and producing "22.8 ·" / "19.9" on
+    # different lines, which looked unintentional.
     cell_style = ParagraphStyle(
         "perf_overview_cell",
         fontName=_BODY_FONT,
         fontSize=9,
-        leading=10.5,
+        leading=10,
+        textColor=INK_DARK,
+        alignment=TA_CENTER,
+        spaceBefore=0,
+        spaceAfter=0,
+    )
+    header_cell_style = ParagraphStyle(
+        "perf_overview_header",
+        fontName=_BOLD_FONT,
+        fontSize=8.5,
+        leading=10,
         textColor=INK_DARK,
         alignment=TA_CENTER,
         spaceBefore=0,
         spaceAfter=0,
     )
 
+    def _stat_header(label: str) -> Paragraph:
+        return Paragraph(
+            f"<font color='#7e7e7e' size='6.5'>SZN / L10</font><br/>"
+            f"<font size='8.5'>{label}</font>",
+            header_cell_style,
+        )
+
     rows: list[list[Any]] = [
         ["Player", "GP",
-         Paragraph(f"<font size='8' color='#7e7e7e'>SEASON · L10</font><br/>"
-                   f"<font name='{_BOLD_FONT}' size='9'>PTS</font>", cell_style),
-         Paragraph(f"<font size='8' color='#7e7e7e'>SEASON · L10</font><br/>"
-                   f"<font name='{_BOLD_FONT}' size='9'>REB</font>", cell_style),
-         Paragraph(f"<font size='8' color='#7e7e7e'>SEASON · L10</font><br/>"
-                   f"<font name='{_BOLD_FONT}' size='9'>AST</font>", cell_style),
-         Paragraph(f"<font size='8' color='#7e7e7e'>SEASON · L10</font><br/>"
-                   f"<font name='{_BOLD_FONT}' size='9'>PRA</font>", cell_style),
-         Paragraph(f"<font size='8' color='#7e7e7e'>SEASON · L10</font><br/>"
-                   f"<font name='{_BOLD_FONT}' size='9'>MIN</font>", cell_style),
-         Paragraph(f"<font size='8' color='#7e7e7e'>SEASON · L10</font><br/>"
-                   f"<font name='{_BOLD_FONT}' size='9'>FAN</font>", cell_style),
+         _stat_header("PTS"), _stat_header("REB"), _stat_header("AST"),
+         _stat_header("PRA"), _stat_header("MIN"), _stat_header("FAN"),
          "TS%"],
     ]
     for player in roster.keys():
@@ -1764,7 +1774,7 @@ def _roster_overview_flowables(
         kpis = s.get("kpis", {})
         shoot = s.get("shooting", {})
 
-        def _two_line(col: str) -> Paragraph:
+        def _stacked(col: str) -> Paragraph:
             info = kpis.get(col, {}) or {}
             sv = info.get("season_avg")
             rv = info.get("recent_avg")
@@ -1774,12 +1784,9 @@ def _roster_overview_flowables(
                     return "—"
                 return f"{v:.1f}"
 
-            season_str = _fmt(sv)
-            l10_str = _fmt(rv)
             return Paragraph(
-                f"<font name='{_BOLD_FONT}' size='10'>{season_str}</font>"
-                f"<font color='#9a9a9a'> · </font>"
-                f"<font color='#7e7e7e' size='8.5'>{l10_str}</font>",
+                f"<font name='{_BOLD_FONT}' size='9.5'>{_fmt(sv)}</font><br/>"
+                f"<font color='#8a8a8a' size='7.5'>{_fmt(rv)}</font>",
                 cell_style,
             )
 
@@ -1788,15 +1795,15 @@ def _roster_overview_flowables(
         rows.append([
             _safe_text(player),
             str(s.get("games_played", 0)),
-            _two_line("pts"), _two_line("reb"), _two_line("ast"), _two_line("pra"),
-            _two_line("min"), _two_line("fantasy_score"), ts_text,
+            _stacked("pts"), _stacked("reb"), _stacked("ast"), _stacked("pra"),
+            _stacked("min"), _stacked("fantasy_score"), ts_text,
         ])
 
     if len(rows) > 1:
         t = _styled_table(
             rows,
-            col_widths=[1.7 * inch, 0.4 * inch, 0.65 * inch, 0.65 * inch,
-                        0.65 * inch, 0.65 * inch, 0.65 * inch, 0.65 * inch, 0.55 * inch],
+            col_widths=[1.65 * inch, 0.4 * inch, 0.65 * inch, 0.65 * inch,
+                        0.65 * inch, 0.7 * inch, 0.65 * inch, 0.65 * inch, 0.55 * inch],
             align_right_cols=[1, 8],
         )
         flow.append(t)

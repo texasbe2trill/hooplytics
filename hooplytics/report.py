@@ -6270,9 +6270,20 @@ def _v2_player_profile_block(
         if rf.get(k) is not None
     ) or "—"
 
+    # Adapt the display font for very long names so they always render on
+    # one line. "Shai Gilgeous-Alexander" / "Victor Wembanyama" overflow the
+    # 4.6 inch hero column at size 30, which produces awkward two-line
+    # layouts and pushes the matchup/form rows down.
+    safe_player = _safe_text(player)
+    if len(player) > 22:
+        name_size = 22
+    elif len(player) > 18:
+        name_size = 26
+    else:
+        name_size = 30
     hero_left = Paragraph(
-        f"<font size='30' name='{_V2_SERIF_BOLD}' color='#ffffff'>"
-        f"<b>{_safe_text(player)}</b></font><br/>"
+        f"<font size='{name_size}' name='{_V2_SERIF_BOLD}' color='#ffffff'>"
+        f"<b>{safe_player}</b></font><br/>"
         f"<font size='9' name='{_BOLD_FONT}' color='#9aa3b2'>"
         f"<b>{_safe_text(matchup) if matchup else 'TONIGHT'}</b></font><br/>"
         f"<font size='8' color='#9aa3b2'>RECENT FORM  ·  {_safe_text(form_strip)}</font>",
