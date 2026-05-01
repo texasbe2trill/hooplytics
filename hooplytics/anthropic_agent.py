@@ -375,7 +375,7 @@ def generate_report_sections(
 
     parsed = _parse_json_response(raw_text)
     if not parsed:
-        return {"executive_summary": "", "slate_outlook": "", "players": {}}
+        return {"executive_summary": "", "slate_outlook": "", "matchups": {}, "players": {}}
 
     players_raw = parsed.get("players")
     players: dict[str, Any] = {}
@@ -400,9 +400,24 @@ def generate_report_sections(
                     "rationale": _scrub_prose_leaks(str(v.get("rationale", "")).strip()),
                 }
 
+    matchups_raw = parsed.get("matchups")
+    matchups: dict[str, Any] = {}
+    if isinstance(matchups_raw, dict):
+        for k, v in matchups_raw.items():
+            if not isinstance(k, str):
+                continue
+            if isinstance(v, dict):
+                matchups[k] = {
+                    "headline": _scrub_prose_leaks(str(v.get("headline", "")).strip()),
+                    "narrative": _scrub_prose_leaks(str(v.get("narrative", "")).strip()),
+                }
+            elif isinstance(v, str) and v.strip():
+                matchups[k] = {"headline": "", "narrative": _scrub_prose_leaks(v.strip())}
+
     return {
         "executive_summary": _scrub_prose_leaks(str(parsed.get("executive_summary", "")).strip()),
         "slate_outlook": _scrub_prose_leaks(str(parsed.get("slate_outlook", "")).strip()),
+        "matchups": matchups,
         "players": players,
     }
 

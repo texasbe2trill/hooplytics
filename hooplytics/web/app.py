@@ -56,7 +56,18 @@ _TRAINING_ANCHOR_PLAYERS: list[str] = [
 ]
 from hooplytics.data import NBADataUnavailable, PlayerStore, nba_seasons
 from hooplytics.models import ModelBundle, ensure_models, load_models
-from hooplytics.odds import fetch_live_player_lines, ingest_historical_odds, load_cached_historical_odds
+from hooplytics.matchups import (
+    attach_market_lines as _attach_market_lines,
+    build_slate_predictions as _build_slate_predictions,
+    to_grounding_payload as _matchup_grounding_payload,
+)
+from hooplytics.odds import (
+    fetch_game_lines,
+    fetch_live_player_lines,
+    ingest_historical_odds,
+    load_cached_game_lines,
+    load_cached_historical_odds,
+)
 from hooplytics.ai_agent import (
     AnthropicConnection,
     Connection as AIConnection,
@@ -4170,6 +4181,33 @@ def _render_projections_report(
         progress.progress(i / max(len(players), 1), text=f"Projection {i}/{len(players)}…")
     progress.empty()
 
+    # ── Team-vs-team matchup predictions ───────────────────────────────────
+    # These power both the new "Tonight's Matchups" PDF page and the grounding
+    # payload for AI Scout matchup prose. We compute them deterministically
+    # from the projections we already have plus tonight's slate, so the report
+    # still gets a matchup section even when AI prose is disabled.
+    matchup_preds = _build_slate_predictions(
+        slate=_todays_slate(),
+        abbr_to_full=_NBA_ABBR_TO_FULL,
+        modeling_df=modeling_df,
+        projections=projections or None,
+        roster_players=list(roster.keys()),
+    )
+    if matchup_preds:
+        # Pull the consensus game lines from the local cache first; fall back
+        # to a fresh fetch only when the user has an Odds API key. Cached
+        # lines are written by the player-props refresh, so most users will
+        # already have today's game lines on disk.
+        game_lines: list[dict] = load_cached_game_lines() or []
+        if not game_lines and api_key:
+            try:
+                game_lines = fetch_game_lines(api_key)
+            except Exception:
+                game_lines = []
+        if game_lines:
+            _attach_market_lines(matchup_preds, game_lines)
+    matchup_payload = _matchup_grounding_payload(matchup_preds)
+
     # ── AI prose (optional) ────────────────────────────────────────────────
     ai_sections: dict[str, Any] | None = None
     # When the user asked for AI but the prerequisites disappeared between
@@ -4188,6 +4226,12 @@ def _render_projections_report(
                     _today_matchup_map(_roster_key()),
                     modeling_df,
                 )
+                extras: dict[str, Any] = {
+                    "today_matchups": today_matchups,
+                    "todays_slate": _todays_slate(),
+                }
+                if matchup_payload:
+                    extras["matchup_predictions"] = matchup_payload
                 grounding = build_grounding_payload(
                     roster=roster,
                     bundle=bundle,
@@ -4195,10 +4239,7 @@ def _render_projections_report(
                     projections=projections or None,
                     recent_form=recent_form or None,
                     recent_form_windows=recent_form_windows or None,
-                    extras={
-                        "today_matchups": today_matchups,
-                        "todays_slate": _todays_slate(),
-                    },
+                    extras=extras,
                 )
                 ai_sections = generate_report_sections(
                     connection=conn,
@@ -4224,6 +4265,7 @@ def _render_projections_report(
             ai_sections=ai_sections,
             player_history=_player_history_lines_vs_outcomes(_roster_key()) or None,
             player_games=player_games or None,
+            matchup_predictions=matchup_payload or None,
         )
     except Exception as exc:
         st.error(f"PDF generation failed: {exc}")

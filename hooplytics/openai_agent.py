@@ -365,6 +365,15 @@ NAME the window in prose ("over his last 5", "over the last 10").
 - extras.today_matchups[player]: tonight's opponent + home/away for that \
 player. Authoritative — never guess opponents.
 - extras.todays_slate: tonight's full NBA slate.
+- extras.matchup_predictions: model team-vs-team forecasts. Each entry has \
+home_team, away_team, model_home_pts, model_away_pts, model_spread \
+(home minus away — positive = home favored), model_total, model_home_win_prob, \
+model_away_win_prob, top_contributors_home / top_contributors_away (top \
+projected scorers per team), confidence ('high'/'medium'/'low') and rostered \
+players. When market lines are present they appear as market_home_spread, \
+market_total, market_home_win_prob, spread_edge_vs_market, total_edge_vs_market, \
+and upset_flag. ALWAYS cite the model_* numbers verbatim — do not paraphrase \
+"55%" as "around 55" or invent precision the payload doesn't have.
 
 NUMERIC CITATION RULES:
 1. Every number you cite must appear verbatim in LOCAL CONTEXT or be a \
@@ -679,6 +688,23 @@ posture, the one thing to watch. No filler.",
   "slate_outlook": "ONE short paragraph, 3 sentences MAX, ~60 words. Lead \
 with the directional tilt and why. One sentence on what would break the \
 thesis. No second paragraph. No restating the executive summary.",
+  "matchups": {
+    "<Away Team> @ <Home Team>": {
+      "headline": "Punchy 5-9 word framing for the game (e.g. 'Magic eye \
+road upset over Pistons'). No betting-advice language.",
+      "narrative": "ONE short paragraph, 3-5 sentences, ~80 words. Lead with \
+the model's projected score and home win probability (cite both numbers \
+verbatim from extras.matchup_predictions). If a market line is available \
+(extras.matchup_predictions[matchup].market_home_spread or .market_total), \
+contrast the model's number with the market — flag any spread_edge_vs_market \
+of ≥2.0 points or any upset_flag=true game as a 'lean' (not a 'pick'). Name \
+1-2 of the highest-projected players from top_contributors_home / \
+top_contributors_away as the offensive engines. Close with the single \
+biggest swing factor (rotation depth, key matchup, road/rest). Confidence \
+field tells you how strongly to lean: 'high' = definitive language, \
+'medium' = lean language, 'low' = hedge ('thin signal — model wants ...')."
+    }
+  },
   "players": {
     "<Player Name>": {
       "news": "1-2 short sentences of current NBA context for this player \
@@ -925,7 +951,7 @@ def generate_report_sections(
             parsed = {}
 
     if not isinstance(parsed, dict):
-        return {"executive_summary": "", "slate_outlook": "", "players": {}}
+        return {"executive_summary": "", "slate_outlook": "", "matchups": {}, "players": {}}
 
     players_raw = parsed.get("players")
     players: dict[str, Any] = {}
@@ -953,9 +979,24 @@ def generate_report_sections(
                     "rationale": _scrub_prose_leaks(str(v.get("rationale", "")).strip()),
                 }
 
+    matchups_raw = parsed.get("matchups")
+    matchups: dict[str, Any] = {}
+    if isinstance(matchups_raw, dict):
+        for k, v in matchups_raw.items():
+            if not isinstance(k, str):
+                continue
+            if isinstance(v, dict):
+                matchups[k] = {
+                    "headline": _scrub_prose_leaks(str(v.get("headline", "")).strip()),
+                    "narrative": _scrub_prose_leaks(str(v.get("narrative", "")).strip()),
+                }
+            elif isinstance(v, str) and v.strip():
+                matchups[k] = {"headline": "", "narrative": _scrub_prose_leaks(v.strip())}
+
     return {
         "executive_summary": _scrub_prose_leaks(str(parsed.get("executive_summary", "")).strip()),
         "slate_outlook": _scrub_prose_leaks(str(parsed.get("slate_outlook", "")).strip()),
+        "matchups": matchups,
         "players": players,
     }
 

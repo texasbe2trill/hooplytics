@@ -784,6 +784,161 @@ def _safe_int(value: object) -> int | float:
         return float("nan")
 
 
+# ── Game lines (spread / total / moneyline) ─────────────────────────────────
+
+def _game_lines_cache_path(date_str: str) -> Path:
+    ODDS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return ODDS_CACHE_DIR / f"nba_game_lines_{date_str}.json"
+
+
+def fetch_game_lines(
+    api_key: str,
+    *,
+    force_refresh: bool = False,
+    min_refresh_minutes: int = _MIN_REFRESH_MINUTES,
+    timeout: float = 8.0,
+) -> list[dict]:
+    """Fetch consensus spread / total / moneyline for tonight's NBA slate.
+
+    Returns a list of ``{home_team, away_team, home_spread, total, home_ml,
+    away_ml, source, books}`` rows — one per game on the slate. Lines are the
+    median across the same NA bookmaker whitelist used for player props
+    (:data:`NA_BOOKMAKERS`). Empty list on off-days, no-key, or quota
+    exhaustion.
+
+    The h2h (moneyline), spreads, and totals markets are part of the standard
+    region package on The Odds API and do **not** carry the player-props price
+    multiplier — fetching them is one quota credit per market per region.
+    """
+    cache_path = _game_lines_cache_path(date.today().isoformat())
+    age = _cache_age_minutes(cache_path)
+    if cache_path.exists() and (not force_refresh or age < min_refresh_minutes):
+        try:
+            with cache_path.open("r") as f:
+                cached = json.load(f)
+            if isinstance(cached, list):
+                return cached
+        except Exception:  # noqa: BLE001
+            pass
+
+    if not api_key:
+        return []
+
+    try:
+        resp = requests.get(
+            f"{ODDS_BASE}/odds",
+            params={
+                "apiKey": api_key,
+                "regions": ODDS_REGIONS,
+                "markets": "h2h,spreads,totals",
+                "bookmakers": ",".join(NA_BOOKMAKERS),
+                "oddsFormat": "american",
+                "dateFormat": "iso",
+            },
+            timeout=timeout,
+        )
+    except Exception:  # noqa: BLE001
+        return []
+
+    if resp.status_code in (401, 429) or not resp.ok:
+        return []
+
+    try:
+        events = resp.json()
+    except Exception:  # noqa: BLE001
+        return []
+    if not isinstance(events, list):
+        return []
+
+    allowed_books = set(NA_BOOKMAKERS)
+    rows: list[dict] = []
+    for ev in events:
+        home = str(ev.get("home_team") or "").strip()
+        away = str(ev.get("away_team") or "").strip()
+        if not (home and away):
+            continue
+
+        spreads_home: list[float] = []
+        totals: list[float] = []
+        home_mls: list[float] = []
+        away_mls: list[float] = []
+        contributing_books: set[str] = set()
+
+        for bm in ev.get("bookmakers") or []:
+            if bm.get("key") not in allowed_books:
+                continue
+            for market in bm.get("markets") or []:
+                key = market.get("key")
+                outcomes = market.get("outcomes") or []
+                if key == "spreads":
+                    for o in outcomes:
+                        if o.get("name") == home:
+                            try:
+                                spreads_home.append(float(o.get("point")))
+                                contributing_books.add(bm.get("key", ""))
+                            except (TypeError, ValueError):
+                                continue
+                elif key == "totals":
+                    for o in outcomes:
+                        if o.get("name") == "Over":
+                            try:
+                                totals.append(float(o.get("point")))
+                                contributing_books.add(bm.get("key", ""))
+                            except (TypeError, ValueError):
+                                continue
+                elif key == "h2h":
+                    for o in outcomes:
+                        try:
+                            price = float(o.get("price"))
+                        except (TypeError, ValueError):
+                            continue
+                        if o.get("name") == home:
+                            home_mls.append(price)
+                            contributing_books.add(bm.get("key", ""))
+                        elif o.get("name") == away:
+                            away_mls.append(price)
+                            contributing_books.add(bm.get("key", ""))
+
+        rows.append({
+            "home_team": home,
+            "away_team": away,
+            "commence_time": str(ev.get("commence_time") or ""),
+            "home_spread": float(np.median(spreads_home)) if spreads_home else None,
+            "total": float(np.median(totals)) if totals else None,
+            "home_ml": float(np.median(home_mls)) if home_mls else None,
+            "away_ml": float(np.median(away_mls)) if away_mls else None,
+            "books": len(contributing_books),
+            "source": "consensus",
+        })
+
+    if rows:
+        try:
+            with cache_path.open("w") as f:
+                json.dump(rows, f)
+        except Exception:  # noqa: BLE001
+            pass
+    return rows
+
+
+def load_cached_game_lines(date_str: str | None = None) -> list[dict]:
+    """Load cached game lines for ``date_str`` (today by default).
+
+    Returns an empty list when no cache exists. Useful when you want the
+    market lines but don't want to risk burning a fresh API credit — the
+    Roster Report pulls these passively for grounding only.
+    """
+    iso = date_str or date.today().isoformat()
+    path = _game_lines_cache_path(iso)
+    if not path.exists():
+        return []
+    try:
+        with path.open("r") as f:
+            data = json.load(f)
+    except Exception:  # noqa: BLE001
+        return []
+    return data if isinstance(data, list) else []
+
+
 # ── Market discovery ─────────────────────────────────────────────────────────
 
 def fetch_event_available_markets(

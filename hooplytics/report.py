@@ -16,6 +16,7 @@ Design goals:
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from datetime import datetime
@@ -5642,6 +5643,375 @@ def _v2_tonight_setup_flowables(
     return flow
 
 
+# ── Page 2.5 — Tonight's Matchups ────────────────────────────────────────
+def _v2_matchups_flowables(
+    *,
+    matchup_predictions: list[dict] | None,
+    ai_sections: dict | None,
+    styles: dict,
+) -> list:
+    """Render one card per game on the slate with model-projected scores,
+    home win probability, and (when present) the AI Scout matchup narrative.
+
+    ``matchup_predictions`` is the JSON-friendly list produced by
+    :func:`hooplytics.matchups.to_grounding_payload` so the renderer never has
+    to reach back into the dataclass.
+    """
+    flow: list = []
+    if not matchup_predictions:
+        return flow
+
+    flow.append(PageBreak())
+    flow.append(_AnchorFlowable("v2-matchups", "Tonight's Matchups", level=0))
+    flow.append(_para("THE MATCHUPS  ·  TEAM-VS-TEAM FORECAST", styles["v2_section_eyebrow"]))
+    flow.append(_para("Tonight's Matchups.", styles["v2_section_title"]))
+    flow.append(_para(
+        "Roll-up of per-player projections into a team total, win probability, "
+        "and projected spread / total — anchored against the consensus market "
+        "line when one is available.",
+        styles["v2_section_dek"],
+    ))
+    flow.append(Spacer(1, 6))
+
+    ai_matchups = (ai_sections or {}).get("matchups") or {}
+
+    for entry in matchup_predictions:
+        if not isinstance(entry, dict):
+            continue
+        flow.append(KeepTogether(_v2_matchup_card(entry, ai_matchups, styles)))
+        flow.append(Spacer(1, 10))
+
+    return flow
+
+
+def _v2_matchup_card(
+    entry: dict,
+    ai_matchups: dict,
+    styles: dict,
+) -> list:
+    """Single matchup card. Rendered as a vertical stack of:
+
+    1. Team header strip with projected scores + win-prob bar.
+    2. Three-tile metric row (model spread vs market, total vs market, key players).
+    3. Optional AI Scout narrative panel when matched against the slate.
+    """
+    from reportlab.lib.enums import TA_RIGHT
+    home = str(entry.get("home_team", "") or "")
+    away = str(entry.get("away_team", "") or "")
+    matchup_label = str(entry.get("matchup") or f"{away} @ {home}")
+    home_pts = float(entry.get("model_home_pts") or 0.0)
+    away_pts = float(entry.get("model_away_pts") or 0.0)
+    spread = float(entry.get("model_spread") or 0.0)
+    total = float(entry.get("model_total") or 0.0)
+    p_home = float(entry.get("model_home_win_prob") or 0.5)
+    p_away = float(entry.get("model_away_win_prob") or 1.0 - p_home)
+    confidence = str(entry.get("confidence") or "medium").lower()
+    market_spread = entry.get("market_home_spread")
+    market_total = entry.get("market_total")
+    market_p_home = entry.get("market_home_win_prob")
+    spread_edge = entry.get("spread_edge_vs_market")
+    total_edge = entry.get("total_edge_vs_market")
+    upset = bool(entry.get("upset_flag"))
+
+    favored_home = spread >= 0
+    fav_pct = max(p_home, p_away)
+    fav_team = home if favored_home else away
+    fav_color = V2_TIER_HIGH if confidence == "high" else (
+        V2_ACCENT_TEAL if confidence == "medium" else INK_MUTED
+    )
+
+    # ── Header strip: AWAY  vs  HOME, projected scores ──
+    # Each side stacks eyebrow + team name + score in their own 3-row table
+    # so the 28-pt score never collides with the 14-pt team name.
+    def _team_block(eyebrow: str, name: str, score: float) -> Table:
+        t = Table(
+            [
+                [Paragraph(
+                    f"<font size='8' name='{_BOLD_FONT}' color='#9aa3b2'>"
+                    f"<b>{eyebrow}</b></font>",
+                    ParagraphStyle("v2_match_eyebrow", fontName=_BOLD_FONT,
+                                   fontSize=8, leading=10, textColor=INK_MUTED,
+                                   alignment=TA_LEFT),
+                )],
+                [Paragraph(
+                    f"<font size='14' name='{_V2_SERIF_BOLD}' color='#ffffff'>"
+                    f"<b>{_safe_text(name)}</b></font>",
+                    ParagraphStyle("v2_match_team", fontName=_V2_SERIF_BOLD,
+                                   fontSize=14, leading=18, textColor=WHITE,
+                                   alignment=TA_LEFT),
+                )],
+                [Paragraph(
+                    f"<font size='30' name='{_V2_SERIF_BOLD}' color='#ffffff'>"
+                    f"<b>{score:.1f}</b></font>",
+                    ParagraphStyle("v2_match_score", fontName=_V2_SERIF_BOLD,
+                                   fontSize=30, leading=34, textColor=WHITE,
+                                   alignment=TA_LEFT),
+                )],
+            ],
+            colWidths=[3.2 * inch],
+        )
+        t.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 1),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+        ]))
+        return t
+
+    away_block = _team_block("AWAY", away, away_pts)
+    home_block = _team_block("HOME", home, home_pts)
+    sep = Paragraph(
+        f"<font size='14' name='{_BOLD_FONT}' color='#ff7a18'><b>vs</b></font>",
+        ParagraphStyle("v2_match_vs", fontName=_BOLD_FONT, fontSize=14,
+                       leading=16, textColor=BRAND_ORANGE, alignment=TA_CENTER,
+                       wordWrap=None),
+    )
+    header = Table(
+        [[away_block, sep, home_block]],
+        colWidths=[3.0 * inch, 0.9 * inch, 3.0 * inch],
+    )
+    header.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), V2_BG_INK),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (1, 0), (1, 0), "CENTER"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 18),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 18),
+        ("TOPPADDING", (0, 0), (-1, -1), 14),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 14),
+    ]))
+
+    # ── Win-prob bar ──
+    bar_left_w = max(0.05, min(0.95, p_away))
+    bar_right_w = 1.0 - bar_left_w
+    bar = Table(
+        [[
+            Paragraph(
+                f"<font size='8' name='{_BOLD_FONT}' color='#ffffff'>"
+                f"<b>{_safe_text(away)} {p_away*100:.0f}%</b></font>",
+                ParagraphStyle("v2_bar_away", fontName=_BOLD_FONT, fontSize=8,
+                               leading=11, textColor=WHITE, alignment=TA_LEFT),
+            ),
+            Paragraph(
+                f"<font size='8' name='{_BOLD_FONT}' color='#ffffff'>"
+                f"<b>{p_home*100:.0f}% {_safe_text(home)}</b></font>",
+                ParagraphStyle("v2_bar_home", fontName=_BOLD_FONT, fontSize=8,
+                               leading=11, textColor=WHITE, alignment=TA_RIGHT),
+            ),
+        ]],
+        colWidths=[bar_left_w * 7.0 * inch, bar_right_w * 7.0 * inch],
+    )
+    away_bar_color = V2_TIER_LOW if not favored_home else INK_MUTED
+    home_bar_color = V2_TIER_HIGH if favored_home else INK_MUTED
+    bar.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, 0), away_bar_color),
+        ("BACKGROUND", (1, 0), (1, 0), home_bar_color),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+
+    # ── Metric tiles row ──
+    fav_short = fav_team
+    fav_pct_label = f"{fav_pct*100:.0f}%"
+    spread_str = f"{abs(spread):.1f}"
+    spread_sign_team = home if favored_home else away
+    if confidence == "low":
+        wp_eyebrow = "LEAN"
+    elif upset:
+        wp_eyebrow = "UPSET WATCH"
+    else:
+        wp_eyebrow = "MODEL FAVORS"
+    spread_sub = (
+        f"Projected margin: {spread_sign_team} by {spread_str}"
+        + (f"  ·  market {_v2_format_market_spread(market_spread, home)}"
+           if market_spread is not None else "")
+    )
+    if isinstance(spread_edge, (int, float)):
+        spread_sub += f"  ·  edge {spread_edge:+.1f}"
+
+    total_str = f"{total:.1f}"
+    if isinstance(market_total, (int, float)):
+        total_sub = f"Market {market_total:.1f}"
+        if isinstance(total_edge, (int, float)):
+            total_sub += f"  ·  edge {total_edge:+.1f}"
+    else:
+        total_sub = "No market line — model-only"
+
+    # Pull two top-projected players (one per team) for the "engines" tile.
+    top_home = (entry.get("top_contributors_home") or [{}])[0]
+    top_away = (entry.get("top_contributors_away") or [{}])[0]
+    rostered_home = entry.get("rostered_players_home") or []
+    rostered_away = entry.get("rostered_players_away") or []
+    rostered_count = len(rostered_home) + len(rostered_away)
+    rostered_label = (
+        f"{rostered_count} rostered in this game"
+        if rostered_count else "No rostered players in this game"
+    )
+
+    def _tile(eyebrow: str, headline: str, sub: str, accent: colors.Color) -> Table:
+        body = Paragraph(
+            f"<font size='8' name='{_BOLD_FONT}' color='#cc5a00'><b>{_safe_text(eyebrow)}</b></font>"
+            f"<br/><br/>"
+            f"<font size='15' name='{_V2_SERIF_BOLD}' color='#0a0e14'>"
+            f"<b>{_safe_text(headline)}</b></font>"
+            f"<br/>"
+            f"<font size='8' color='#6b7686'>{_safe_text(sub)}</font>",
+            ParagraphStyle("v2_match_tile", fontName=_BODY_FONT, fontSize=10,
+                           leading=13.5, textColor=INK_BODY),
+        )
+        t = Table([[body]], colWidths=[2.32 * inch])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), V2_BG_CREAM),
+            ("LINEABOVE", (0, 0), (-1, 0), 2.0, accent),
+            ("LEFTPADDING", (0, 0), (-1, -1), 12),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+            ("TOPPADDING", (0, 0), (-1, -1), 12),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ]))
+        return t
+
+    # Engines tile: two stacked rows so long player names never wrap awkwardly.
+    engines_lines: list[str] = []
+    for top, label in ((top_away, away), (top_home, home)):
+        player = str(top.get("player") or "").strip()
+        if not player:
+            continue
+        pts = float(top.get("pts_proj") or 0.0)
+        engines_lines.append(
+            f"<font size='10.5' name='{_V2_SERIF_BOLD}' color='#0a0e14'>"
+            f"<b>{_safe_text(player)}</b></font>  "
+            f"<font size='9' name='{_BOLD_FONT}' color='#cc5a00'>"
+            f"<b>{pts:.1f} pts</b></font>"
+        )
+    engines_body = (
+        "<br/>".join(engines_lines) if engines_lines
+        else "<font size='9' color='#9aa3b2'>No rotation coverage</font>"
+    )
+    engines_para = Paragraph(
+        f"<font size='8' name='{_BOLD_FONT}' color='#cc5a00'><b>OFFENSIVE ENGINES</b></font>"
+        f"<br/><br/>{engines_body}"
+        f"<br/><br/><font size='8' color='#6b7686'>{_safe_text(rostered_label)}</font>",
+        ParagraphStyle("v2_match_engines", fontName=_BODY_FONT, fontSize=10,
+                       leading=14, textColor=INK_BODY),
+    )
+    engines_tile = Table([[engines_para]], colWidths=[2.5 * inch])
+    engines_tile.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), V2_BG_CREAM),
+        ("LINEABOVE", (0, 0), (-1, 0), 2.0, BRAND_ORANGE),
+        ("LEFTPADDING", (0, 0), (-1, -1), 12),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+        ("TOPPADDING", (0, 0), (-1, -1), 12),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ]))
+
+    win_accent = NEG_RED if upset else (V2_TIER_HIGH if confidence != "low" else INK_MUTED)
+    tiles = Table(
+        [[
+            _tile(
+                wp_eyebrow,
+                f"{_safe_text(fav_short)} {fav_pct_label}",
+                spread_sub,
+                win_accent,
+            ),
+            _tile("PROJECTED TOTAL", total_str, total_sub, V2_ACCENT_TEAL),
+            engines_tile,
+        ]],
+        colWidths=[2.4 * inch, 2.4 * inch, 2.5 * inch],
+    )
+    tiles.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+    ]))
+
+    # ── AI prose panel ──
+    ai_block = _v2_match_lookup_ai(matchup_label, away, home, ai_matchups)
+    ai_flow: list = []
+    if ai_block:
+        headline = str(ai_block.get("headline", "")).strip()
+        narrative = str(ai_block.get("narrative", "")).strip()
+        if headline or narrative:
+            inner_parts: list[str] = []
+            if headline:
+                inner_parts.append(
+                    f"<font size='14' name='{_V2_SERIF_BOLD}' color='#0a0e14'>"
+                    f"<b>{_safe_text(headline)}</b></font>"
+                )
+            if narrative:
+                inner_parts.append(
+                    f"<font size='9.5' color='#2b3340'>{_safe_text(narrative)}</font>"
+                )
+            ai_para = Paragraph(
+                "<font size='8' name='{font}' color='#cc5a00'><b>AI&nbsp;SCOUT&nbsp;·&nbsp;NARRATIVE</b></font>"
+                "<br/><br/>".format(font=_BOLD_FONT)
+                + "<br/><br/>".join(inner_parts),
+                ParagraphStyle("v2_match_ai", fontName=_BODY_FONT, fontSize=10,
+                               leading=14, textColor=INK_BODY),
+            )
+            ai_panel = Table([[ai_para]], colWidths=[7.3 * inch])
+            ai_panel.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), V2_BG_CREAM),
+                ("LINEBEFORE", (0, 0), (0, -1), 3, BRAND_ORANGE_DEEP),
+                ("LEFTPADDING", (0, 0), (-1, -1), 16),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 16),
+                ("TOPPADDING", (0, 0), (-1, -1), 12),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]))
+            ai_flow = [Spacer(1, 8), ai_panel]
+
+    return [header, bar, Spacer(1, 8), tiles, *ai_flow]
+
+
+def _v2_format_market_spread(market_spread: float, home_team: str) -> str:
+    """Render an Odds-API-style spread (signed, home-team-relative).
+
+    ``market_spread`` is the home team's posted spread: a value of ``-3.5``
+    means the home team is favored by 3.5; ``+3.5`` means the home team is
+    the underdog. Returns a string like ``Detroit Pistons -7.5``.
+    """
+    if not isinstance(market_spread, (int, float)) or not math.isfinite(float(market_spread)):
+        return ""
+    sign = "-" if market_spread < 0 else "+"
+    return f"{home_team} {sign}{abs(float(market_spread)):.1f}"
+
+
+def _v2_match_lookup_ai(
+    matchup_label: str,
+    away: str,
+    home: str,
+    ai_matchups: dict,
+) -> dict | None:
+    """Tolerant lookup for the AI matchup entry — the AI might key by
+    ``"<away> @ <home>"``, ``"<home> vs <away>"``, or just team names.
+    """
+    if not isinstance(ai_matchups, dict) or not ai_matchups:
+        return None
+    candidates = [
+        matchup_label,
+        f"{away} @ {home}",
+        f"{home} vs {away}",
+        f"{away} at {home}",
+        home,
+        away,
+    ]
+    norm_index = {str(k).strip().lower(): v for k, v in ai_matchups.items()}
+    for cand in candidates:
+        v = norm_index.get(cand.strip().lower())
+        if isinstance(v, dict):
+            return v
+    # Last-resort partial match
+    for k, v in norm_index.items():
+        if isinstance(v, dict) and away.lower() in k and home.lower() in k:
+            return v
+    return None
+
+
 # ── Page 3 — The Signal Board ─────────────────────────────────────────────
 def _v2_signal_board_flowables(
     *,
@@ -6542,6 +6912,7 @@ def build_pdf_report(
     ai_sections: dict[str, Any] | None = None,
     player_history: dict[str, pd.DataFrame] | None = None,
     player_games: dict[str, pd.DataFrame] | None = None,
+    matchup_predictions: list[dict] | None = None,
 ) -> bytes:
     """Render the report and return the PDF as raw bytes.
 
@@ -6675,6 +7046,14 @@ def build_pdf_report(
         ai_sections=ai_sections,
         styles=styles,
     ))
+
+    # ── Page 2.5 — Tonight's Matchups (only when we have slate predictions) ──
+    if matchup_predictions:
+        flow.extend(_v2_matchups_flowables(
+            matchup_predictions=matchup_predictions,
+            ai_sections=ai_sections,
+            styles=styles,
+        ))
 
     # ── Page 3 — The Signal Board ──
     flow.extend(_v2_signal_board_flowables(
