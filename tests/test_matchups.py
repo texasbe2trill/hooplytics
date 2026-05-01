@@ -68,9 +68,31 @@ def test_project_matchup_handles_missing_team() -> None:
         abbr_to_full=ABBR, modeling_df=_modeling_df(), projections=None,
         roster_players=None,
     )
-    assert pred.confidence == "low"
+    # Confidence is "thin" when one side has no coverage at all — callers
+    # should use this to suppress the model rollup and fall back to market data.
+    assert pred.confidence == "thin"
     assert pred.rotation_players_away == []
     assert pred.away_pts_proj == 0.0
+
+
+def test_build_slate_predictions_roster_only_filters_unrelated_games() -> None:
+    slate = [
+        # Game with rostered players (synthetic modeling_df only has DET/ORL).
+        {"home_team": "Detroit Pistons", "away_team": "Orlando Magic",
+         "matchup": "ORL @ DET", "tipoff_iso": ""},
+        # Game with no rostered players (Phoenix vs Lakers).
+        {"home_team": "Phoenix Suns", "away_team": "Los Angeles Lakers",
+         "matchup": "LAL @ PHX", "tipoff_iso": ""},
+    ]
+    projections = {
+        "Cade": pd.DataFrame([{"model": "points", "prediction": 28.0}]),
+    }
+    preds = build_slate_predictions(
+        slate=slate, abbr_to_full=ABBR, modeling_df=_modeling_df(),
+        projections=projections, roster_players=["Cade"], roster_only=True,
+    )
+    assert len(preds) == 1
+    assert preds[0].home_team == "Detroit Pistons"
 
 
 def test_build_slate_predictions_skips_invalid_entries() -> None:

@@ -15,6 +15,21 @@ def test_canon_name_handles_punctuation() -> None:
     assert _canon_name("Shai Gilgeous-Alexander") == _canon_name("Shai Gilgeous Alexander")
 
 
+def test_canon_name_strips_generational_suffixes() -> None:
+    # NBA Stats often carries "Jr."/"Sr."/"III" while The Odds API drops the
+    # suffix. Both must canonicalize to the same key or the historical
+    # lines-vs-outcomes join silently loses these players.
+    assert _canon_name("Jabari Smith Jr.") == _canon_name("Jabari Smith")
+    assert _canon_name("Tim Hardaway Jr.") == _canon_name("Tim Hardaway")
+    assert _canon_name("Larry Nance Jr") == _canon_name("Larry Nance")
+    assert _canon_name("Marvin Bagley III") == _canon_name("Marvin Bagley")
+    # Non-suffixed names must still round-trip cleanly.
+    assert _canon_name("LeBron James") == "lebronjames"
+    # Empty input is tolerant.
+    assert _canon_name("") == ""
+    assert _canon_name(None) == ""
+
+
 def test_fetch_live_player_lines_empty_inputs() -> None:
     assert fetch_live_player_lines("", ["LeBron James"]).empty
     assert fetch_live_player_lines("fake-key", []).empty

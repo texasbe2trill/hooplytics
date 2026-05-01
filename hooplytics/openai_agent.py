@@ -366,14 +366,20 @@ NAME the window in prose ("over his last 5", "over the last 10").
 player. Authoritative — never guess opponents.
 - extras.todays_slate: tonight's full NBA slate.
 - extras.matchup_predictions: model team-vs-team forecasts. Each entry has \
-home_team, away_team, model_home_pts, model_away_pts, model_spread \
-(home minus away — positive = home favored), model_total, model_home_win_prob, \
-model_away_win_prob, top_contributors_home / top_contributors_away (top \
-projected scorers per team), confidence ('high'/'medium'/'low') and rostered \
-players. When market lines are present they appear as market_home_spread, \
-market_total, market_home_win_prob, spread_edge_vs_market, total_edge_vs_market, \
-and upset_flag. ALWAYS cite the model_* numbers verbatim — do not paraphrase \
-"55%" as "around 55" or invent precision the payload doesn't have.
+display_summary (the EXACT numbers shown on the printed card — your prose \
+must mirror these verbatim), home_team, away_team, model_home_pts, \
+model_away_pts, model_spread (home minus away — positive = home favored), \
+model_total, model_home_win_prob, model_away_win_prob, top_contributors_home / \
+top_contributors_away (top projected scorers per team), confidence \
+('high'/'medium'/'low'/'thin') and rostered players. When market lines \
+are present they appear as market_home_spread, market_total, \
+market_home_win_prob, spread_edge_vs_market, total_edge_vs_market, and \
+upset_flag. CRITICAL: confidence='thin' means the model team rollup is \
+unreliable — do NOT cite model_home_pts / model_away_pts / model_spread / \
+model_total / model_home_win_prob in those games. Use market fields and \
+the rostered players' individual projections instead. The display_summary \
+field tells you which team is favored and at what percentage; never \
+contradict it.
 
 NUMERIC CITATION RULES:
 1. Every number you cite must appear verbatim in LOCAL CONTEXT or be a \
@@ -692,17 +698,51 @@ thesis. No second paragraph. No restating the executive summary.",
     "<Away Team> @ <Home Team>": {
       "headline": "Punchy 5-9 word framing for the game (e.g. 'Magic eye \
 road upset over Pistons'). No betting-advice language.",
-      "narrative": "ONE short paragraph, 3-5 sentences, ~80 words. Lead with \
-the model's projected score and home win probability (cite both numbers \
-verbatim from extras.matchup_predictions). If a market line is available \
-(extras.matchup_predictions[matchup].market_home_spread or .market_total), \
-contrast the model's number with the market — flag any spread_edge_vs_market \
-of ≥2.0 points or any upset_flag=true game as a 'lean' (not a 'pick'). Name \
-1-2 of the highest-projected players from top_contributors_home / \
-top_contributors_away as the offensive engines. Close with the single \
-biggest swing factor (rotation depth, key matchup, road/rest). Confidence \
-field tells you how strongly to lean: 'high' = definitive language, \
-'medium' = lean language, 'low' = hedge ('thin signal — model wants ...')."
+      "narrative": "ONE short paragraph, 3-5 sentences, ~80 words. \
+\
+NUMBERS LOCKDOWN (HARD RULE — your output is rendered next to a card that \
+shows specific percentages and spreads, so a mismatch is immediately \
+visible to the reader): \
+\
+  • The display_summary field on each matchup is the SINGLE SOURCE OF \
+    TRUTH for win probability, market spread, and market total. Read it \
+    once and mirror those numbers EXACTLY. Do not round 60% to 'roughly \
+    55%'. Do not flip the favorite. Do not invent a percentage that is \
+    not in display_summary. \
+  • Whichever team display_summary names as the favorite IS the favorite. \
+    Do not write 'model leans <team>' for the OTHER team. \
+  • If display_summary starts with 'MARKET WP', you MUST NOT cite \
+    model_home_pts, model_away_pts, model_spread, model_total, or \
+    model_home_win_prob anywhere in the narrative — they are dominated by \
+    partial rotation coverage and will contradict the displayed market \
+    numbers. Anchor on market_home_spread / market_total / \
+    market_home_win_prob and the rostered players' individual projections. \
+  • If display_summary starts with 'MODEL WP', you may cite model_* fields, \
+    but only verbatim. Confidence='high' → definitive language. \
+    'medium'/'low' → 'lean' / 'directional'. \
+\
+TONE LOCKDOWN (HARD RULE — even when every number you cite is correct, an \
+anti-favorite headline or 'underdog wins' framing reads as a contradiction \
+to the card): \
+\
+  • Headline and narrative voice MUST align with the favorite named in \
+    display_summary. If display_summary says 'Detroit Pistons 60%', the \
+    headline cannot read 'Magic defense caps a Cade-heavy Pistons night' \
+    or 'Pistons counting lines in trouble' — that frames the underdog as \
+    the smart side. \
+  • Frame the underdog's strengths (defense, pace, key player) as RISKS to \
+    the favorite, not as reasons the underdog will win. Acceptable: 'Magic \
+    defense is the swing factor — if Orlando dictates pace, Detroit's \
+    counting lines tighten.' Not acceptable: 'Magic shut down Pistons.' \
+  • Upset language ('upset watch', 'lean underdog') is ONLY allowed when \
+    upset_flag=true OR spread_edge_vs_market >= 2.0 in the model's favor \
+    of the underdog. Otherwise stay aligned with the favorite. \
+\
+Then: contrast model vs market when both are present in display_summary — \
+flag spread_edge_vs_market >= 2.0 or upset_flag=true as a 'lean' (never a \
+'pick'). Name 1-2 of the rostered players (rostered_players_home / \
+rostered_players_away) and what they bring to this matchup. Close with the \
+single biggest swing factor (rotation depth, key matchup, road/rest)."
     }
   },
   "players": {

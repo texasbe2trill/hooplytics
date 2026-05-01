@@ -4852,6 +4852,44 @@ def _v2_confidence_heatmap(
     return d
 
 
+# Per-player history-table status strings. These mirror the values the app
+# layer emits in ``_player_history_lines_vs_outcomes`` and pick which
+# placeholder we render when a player has no resolved lines.
+_PLAYER_HISTORY_STATUS_HAS_LINES = "has_lines"
+_PLAYER_HISTORY_STATUS_NO_API_COVERAGE = "no_api_coverage"
+_PLAYER_HISTORY_STATUS_NO_GAME_OVERLAP = "no_game_overlap"
+_PLAYER_HISTORY_STATUS_EMPTY_CACHE = "empty_cache"
+
+
+# Generational suffixes that should never be displayed as a player's
+# "last name" on their own — for "Jabari Smith Jr." we want "Smith Jr."
+# in the legend, not the bare "Jr." that ``split()[-1]`` produces.
+_NAME_SUFFIXES: frozenset[str] = frozenset({
+    "jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "v",
+})
+
+
+def _legend_last_name(full_name: str) -> str:
+    """Last token of ``full_name``, with a generational suffix glued back on.
+
+    "Jabari Smith Jr."  → "Smith Jr."
+    "LeBron James"       → "James"
+    "Karl-Anthony Towns" → "Towns"
+    Empty / single-token names fall back to whatever was passed in.
+    """
+    if not full_name:
+        return "?"
+    tokens = full_name.split()
+    if not tokens:
+        return full_name
+    if len(tokens) == 1:
+        return tokens[0]
+    last = tokens[-1]
+    if last.lower().rstrip(".") in {s.rstrip(".") for s in _NAME_SUFFIXES}:
+        return f"{tokens[-2]} {last}"
+    return last
+
+
 # ── 3. Edge × Confidence quadrant ──────────────────────────────────────────
 def _v2_edge_confidence_quadrant(
     edge_df: pd.DataFrame | None,
@@ -5006,7 +5044,7 @@ def _v2_edge_confidence_quadrant(
                      fillColor=col, textAnchor="middle"))
 
         player = str(row.get("player", ""))
-        last_name = player.split()[-1] if player else "?"
+        last_name = _legend_last_name(player)
         market = market_short.get(str(row.get("model", "")).lower(),
                                   str(row.get("model", ""))[:3].upper())
         legend.append({
@@ -5666,9 +5704,10 @@ def _v2_matchups_flowables(
     flow.append(_para("THE MATCHUPS  ·  TEAM-VS-TEAM FORECAST", styles["v2_section_eyebrow"]))
     flow.append(_para("Tonight's Matchups.", styles["v2_section_title"]))
     flow.append(_para(
-        "Roll-up of per-player projections into a team total, win probability, "
-        "and projected spread / total — anchored against the consensus market "
-        "line when one is available.",
+        "Only the games on tonight's slate where you have rostered players. "
+        "Each card pairs the model's read with the consensus market line — "
+        "and falls back to market-anchored numbers when rotation coverage is "
+        "too thin to produce a reliable team rollup.",
         styles["v2_section_dek"],
     ))
     flow.append(Spacer(1, 6))
@@ -5691,9 +5730,13 @@ def _v2_matchup_card(
 ) -> list:
     """Single matchup card. Rendered as a vertical stack of:
 
-    1. Team header strip with projected scores + win-prob bar.
-    2. Three-tile metric row (model spread vs market, total vs market, key players).
-    3. Optional AI Scout narrative panel when matched against the slate.
+    1. Team header strip — projected scores when rotation coverage is solid,
+       or just team names when coverage is thin.
+    2. Win-probability bar (only when we trust the rollup).
+    3. Three metric tiles — switches between model-derived numbers (good
+       coverage) and market-anchored numbers (thin coverage) so we never
+       print misleading totals like "Toronto 0.0".
+    4. Optional AI Scout narrative panel.
     """
     from reportlab.lib.enums import TA_RIGHT
     home = str(entry.get("home_team", "") or "")
@@ -5713,43 +5756,57 @@ def _v2_matchup_card(
     total_edge = entry.get("total_edge_vs_market")
     upset = bool(entry.get("upset_flag"))
 
-    favored_home = spread >= 0
-    fav_pct = max(p_home, p_away)
-    fav_team = home if favored_home else away
-    fav_color = V2_TIER_HIGH if confidence == "high" else (
-        V2_ACCENT_TEAL if confidence == "medium" else INK_MUTED
-    )
+    # When rotation coverage is too thin, the model team totals are dominated
+    # by whichever side happens to be in the user's modeling frame. In that
+    # case we pivot to a market-anchored card: header without scores, no
+    # win-prob bar (unless market moneylines are available), and tiles that
+    # surface market data + rostered players instead of nonsense rollups.
+    rollup_trustworthy = confidence in {"high", "medium", "low"}
 
-    # ── Header strip: AWAY  vs  HOME, projected scores ──
-    # Each side stacks eyebrow + team name + score in their own 3-row table
-    # so the 28-pt score never collides with the 14-pt team name.
-    def _team_block(eyebrow: str, name: str, score: float) -> Table:
-        t = Table(
-            [
-                [Paragraph(
-                    f"<font size='8' name='{_BOLD_FONT}' color='#9aa3b2'>"
-                    f"<b>{eyebrow}</b></font>",
-                    ParagraphStyle("v2_match_eyebrow", fontName=_BOLD_FONT,
-                                   fontSize=8, leading=10, textColor=INK_MUTED,
-                                   alignment=TA_LEFT),
-                )],
-                [Paragraph(
-                    f"<font size='14' name='{_V2_SERIF_BOLD}' color='#ffffff'>"
-                    f"<b>{_safe_text(name)}</b></font>",
-                    ParagraphStyle("v2_match_team", fontName=_V2_SERIF_BOLD,
-                                   fontSize=14, leading=18, textColor=WHITE,
-                                   alignment=TA_LEFT),
-                )],
-                [Paragraph(
-                    f"<font size='30' name='{_V2_SERIF_BOLD}' color='#ffffff'>"
-                    f"<b>{score:.1f}</b></font>",
-                    ParagraphStyle("v2_match_score", fontName=_V2_SERIF_BOLD,
-                                   fontSize=30, leading=34, textColor=WHITE,
-                                   alignment=TA_LEFT),
-                )],
-            ],
-            colWidths=[3.2 * inch],
-        )
+    # Win-prob source: model when rollup is trusted; market moneyline (already
+    # de-vigged in matchups.attach_market_lines) when not. Fall back to None
+    # (suppress the bar entirely) when neither is available.
+    if rollup_trustworthy:
+        wp_home = p_home
+        wp_source = "model"
+    elif isinstance(market_p_home, (int, float)):
+        wp_home = float(market_p_home)
+        wp_source = "market"
+    else:
+        wp_home = None
+        wp_source = ""
+    wp_away = (1.0 - wp_home) if wp_home is not None else None
+    favored_home = (wp_home or 0.5) >= 0.5
+
+    # ── Header strip: AWAY  vs  HOME ──
+    # Show projected scores only when the rollup is trustworthy. Otherwise
+    # just team names (no fake scores).
+    def _team_block(eyebrow: str, name: str, score: float | None) -> Table:
+        rows: list[list] = [
+            [Paragraph(
+                f"<font size='8' name='{_BOLD_FONT}' color='#9aa3b2'>"
+                f"<b>{eyebrow}</b></font>",
+                ParagraphStyle("v2_match_eyebrow", fontName=_BOLD_FONT,
+                               fontSize=8, leading=10, textColor=INK_MUTED,
+                               alignment=TA_LEFT),
+            )],
+            [Paragraph(
+                f"<font size='14' name='{_V2_SERIF_BOLD}' color='#ffffff'>"
+                f"<b>{_safe_text(name)}</b></font>",
+                ParagraphStyle("v2_match_team", fontName=_V2_SERIF_BOLD,
+                               fontSize=14, leading=18, textColor=WHITE,
+                               alignment=TA_LEFT),
+            )],
+        ]
+        if score is not None:
+            rows.append([Paragraph(
+                f"<font size='30' name='{_V2_SERIF_BOLD}' color='#ffffff'>"
+                f"<b>{score:.1f}</b></font>",
+                ParagraphStyle("v2_match_score", fontName=_V2_SERIF_BOLD,
+                               fontSize=30, leading=34, textColor=WHITE,
+                               alignment=TA_LEFT),
+            )])
+        t = Table(rows, colWidths=[3.0 * inch])
         t.setStyle(TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("LEFTPADDING", (0, 0), (-1, -1), 0),
@@ -5759,8 +5816,10 @@ def _v2_matchup_card(
         ]))
         return t
 
-    away_block = _team_block("AWAY", away, away_pts)
-    home_block = _team_block("HOME", home, home_pts)
+    score_away = away_pts if rollup_trustworthy else None
+    score_home = home_pts if rollup_trustworthy else None
+    away_block = _team_block("AWAY", away, score_away)
+    home_block = _team_block("HOME", home, score_home)
     sep = Paragraph(
         f"<font size='14' name='{_BOLD_FONT}' color='#ff7a18'><b>vs</b></font>",
         ParagraphStyle("v2_match_vs", fontName=_BOLD_FONT, fontSize=14,
@@ -5781,75 +5840,179 @@ def _v2_matchup_card(
         ("BOTTOMPADDING", (0, 0), (-1, -1), 14),
     ]))
 
-    # ── Win-prob bar ──
-    bar_left_w = max(0.05, min(0.95, p_away))
-    bar_right_w = 1.0 - bar_left_w
-    bar = Table(
-        [[
-            Paragraph(
-                f"<font size='8' name='{_BOLD_FONT}' color='#ffffff'>"
-                f"<b>{_safe_text(away)} {p_away*100:.0f}%</b></font>",
-                ParagraphStyle("v2_bar_away", fontName=_BOLD_FONT, fontSize=8,
-                               leading=11, textColor=WHITE, alignment=TA_LEFT),
-            ),
-            Paragraph(
-                f"<font size='8' name='{_BOLD_FONT}' color='#ffffff'>"
-                f"<b>{p_home*100:.0f}% {_safe_text(home)}</b></font>",
-                ParagraphStyle("v2_bar_home", fontName=_BOLD_FONT, fontSize=8,
-                               leading=11, textColor=WHITE, alignment=TA_RIGHT),
-            ),
-        ]],
-        colWidths=[bar_left_w * 7.0 * inch, bar_right_w * 7.0 * inch],
-    )
-    away_bar_color = V2_TIER_LOW if not favored_home else INK_MUTED
-    home_bar_color = V2_TIER_HIGH if favored_home else INK_MUTED
-    bar.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (0, 0), away_bar_color),
-        ("BACKGROUND", (1, 0), (1, 0), home_bar_color),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 10),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-        ("TOPPADDING", (0, 0), (-1, -1), 6),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-    ]))
+    # ── Win-prob bar (rendered only when we have a trustworthy probability) ──
+    # Team labels live in a separate row ABOVE the bar so a narrow segment
+    # never forces the team name to wrap one character per line.
+    bar_flow: list = []
+    if wp_home is not None and wp_away is not None:
+        wp_label_total = 7.3 * inch  # full inner width of the card
+        labels = Table(
+            [[
+                Paragraph(
+                    f"<font size='8' name='{_BOLD_FONT}' color='#6b7686'>"
+                    f"<b>{_safe_text(away)} · {wp_away*100:.0f}%</b></font>",
+                    ParagraphStyle("v2_bar_label_away", fontName=_BOLD_FONT,
+                                   fontSize=8, leading=11, textColor=INK_MUTED,
+                                   alignment=TA_LEFT),
+                ),
+                Paragraph(
+                    f"<font size='7.5' name='{_BOLD_FONT}' color='#cc5a00'>"
+                    f"<b>WIN PROBABILITY · {wp_source.upper()}</b></font>",
+                    ParagraphStyle("v2_bar_eyebrow", fontName=_BOLD_FONT,
+                                   fontSize=7.5, leading=10,
+                                   textColor=BRAND_ORANGE_DEEP, alignment=TA_CENTER),
+                ),
+                Paragraph(
+                    f"<font size='8' name='{_BOLD_FONT}' color='#6b7686'>"
+                    f"<b>{wp_home*100:.0f}% · {_safe_text(home)}</b></font>",
+                    ParagraphStyle("v2_bar_label_home", fontName=_BOLD_FONT,
+                                   fontSize=8, leading=11, textColor=INK_MUTED,
+                                   alignment=TA_RIGHT),
+                ),
+            ]],
+            colWidths=[wp_label_total * 0.4, wp_label_total * 0.2, wp_label_total * 0.4],
+        )
+        labels.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+
+        bar_left_w = max(0.02, min(0.98, wp_away))
+        bar_right_w = 1.0 - bar_left_w
+        away_bar_color = V2_TIER_LOW if not favored_home else INK_MUTED
+        home_bar_color = V2_TIER_HIGH if favored_home else INK_MUTED
+        bar = Table(
+            [[Paragraph("", styles["body"]), Paragraph("", styles["body"])]],
+            colWidths=[bar_left_w * wp_label_total, bar_right_w * wp_label_total],
+            rowHeights=[0.18 * inch],
+        )
+        bar.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (0, 0), away_bar_color),
+            ("BACKGROUND", (1, 0), (1, 0), home_bar_color),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        bar_flow = [Spacer(1, 8), labels, bar]
 
     # ── Metric tiles row ──
-    fav_short = fav_team
-    fav_pct_label = f"{fav_pct*100:.0f}%"
-    spread_str = f"{abs(spread):.1f}"
-    spread_sign_team = home if favored_home else away
-    if confidence == "low":
-        wp_eyebrow = "LEAN"
-    elif upset:
-        wp_eyebrow = "UPSET WATCH"
-    else:
-        wp_eyebrow = "MODEL FAVORS"
-    spread_sub = (
-        f"Projected margin: {spread_sign_team} by {spread_str}"
-        + (f"  ·  market {_v2_format_market_spread(market_spread, home)}"
-           if market_spread is not None else "")
-    )
-    if isinstance(spread_edge, (int, float)):
-        spread_sub += f"  ·  edge {spread_edge:+.1f}"
+    fav_team = home if favored_home else away
+    if rollup_trustworthy:
+        # Model-derived favorite tile.
+        fav_pct = max(p_home, p_away) * 100.0
+        spread_str = f"{abs(spread):.1f}"
+        spread_sign_team = home if spread >= 0 else away
+        if confidence == "low":
+            fav_eyebrow = "LEAN"
+        elif upset:
+            fav_eyebrow = "UPSET WATCH"
+        else:
+            fav_eyebrow = "MODEL FAVORS"
+        fav_headline = _safe_text(fav_team)
+        fav_sub = f"Model: {spread_sign_team} by {spread_str} · win prob {fav_pct:.0f}%"
+        if market_spread is not None:
+            fav_sub += f" · market {_v2_format_market_spread(market_spread, home)}"
+        if isinstance(spread_edge, (int, float)):
+            fav_sub += f" · edge {spread_edge:+.1f}"
 
-    total_str = f"{total:.1f}"
-    if isinstance(market_total, (int, float)):
-        total_sub = f"Market {market_total:.1f}"
-        if isinstance(total_edge, (int, float)):
-            total_sub += f"  ·  edge {total_edge:+.1f}"
+        total_str = f"{total:.1f}"
+        if isinstance(market_total, (int, float)):
+            total_sub = f"Market {market_total:.1f}"
+            if isinstance(total_edge, (int, float)):
+                total_sub += f" · edge {total_edge:+.1f}"
+        else:
+            total_sub = "No market line — model-only"
     else:
-        total_sub = "No market line — model-only"
+        # Thin coverage: fall back to market-anchored framing.
+        if market_spread is not None:
+            market_fav_team = home if market_spread < 0 else away
+            fav_eyebrow = "MARKET FAVORS"
+            fav_headline = _safe_text(market_fav_team)
+            # Render the spread from the favorite's perspective — quoting
+            # "Orlando Magic +4.0" while the headline says "Detroit Pistons"
+            # is technically right but reads as a contradiction.
+            fav_spread_signed = market_spread if market_spread < 0 else -market_spread
+            fav_sub = f"Spread {market_fav_team} {fav_spread_signed:+.1f}"
+            if isinstance(market_p_home, (int, float)):
+                pct = (float(market_p_home) if market_spread < 0 else 1.0 - float(market_p_home)) * 100.0
+                fav_sub += f" · win prob {pct:.0f}%"
+        else:
+            fav_eyebrow = "MARKET LINE"
+            fav_headline = "Pending"
+            fav_sub = "No consensus line in cache yet."
 
-    # Pull two top-projected players (one per team) for the "engines" tile.
-    top_home = (entry.get("top_contributors_home") or [{}])[0]
-    top_away = (entry.get("top_contributors_away") or [{}])[0]
+        if isinstance(market_total, (int, float)):
+            total_str = f"{market_total:.1f}"
+            total_sub = "Market consensus"
+        else:
+            total_str = "—"
+            total_sub = "No market total cached."
+
+    # Engines tile: list rostered players in this game with their projections.
+    # Falls back to the recent-form leaders only when the user has no rostered
+    # players in the matchup (which won't happen on the report path now that
+    # roster_only=True filters those games out, but kept for safety).
     rostered_home = entry.get("rostered_players_home") or []
     rostered_away = entry.get("rostered_players_away") or []
-    rostered_count = len(rostered_home) + len(rostered_away)
-    rostered_label = (
-        f"{rostered_count} rostered in this game"
-        if rostered_count else "No rostered players in this game"
+    rostered_set = set(rostered_home) | set(rostered_away)
+    contributors = [
+        *(entry.get("top_contributors_away") or []),
+        *(entry.get("top_contributors_home") or []),
+    ]
+    if rostered_set:
+        engine_rows = [c for c in contributors if c.get("player") in rostered_set]
+        engines_eyebrow = "YOUR PLAYERS"
+    else:
+        engine_rows = contributors[:2]
+        engines_eyebrow = "TOP PROJECTED"
+
+    engines_lines: list[str] = []
+    for top in engine_rows[:3]:
+        player = str(top.get("player") or "").strip()
+        if not player:
+            continue
+        pts = float(top.get("pts_proj") or 0.0)
+        # Source tag clarifies whether this is a model projection or a
+        # season-average backfill, since the team rollup mixes both.
+        src = str(top.get("source") or "").strip()
+        src_label = "model" if src == "model" else "L10 avg"
+        engines_lines.append(
+            f"<font size='10.5' name='{_V2_SERIF_BOLD}' color='#0a0e14'>"
+            f"<b>{_safe_text(player)}</b></font>  "
+            f"<font size='9' name='{_BOLD_FONT}' color='#cc5a00'>"
+            f"<b>{pts:.1f} pts</b></font>  "
+            f"<font size='7.5' color='#9aa3b2'>· {src_label}</font>"
+        )
+    engines_body = (
+        "<br/>".join(engines_lines) if engines_lines
+        else "<font size='9' color='#9aa3b2'>No rotation coverage</font>"
     )
+    rostered_count = len(rostered_set)
+    rostered_label = (
+        f"{rostered_count} rostered in this game" if rostered_count
+        else "No rostered players in this game"
+    )
+    engines_para = Paragraph(
+        f"<font size='8' name='{_BOLD_FONT}' color='#cc5a00'><b>{engines_eyebrow}</b></font>"
+        f"<br/><br/>{engines_body}"
+        f"<br/><br/><font size='8' color='#6b7686'>{_safe_text(rostered_label)}</font>",
+        ParagraphStyle("v2_match_engines", fontName=_BODY_FONT, fontSize=10,
+                       leading=14, textColor=INK_BODY),
+    )
+    engines_tile = Table([[engines_para]], colWidths=[2.5 * inch])
+    engines_tile.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), V2_BG_CREAM),
+        ("LINEABOVE", (0, 0), (-1, 0), 2.0, BRAND_ORANGE),
+        ("LEFTPADDING", (0, 0), (-1, -1), 12),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+        ("TOPPADDING", (0, 0), (-1, -1), 12),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ]))
 
     def _tile(eyebrow: str, headline: str, sub: str, accent: colors.Color) -> Table:
         body = Paragraph(
@@ -5874,51 +6037,14 @@ def _v2_matchup_card(
         ]))
         return t
 
-    # Engines tile: two stacked rows so long player names never wrap awkwardly.
-    engines_lines: list[str] = []
-    for top, label in ((top_away, away), (top_home, home)):
-        player = str(top.get("player") or "").strip()
-        if not player:
-            continue
-        pts = float(top.get("pts_proj") or 0.0)
-        engines_lines.append(
-            f"<font size='10.5' name='{_V2_SERIF_BOLD}' color='#0a0e14'>"
-            f"<b>{_safe_text(player)}</b></font>  "
-            f"<font size='9' name='{_BOLD_FONT}' color='#cc5a00'>"
-            f"<b>{pts:.1f} pts</b></font>"
-        )
-    engines_body = (
-        "<br/>".join(engines_lines) if engines_lines
-        else "<font size='9' color='#9aa3b2'>No rotation coverage</font>"
+    win_accent = NEG_RED if (rollup_trustworthy and upset) else (
+        V2_TIER_HIGH if confidence in {"high", "medium"} else INK_MUTED
     )
-    engines_para = Paragraph(
-        f"<font size='8' name='{_BOLD_FONT}' color='#cc5a00'><b>OFFENSIVE ENGINES</b></font>"
-        f"<br/><br/>{engines_body}"
-        f"<br/><br/><font size='8' color='#6b7686'>{_safe_text(rostered_label)}</font>",
-        ParagraphStyle("v2_match_engines", fontName=_BODY_FONT, fontSize=10,
-                       leading=14, textColor=INK_BODY),
-    )
-    engines_tile = Table([[engines_para]], colWidths=[2.5 * inch])
-    engines_tile.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), V2_BG_CREAM),
-        ("LINEABOVE", (0, 0), (-1, 0), 2.0, BRAND_ORANGE),
-        ("LEFTPADDING", (0, 0), (-1, -1), 12),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
-        ("TOPPADDING", (0, 0), (-1, -1), 12),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-    ]))
-
-    win_accent = NEG_RED if upset else (V2_TIER_HIGH if confidence != "low" else INK_MUTED)
+    total_eyebrow = "PROJECTED TOTAL" if rollup_trustworthy else "MARKET TOTAL"
     tiles = Table(
         [[
-            _tile(
-                wp_eyebrow,
-                f"{_safe_text(fav_short)} {fav_pct_label}",
-                spread_sub,
-                win_accent,
-            ),
-            _tile("PROJECTED TOTAL", total_str, total_sub, V2_ACCENT_TEAL),
+            _tile(fav_eyebrow, fav_headline, fav_sub, win_accent),
+            _tile(total_eyebrow, total_str, total_sub, V2_ACCENT_TEAL),
             engines_tile,
         ]],
         colWidths=[2.4 * inch, 2.4 * inch, 2.5 * inch],
@@ -5965,7 +6091,7 @@ def _v2_matchup_card(
             ]))
             ai_flow = [Spacer(1, 8), ai_panel]
 
-    return [header, bar, Spacer(1, 8), tiles, *ai_flow]
+    return [header, *bar_flow, Spacer(1, 8), tiles, *ai_flow]
 
 
 def _v2_format_market_spread(market_spread: float, home_team: str) -> str:
@@ -6583,6 +6709,7 @@ def _v2_player_profile_block(
     player_games: dict[str, pd.DataFrame] | None,
     sigma_lookup: dict[str, float],
     styles: dict,
+    player_history_status: dict[str, str] | None = None,
 ) -> list:
     from reportlab.lib.enums import TA_RIGHT
     flow: list = []
@@ -6761,6 +6888,63 @@ def _v2_player_profile_block(
         left_blocks.append(_para("LAST 4 RESOLVED LINES", styles["v2_section_eyebrow"]))
         left_blocks.append(Spacer(1, 4))
         left_blocks.append(htbl)
+    else:
+        # No resolved-line history yet for this player. Pick a placeholder
+        # message based on WHY the table is empty so the reader can tell
+        # whether more data is reachable (refresh game log / run backfill)
+        # or whether the bookmaker simply isn't posting props for this
+        # player in the cached window (nothing actionable on our side).
+        status = (player_history_status or {}).get(player, "")
+        if status == _PLAYER_HISTORY_STATUS_NO_API_COVERAGE:
+            placeholder_text = (
+                f"No pregame prop lines have been posted for "
+                f"{_safe_text(player)} on any cached date. The bookmaker "
+                f"simply isn't listing this player right now — most often "
+                f"because their team is off the slate the API has been "
+                f"tracking (e.g. a non-playoff team during the postseason). "
+                f"This panel will populate automatically once props are "
+                f"posted and the game is played."
+            )
+        elif status == _PLAYER_HISTORY_STATUS_NO_GAME_OVERLAP:
+            placeholder_text = (
+                f"Pregame prop lines exist for {_safe_text(player)} but "
+                f"none of those dates align with the cached game log. This "
+                f"usually means the game-log cache hasn't ingested recent "
+                f"games yet — the next refresh will repopulate, or you can "
+                f"toggle “Backfill historical odds” on the report config "
+                f"card to widen the window."
+            )
+        elif status == _PLAYER_HISTORY_STATUS_EMPTY_CACHE:
+            placeholder_text = (
+                f"No historical odds are cached locally yet. Toggle "
+                f"“Backfill historical odds” on the report config card "
+                f"to fetch them, or wait for daily live snapshots to "
+                f"accumulate as you visit the app on game days."
+            )
+        else:
+            placeholder_text = (
+                f"No resolved lines on file for {_safe_text(player)} yet. "
+                f"Lines fill in once a cached pregame prop matches a "
+                f"played game in their log."
+            )
+        left_blocks.append(Spacer(1, 4))
+        left_blocks.append(_para("LAST 4 RESOLVED LINES", styles["v2_section_eyebrow"]))
+        left_blocks.append(Spacer(1, 4))
+        empty_para = Paragraph(
+            f"<font size='8' color='#6b7686'>{placeholder_text}</font>",
+            styles["body"],
+        )
+        empty_panel = Table([[empty_para]], colWidths=[3.9 * inch])
+        empty_panel.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), V2_BG_CREAM),
+            ("LINEBEFORE", (0, 0), (0, -1), 2, V2_HAIRLINE),
+            ("LEFTPADDING", (0, 0), (-1, -1), 10),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ]))
+        left_blocks.append(empty_panel)
 
     proj_player = (projections or {}).get(player)
     if isinstance(proj_player, pd.DataFrame) and not proj_player.empty and pdf_player is not None and not pdf_player.empty:
@@ -6911,6 +7095,7 @@ def build_pdf_report(
     recent_form: dict[str, dict[str, float]] | None = None,
     ai_sections: dict[str, Any] | None = None,
     player_history: dict[str, pd.DataFrame] | None = None,
+    player_history_status: dict[str, str] | None = None,
     player_games: dict[str, pd.DataFrame] | None = None,
     matchup_predictions: list[dict] | None = None,
 ) -> bytes:
@@ -6938,6 +7123,14 @@ def build_pdf_report(
         ``line``, ``actual``, ``margin``, ``result`` for the player's recent
         games where a historical line was available. Used to render a
         "Historical lines vs outcomes" panel inside each player block.
+    player_history_status
+        Optional ``{player: str}`` describing why each player's history is
+        empty. Recognised values: ``"has_lines"`` (table populates),
+        ``"no_api_coverage"`` (bookmaker hasn't posted props for them in the
+        cached window), ``"no_game_overlap"`` (props exist but the game log
+        doesn't cover those dates), and ``"empty_cache"`` (no historical
+        odds cached at all). Drives the per-player placeholder text so the
+        reader knows whether more data is reachable.
     """
     styles = _build_styles()
 
@@ -6972,6 +7165,10 @@ def build_pdf_report(
         }
     if player_history:
         player_history = {_safe_text(k): _clean_df(v) for k, v in player_history.items()}
+    if player_history_status:
+        player_history_status = {
+            _safe_text(k): str(v) for k, v in player_history_status.items()
+        }
     if player_games:
         player_games = {_safe_text(k): _clean_df(v) for k, v in player_games.items()}
 
@@ -7085,6 +7282,7 @@ def build_pdf_report(
             recent_form=recent_form,
             ai_sections=ai_sections,
             player_history=player_history,
+            player_history_status=player_history_status,
             player_games=player_games,
             sigma_lookup=sigma_lookup,
             styles=styles,

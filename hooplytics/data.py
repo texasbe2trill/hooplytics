@@ -157,6 +157,60 @@ def add_pregame_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# Per-season-row staleness threshold. When a cached season's most recent
+# game is more than this many days behind today, we treat the cache as
+# stale for that season and refetch — otherwise warmed-pre-playoffs caches
+# silently serve incomplete data and break downstream joins.
+_FRESHNESS_DAYS: int = 3
+
+
+def _stale_seasons(cached: pd.DataFrame, seasons: list[str]) -> list[str]:
+    """Return the subset of ``seasons`` whose cached coverage is stale.
+
+    A season is "stale" when the cache holds rows for it AND the latest
+    cached game date is more than :data:`_FRESHNESS_DAYS` behind today AND
+    today still falls inside that season's NBA window (October → late June).
+    Off-season seasons stay valid forever once cached.
+
+    Tolerant to either the raw nba_api column name (``GAME_DATE``) or the
+    post-rename name (``game_date``) — :func:`fetch_player_seasons` runs
+    before the modeling-frame rename, so the raw form is what we actually
+    see at this layer.
+    """
+    if cached.empty or "season" not in cached.columns:
+        return []
+    date_col = next(
+        (c for c in ("game_date", "GAME_DATE") if c in cached.columns),
+        None,
+    )
+    if date_col is None:
+        return []
+    today = pd.Timestamp.now().normalize()
+    cutoff = today - pd.Timedelta(days=_FRESHNESS_DAYS)
+    stale: list[str] = []
+    for season in seasons:
+        sub = cached[cached["season"] == season]
+        if sub.empty:
+            continue
+        latest = pd.to_datetime(sub[date_col], errors="coerce").dropna()
+        if latest.empty:
+            continue
+        if latest.max().normalize() >= cutoff:
+            continue  # fresh enough
+        # Only refetch when today is plausibly inside the season window.
+        # NBA seasons run Oct → late June; outside that window we leave
+        # the cache alone since no new games are happening.
+        try:
+            start_year = int(season.split("-")[0])
+        except (ValueError, IndexError):
+            continue
+        season_start = pd.Timestamp(year=start_year, month=10, day=1)
+        season_end = pd.Timestamp(year=start_year + 1, month=7, day=15)
+        if season_start <= today <= season_end:
+            stale.append(season)
+    return stale
+
+
 class PlayerStore:
     """Fetch and cache NBA player game logs as Parquet under ``cache_dir``.
 
@@ -274,13 +328,26 @@ class PlayerStore:
             try:
                 cached = pd.read_parquet(cache_path)
                 if set(seasons).issubset(cached["season"].unique()):
-                    out = cached[cached["season"].isin(seasons)].copy()
-                    # Seed parquets ship ASCII player names (e.g. 'Nikola Jokic')
-                    # but nba_api resolves to the diacritic form ('Nikola Jokić')
-                    # which is what the roster keys on. Normalize to the
-                    # requested name so downstream filters match.
-                    out["player"] = name
-                    return out
+                    # Staleness guard: when the user requests an in-progress
+                    # season but the cache's most recent game for that season
+                    # is more than ``_FRESHNESS_DAYS`` behind today, the
+                    # cache pre-dates the playoffs (or recent games) and
+                    # would silently serve incomplete data — falsely making
+                    # the historical-lines join fail because the player has
+                    # odds for dates that aren't in their game logs. Drop
+                    # the affected seasons from the cache so the fetch path
+                    # below repopulates them.
+                    stale_seasons = _stale_seasons(cached, seasons)
+                    if stale_seasons:
+                        cached = cached[~cached["season"].isin(stale_seasons)]
+                    if not stale_seasons:
+                        out = cached[cached["season"].isin(seasons)].copy()
+                        # Seed parquets ship ASCII player names (e.g. 'Nikola Jokic')
+                        # but nba_api resolves to the diacritic form ('Nikola Jokić')
+                        # which is what the roster keys on. Normalize to the
+                        # requested name so downstream filters match.
+                        out["player"] = name
+                        return out
             except Exception:
                 # Corrupt or zero-byte cache file; remove and rebuild.
                 try:

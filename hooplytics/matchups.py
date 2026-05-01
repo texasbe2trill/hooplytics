@@ -251,7 +251,11 @@ def _confidence_label(
 
     * **high** when both rotations have ≥ 8 players with recent minutes.
     * **medium** when both rotations have ≥ 5 players.
-    * **low** otherwise (one or both teams missing from the modeling frame).
+    * **low** when both have ≥ 3 (the model rollup is partial but directional).
+    * **thin** otherwise. Callers should suppress the model team totals when
+      ``confidence == "thin"`` because the rollup is dominated by whichever
+      side happens to be in the modeling frame and produces nonsense like
+      "Toronto 0.0" when the user has no Raptors rostered.
     """
     h = sum(1 for r in home_rotation if r.get("min_l", 0) > 0)
     a = sum(1 for r in away_rotation if r.get("min_l", 0) > 0)
@@ -259,7 +263,9 @@ def _confidence_label(
         return "high"
     if h >= 5 and a >= 5:
         return "medium"
-    return "low"
+    if h >= 3 and a >= 3:
+        return "low"
+    return "thin"
 
 
 def project_matchup(
@@ -320,11 +326,20 @@ def build_slate_predictions(
     modeling_df: pd.DataFrame | None,
     projections: dict[str, pd.DataFrame] | None,
     roster_players: Iterable[str] | None,
+    roster_only: bool = False,
 ) -> list[MatchupPrediction]:
-    """Apply :func:`project_matchup` across the whole slate.
+    """Apply :func:`project_matchup` across the slate.
 
     Skips entries with no home_team / away_team. Always returns a list (empty
     when the slate is empty) so the caller doesn't need to guard.
+
+    Parameters
+    ----------
+    roster_only
+        When ``True``, only include matchups that have at least one rostered
+        player on either team. Use this on the report path so the section
+        doesn't list every NBA game on the slate when the user only cares
+        about the games their rostered players are actually playing in.
     """
     out: list[MatchupPrediction] = []
     for ev in slate or []:
@@ -347,6 +362,10 @@ def build_slate_predictions(
             )
         except Exception:  # noqa: BLE001 — skip flaky games rather than fail the whole report
             continue
+        if roster_only:
+            has_rostered = bool(pred.rostered_players_home or pred.rostered_players_away)
+            if not has_rostered:
+                continue
         out.append(pred)
     return out
 
@@ -434,6 +453,54 @@ def attach_market_lines(
 
 # ── Grounding payload helper ────────────────────────────────────────────────
 
+def _display_summary(p: MatchupPrediction) -> str:
+    """Pre-built one-line summary the AI must mirror verbatim.
+
+    The Roster Report renders one fixed set of numbers per matchup card —
+    the AI prose has to match those exact numbers or the reader sees a
+    contradiction (e.g., the bar shows 60% home but the prose claims 55%
+    away). Building the string here guarantees the AI has a single source
+    of truth to copy from instead of having to choose between the model
+    and market fields itself.
+    """
+    parts: list[str] = []
+    # Win probability line — prefer market when available since that is what
+    # the report displays for thin-coverage cards. For trustworthy rollups,
+    # the report shows the model probability instead.
+    if p.confidence in {"high", "medium", "low"}:
+        wp_home = p.home_win_prob
+        wp_source = "model"
+    elif p.market_home_win_prob is not None:
+        wp_home = p.market_home_win_prob
+        wp_source = "market"
+    else:
+        wp_home = None
+        wp_source = ""
+
+    if wp_home is not None:
+        wp_away = 1.0 - wp_home
+        fav_team = p.home_team if wp_home >= 0.5 else p.away_team
+        fav_pct = max(wp_home, wp_away) * 100.0
+        parts.append(
+            f"{wp_source.upper()} WP: {fav_team} {fav_pct:.0f}% "
+            f"(home {p.home_team} {wp_home*100:.0f}% / away {p.away_team} {wp_away*100:.0f}%)"
+        )
+
+    if p.market_spread is not None:
+        sign = "-" if p.market_spread < 0 else "+"
+        parts.append(
+            f"Market spread: {p.home_team} {sign}{abs(p.market_spread):.1f}"
+        )
+    if p.market_total is not None:
+        parts.append(f"Market total: {p.market_total:.1f}")
+    if p.confidence in {"high", "medium", "low"}:
+        parts.append(
+            f"Model score: {p.away_team} {p.away_pts_proj:.1f} @ "
+            f"{p.home_team} {p.home_pts_proj:.1f}"
+        )
+    return " | ".join(parts)
+
+
 def to_grounding_payload(
     predictions: list[MatchupPrediction],
     *,
@@ -442,7 +509,9 @@ def to_grounding_payload(
     """Compact, JSON-friendly view of predictions for the AI grounding block.
 
     Cuts each rotation list down to its top contributors so the prompt stays
-    small even on a 12-game slate.
+    small even on a 12-game slate. Also includes a ``display_summary`` field
+    — a pre-built string the AI prose must mirror verbatim so its win-prob
+    and spread numbers can never contradict the card the report renders.
     """
     out: list[dict[str, Any]] = []
     for p in predictions or []:
@@ -453,6 +522,7 @@ def to_grounding_payload(
             "home_team": p.home_team,
             "away_team": p.away_team,
             "tipoff_iso": p.tipoff_iso,
+            "display_summary": _display_summary(p),
             "model_home_pts": p.home_pts_proj,
             "model_away_pts": p.away_pts_proj,
             "model_spread": p.model_spread,

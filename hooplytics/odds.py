@@ -39,8 +39,30 @@ def load_api_key(env_path: Path | str = ".env") -> str:
     return os.getenv("ODDS_API_KEY", "").strip()
 
 
+# Generational suffixes that show up inconsistently across data sources —
+# e.g. NBA Stats reports "Jabari Smith Jr." while The Odds API lists him as
+# "Jabari Smith". Stripping them before canonicalizing keeps the join from
+# silently dropping a player when one source carries the suffix and the
+# other doesn't.
+_NAME_SUFFIX_TOKENS: frozenset[str] = frozenset({
+    "jr", "sr", "ii", "iii", "iv", "v",
+})
+
+
 def _canon_name(s: str) -> str:
-    return re.sub(r"[^a-z]", "", s.lower())
+    """Canonicalize a player name for tolerant cross-source matching.
+
+    Lowercases, strips a trailing generational suffix (Jr./Sr./II–V), then
+    removes every non-letter so "Jabari Smith Jr." and "Jabari Smith" both
+    canonicalize to ``"jabarismith"``.
+    """
+    text = str(s or "").lower().strip()
+    if not text:
+        return ""
+    tokens = text.split()
+    if tokens and re.sub(r"[^a-z]", "", tokens[-1]) in _NAME_SUFFIX_TOKENS:
+        tokens = tokens[:-1]
+    return re.sub(r"[^a-z]", "", " ".join(tokens))
 
 
 def _odds_cache_path(date_str: str) -> Path:
