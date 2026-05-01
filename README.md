@@ -8,6 +8,7 @@
 
 <br>
 
+[![CI](https://github.com/texasbe2trill/hooplytics/actions/workflows/ci.yml/badge.svg)](https://github.com/texasbe2trill/hooplytics/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-FFD23F.svg?style=flat-square)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Powered by The Odds API](https://img.shields.io/badge/lines-The%20Odds%20API-2ea44f.svg?style=flat-square)](https://the-odds-api.com/)
@@ -232,6 +233,8 @@ hooplytics decisions "Victor Wembanyama"
 ![Streamlit walkthrough](docs/screenshots/streamlit-walkthrough.gif)
 
 </div>
+
+> If Hooplytics is useful to you, a ⭐ goes a long way — it helps others find the project.
 
 ---
 
