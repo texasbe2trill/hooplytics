@@ -10,6 +10,11 @@ dist/
 .pytest_cache/
 .DS_Store
 
+# Claude Code local state
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/worktrees/
+
 # Secrets — never commit
 .env
 .env.*
