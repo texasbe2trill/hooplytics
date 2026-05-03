@@ -40,6 +40,8 @@ from hooplytics import (
     load_api_key,
     DEFAULT_ROSTER,
     MODEL_SPECS,
+    retro_projection_table,
+    backtest_summary,
 )
 from hooplytics.data import nba_seasons
 from hooplytics.models import load_models
@@ -632,6 +634,67 @@ def slate_brief(
         )
     except Exception as exc:
         return f"Slate brief generation failed: {exc}"
+
+
+@mcp.tool()
+def compare_projections(
+    player_name: str,
+    stat: str = "points",
+    n_games: int = 15,
+) -> dict[str, Any]:
+    """
+    Compare RACE model projections against actual game results for the last N games.
+
+    Reconstructs what the model would have projected before each of the last
+    ``n_games`` games (using only data available prior to each game), then
+    shows how those projections compared to the actual outcome.
+
+    Only games with a cached sportsbook line (ingested via ``ingest-odds``) are
+    included. Games without a real line are excluded so results are never based
+    on an L5 average fallback. Run ``hooplytics ingest-odds`` to expand coverage.
+
+    Args:
+        player_name: Full or partial NBA player name.
+        stat: Stat to evaluate. One of: points, rebounds, assists, pra,
+              threepm, stl_blk, turnovers, fantasy_score.
+        n_games: Number of recent games to evaluate (default 15).
+    """
+    if stat not in MODEL_SPECS:
+        return {"error": f"Unknown stat '{stat}'. Valid options: {', '.join(MODEL_SPECS)}"}
+
+    store, bundle = _bootstrap()
+
+    # Fuzzy-resolve player name so partial/differently-cased inputs work.
+    resolved = store.resolve_player_name(player_name)
+    if resolved is None:
+        return {"error": f"No active NBA player matches '{player_name}'. Check the spelling and try again."}
+
+    try:
+        table = retro_projection_table(
+            resolved, stat, store=store, bundle=bundle, n_games=n_games
+        )
+    except Exception as exc:
+        return {"error": str(exc)}
+
+    if table.empty:
+        return {
+            "player": resolved,
+            "stat": stat,
+            "message": (
+                "No games found with cached sportsbook lines for this player/stat. "
+                "Run 'hooplytics ingest-odds' to populate historical lines."
+            ),
+            "games": [],
+            "summary": {},
+        }
+
+    summary = backtest_summary(table)
+    return {
+        "player": resolved,
+        "stat": stat,
+        "games": table.to_dict(orient="records"),
+        "summary": summary,
+    }
 
 
 if __name__ == "__main__":

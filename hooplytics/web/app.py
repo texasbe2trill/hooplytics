@@ -185,6 +185,15 @@ def _deployment_ai_api_key(provider: str) -> str:
     return _deployment_openai_api_key()
 
 
+def _is_demo_mode() -> bool:
+    """Return True when running as a hosted demo (IS_HOSTED_DEMO=1).
+
+    In demo mode all write/fetch operations that consume Odds API credits are
+    disabled so the deployment key cannot be spammed by visitors.
+    """
+    return os.getenv("IS_HOSTED_DEMO", "").strip() in ("1", "true", "yes")
+
+
 @st.cache_resource(show_spinner=False)
 def _store() -> PlayerStore:
     return PlayerStore()
@@ -4177,23 +4186,28 @@ def _render_projections_report(
     # default OFF so the report never silently spends quota.
     with st.container():
         bf_cols = st.columns([2, 1])
+        _backfill_allowed = api_key and not _is_demo_mode()
         backfill_enabled = bf_cols[0].toggle(
             "Backfill historical odds for Lines-vs-Outcomes table",
             value=False,
-            disabled=not api_key,
+            disabled=not _backfill_allowed,
             help=(
                 "OFF (default) → the report uses only odds already cached on disk. "
                 "ON → fetches missing player-prop lines from the Odds API "
                 "historical endpoint to populate the per-player Lines-vs-Outcomes "
                 "table. Only uncached dates are fetched."
-                if api_key
-                else "Add an Odds API key in the sidebar to enable historical backfill."
+                if _backfill_allowed
+                else (
+                    "Disabled in demo mode."
+                    if _is_demo_mode()
+                    else "Add an Odds API key in the sidebar to enable historical backfill."
+                )
             ),
         )
         backfill_days = bf_cols[1].number_input(
             "Days to backfill",
             min_value=1, max_value=30, value=7, step=1,
-            disabled=not (api_key and backfill_enabled),
+            disabled=not (_backfill_allowed and backfill_enabled),
             help="How many calendar days of historical odds to fetch (only uncached dates are pulled).",
         )
 
@@ -4250,7 +4264,7 @@ def _render_projections_report(
     # the toggle above is off (the default), the per-player Lines-vs-Outcomes
     # table renders from whatever is already cached locally (live snapshots
     # accumulate naturally as the user visits the app on game days).
-    if api_key and backfill_enabled:
+    if api_key and backfill_enabled and not _is_demo_mode():
         days_requested = int(backfill_days)
         with st.spinner(f"Backfilling {days_requested} day(s) of historical odds…"):
             try:
@@ -4805,16 +4819,258 @@ def page_chatbot(roster: dict, api_key: str) -> None:
         st.rerun()
 
 
+# ── Projection vs Actual ─────────────────────────────────────────────────────
+from hooplytics.backtest import backtest_summary, retro_projection_table
+
+
+@st.cache_data(show_spinner="Running projection backtest…", ttl=60 * 30, max_entries=10)
+def _retro_table(
+    player: str,
+    stat: str,
+    n_games: int,
+    roster_key: str,
+    use_prebuilt: bool,
+    prebuilt_path: str,
+    include_display_players: bool,
+    fast_mode: bool,
+    _cache_buster: int = 1,
+) -> tuple[pd.DataFrame, list[str]]:
+    """Cache retro projections so repeated stat/window changes are instant.
+
+    Returns ``(table, missing_line_dates)`` so the missing-dates list survives
+    Streamlit's pyarrow-based cache serialisation (which strips DataFrame.attrs).
+    """
+    bundle = _bundle(roster_key, use_prebuilt, prebuilt_path, include_display_players, fast_mode)
+    try:
+        table = retro_projection_table(player, stat, store=_store(), bundle=bundle, n_games=n_games)
+        missing = list(table.attrs.get("missing_line_dates", []))
+        return table, missing
+    except Exception:
+        return pd.DataFrame(), []
+
+
+def _proj_vs_actual_chart(table: pd.DataFrame, stat: str) -> "go.Figure":
+    """Time-series line chart with projected and actual traces, error fill."""
+    import plotly.graph_objects as go
+    from hooplytics.web.styles import COLOR_ACCENT, COLOR_LESS, COLOR_MORE, HAIRLINE, INK_MUTED
+
+    fig = go.Figure()
+    if table.empty:
+        return fig
+
+    dates = table["game_date"]
+    fig.add_trace(go.Scatter(
+        x=dates, y=table["actual"],
+        mode="lines+markers",
+        name="Actual",
+        line=dict(color=COLOR_MORE, width=2),
+        marker=dict(size=7),
+        hovertemplate="%{x}<br>Actual: %{y}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=dates, y=table["projected"],
+        mode="lines+markers",
+        name="Projected",
+        line=dict(color=COLOR_ACCENT, width=2, dash="dot"),
+        marker=dict(size=6, symbol="diamond"),
+        hovertemplate="%{x}<br>Projected: %{y}<extra></extra>",
+    ))
+    # Error fill between the two lines
+    fig.add_trace(go.Scatter(
+        x=list(dates) + list(dates[::-1]),
+        y=list(table["actual"]) + list(table["projected"][::-1]),
+        fill="toself",
+        fillcolor="rgba(255,122,24,0.08)",
+        line=dict(width=0),
+        showlegend=False,
+        hoverinfo="skip",
+    ))
+    fig.update_layout(
+        height=320,
+        margin=dict(t=36, b=36, l=48, r=24),
+        title=dict(text=f"{stat.title()} — Projected vs Actual", font=dict(size=15)),
+        xaxis_title="Game",
+        yaxis_title=stat.title(),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    return fig
+
+
+def _proj_scatter_chart(table: pd.DataFrame, stat: str) -> "go.Figure":
+    """Scatter: projected (x) vs actual (y) with a perfect-prediction diagonal."""
+    import plotly.graph_objects as go
+    from hooplytics.web.styles import COLOR_ACCENT, COLOR_MORE, HAIRLINE
+
+    fig = go.Figure()
+    if table.empty:
+        return fig
+
+    lo = min(table["projected"].min(), table["actual"].min()) * 0.9
+    hi = max(table["projected"].max(), table["actual"].max()) * 1.1
+    fig.add_shape(
+        type="line", x0=lo, y0=lo, x1=hi, y1=hi,
+        line=dict(color=HAIRLINE, dash="dot", width=1),
+    )
+    colors = [COLOR_MORE if r == "Over" else COLOR_ACCENT for r in table["result"]]
+    fig.add_trace(go.Scatter(
+        x=table["projected"],
+        y=table["actual"],
+        mode="markers",
+        marker=dict(color=colors, size=9, opacity=0.85),
+        text=table.apply(
+            lambda r: f"{r['game_date']}<br>{r['matchup']}<br>"
+                      f"Proj: {r['projected']}  Act: {r['actual']}  Err: {r['error']:+.1f}",
+            axis=1,
+        ),
+        hovertemplate="%{text}<extra></extra>",
+        name="Games",
+    ))
+    fig.update_layout(
+        height=320,
+        margin=dict(t=36, b=36, l=48, r=24),
+        title=dict(text="Projected vs Actual (scatter)", font=dict(size=15)),
+        xaxis_title="Projected",
+        yaxis_title="Actual",
+    )
+    return fig
+
+
+def page_projection_vs_actual(roster: dict, api_key: str) -> None:
+    page_hero(
+        "Projection vs Actual",
+        "Retro-evaluate the RACE model: reconstruct pregame projections for past games and compare to what happened.",
+    )
+
+    if not roster:
+        empty_state("No players in roster", "Add at least one player using the sidebar to get started.")
+        return
+
+    roster_key = json.dumps(roster, sort_keys=True)
+    use_prebuilt = bool(st.session_state.get("use_prebuilt_bundle", False))
+    prebuilt_path = str(st.session_state.get("prebuilt_bundle_path", _default_prebuilt_bundle_path()))
+    include_display = bool(st.session_state.get("train_on_display_roster", False))
+    fast_mode = bool(st.session_state.get("fast_training_mode", True))
+
+    c1, c2, c3 = st.columns([2, 2, 1])
+    player = c1.selectbox("Player", list(roster), key="pva_player")
+    stat_options = list(MODEL_SPECS.keys())
+    stat = c2.selectbox("Stat", stat_options, key="pva_stat")
+    n_games_requested = c3.selectbox("Games", [10, 15, 20, 30], index=1, key="pva_n_games")
+
+    # Dynamic cache buster — incremented when the user fetches new lines.
+    # Also bump manually when code adds new columns to retro_projection_table.
+    cache_buster = int(st.session_state.get("pva_cache_buster", 7))
+
+    table, missing_line_dates = _retro_table(
+        player, stat, int(n_games_requested), roster_key,
+        use_prebuilt, prebuilt_path, include_display, fast_mode,
+        _cache_buster=cache_buster,
+    )
+    missing_line_dates = sorted(missing_line_dates)
+
+    if table.empty and not missing_line_dates:
+        empty_state(
+            "Not enough history",
+            "This player needs at least 5 prior games to evaluate. Try a different stat or add more seasons.",
+        )
+        return
+
+    # ── Fetch missing lines ────────────────────────────────────────────────────
+    if missing_line_dates:
+        n_missing = len(missing_line_dates)
+        if api_key and not _is_demo_mode():
+            col_msg, col_btn = st.columns([5, 1])
+            col_msg.caption(
+                f"{n_missing} game{'s' if n_missing != 1 else ''} in this window "
+                f"{'have' if n_missing != 1 else 'has'} no cached sportsbook line and "
+                f"{'are' if n_missing != 1 else 'is'} excluded (~{n_missing * 10} credits to fetch)."
+            )
+            if col_btn.button("Fetch lines", key="pva_fetch_lines", use_container_width=True):
+                with st.spinner(f"Fetching lines for {n_missing} date(s)…"):
+                    try:
+                        ingest_historical_odds(api_key, missing_line_dates, markets=[stat], verbose=False)
+                    except Exception as exc:
+                        st.error(f"Fetch failed: {exc}")
+                        st.stop()
+                # Clear the cache so the rerun picks up newly written lines.
+                _retro_table.clear()
+                st.session_state["pva_cache_buster"] = cache_buster + 1
+                st.rerun()
+        else:
+            st.caption(
+                f"{n_missing} game{'s' if n_missing != 1 else ''} in this window "
+                f"{'have' if n_missing != 1 else 'has'} no cached sportsbook line and "
+                f"{'are' if n_missing != 1 else 'is'} excluded."
+                + ("" if _is_demo_mode() else " Add an Odds API key in Settings to fetch historical lines.")
+            )
+
+    if table.empty:
+        return
+
+    summary = backtest_summary(table)
+
+    # ── Accuracy KPIs ──────────────────────────────────────────────────────────
+    n_games_shown = summary["n_games"]
+    section("Accuracy metrics", f"Based on {n_games_shown} game{'s' if n_games_shown != 1 else ''} with sportsbook lines")
+
+    bias_label = f"{summary['bias']:+.2f}" if summary["bias"] is not None else "—"
+    dir_acc = summary.get("directional_accuracy")
+    dir_label = f"{dir_acc:.0%}" if dir_acc is not None else "—"
+    kpi_tiles = [
+        mini_kpi("MAE", f"{summary['mae']}", "mean absolute error vs projection"),
+        mini_kpi("RMSE", f"{summary['rmse']}", "root mean squared error"),
+        mini_kpi("Bias", bias_label, "+ = model under-predicted"),
+        mini_kpi("Directional accuracy", dir_label, "call matched result vs threshold"),
+        mini_kpi("Median error", f"{summary['median_error']:+.2f}" if summary["median_error"] is not None else "—", "actual minus projected"),
+    ]
+    kpi_grid(kpi_tiles)
+
+    # ── Charts ─────────────────────────────────────────────────────────────────
+    section("Projected vs Actual over time")
+    ca, cb = st.columns(2)
+    with ca:
+        st.plotly_chart(_proj_vs_actual_chart(table, stat), use_container_width=True)
+    with cb:
+        st.plotly_chart(_proj_scatter_chart(table, stat), use_container_width=True)
+
+    # ── Game-by-game table ─────────────────────────────────────────────────────
+    section("Game-by-game breakdown")
+
+    def _color_result(val: str) -> str:
+        if val == "Over":
+            return "color: #3ddc97"
+        if val == "Under":
+            return "color: #ff6b6b"
+        return ""
+
+    def _color_call(val: str) -> str:
+        return "color: #3ddc97; font-weight: bold" if val == "MORE" else "color: #ff6b6b; font-weight: bold"
+
+    def _color_error(val: float) -> str:
+        return "color: #3ddc97" if val > 0 else "color: #ff6b6b"
+
+    display = table.sort_values("game_date", ascending=False).reset_index(drop=True)
+    styled = (
+        display.style
+        .map(_color_call, subset=["hooplytics_projection"])
+        .map(_color_result, subset=["result"])
+        .map(_color_error, subset=["error"])
+        .format({"projected": "{:.2f}", "actual": "{:.2f}", "line": "{:.1f}", "error": "{:+.2f}", "abs_error": "{:.2f}"})
+    )
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
 # Page registry ───────────────────────────────────────────────────────────────
 PAGES = {
-    "Home":                page_home,
-    "Player projection":   page_projection,
-    "Analytics Dashboard": page_edge_board,
-    "Compare players":     page_compare,
-    "Player Line Lab":     page_scenario,
-    "Model diagnostics":   page_diagnostics,
-    "Hooplytics Scout":    page_chatbot,
-    "Roster Report":       page_report,
+    "Home":                    page_home,
+    "Player projection":       page_projection,
+    "Analytics Dashboard":     page_edge_board,
+    "Compare players":         page_compare,
+    "Player Line Lab":         page_scenario,
+    "Projection vs Actual":    page_projection_vs_actual,
+    "Model diagnostics":       page_diagnostics,
+    "Hooplytics Scout":        page_chatbot,
+    "Roster Report":           page_report,
 }
 
 

@@ -46,6 +46,7 @@ from .predict import (
     predict_scenario,
     project_next_game,
 )
+from .backtest import backtest_summary, retro_projection_table
 
 __all__ = [
     "DEFAULT_ROSTER",
@@ -58,6 +59,8 @@ __all__ = [
     "PlayerStore",
     "ROLL_BASE_STATS",
     "ROLL_WINDOWS",
+    "backtest_summary",
+    "retro_projection_table",
     "add_pregame_features",
     "add_schedule_context",
     "add_opponent_context",

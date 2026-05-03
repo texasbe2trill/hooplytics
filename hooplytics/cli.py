@@ -25,6 +25,7 @@ from rich.text import Text
 from . import (
     DEFAULT_ROSTER,
     PlayerStore,
+    backtest_summary,
     custom_prop,
     ensure_models,
     fantasy_decisions,
@@ -34,6 +35,7 @@ from . import (
     nba_seasons,
     predict_scenario,
     project_next_game,
+    retro_projection_table,
 )
 from .constants import MODEL_SPECS
 
@@ -274,6 +276,87 @@ def lines(
         console.print_json(df.to_json(orient="records"))
         return
     console.print(_df_to_table(df, title="Live lines — sorted by |edge|"))
+
+
+@app.command()
+def compare(
+    player: str = typer.Argument(..., help="Player name (fuzzy match OK)."),
+    stat: str = typer.Argument("points", help=f"Stat model. One of: {', '.join(MODEL_SPECS)}"),
+    games: int = typer.Option(15, "--games", "-g", help="Number of recent games to evaluate."),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Compare model projections against actual game results (projection accuracy backtest).
+
+    Reconstructs what the RACE model would have projected before each of the
+    last N games, then shows how those projections compared to reality.
+
+    Example:
+      hooplytics compare "Shai Gilgeous-Alexander" points --games 20
+    """
+    if stat not in MODEL_SPECS:
+        err_console.print(f"[red]Unknown stat '{stat}'. Choices: {', '.join(MODEL_SPECS)}[/red]")
+        raise typer.Exit(1)
+
+    store, bundle, _ = _bootstrap()
+    name = _resolve_player(store, player)
+
+    console.print(f"[dim]Evaluating last {games} game(s) for {name} / {stat}…[/dim]")
+
+    try:
+        table = retro_projection_table(name, stat, store=store, bundle=bundle, n_games=games)
+    except Exception as exc:
+        err_console.print(f"[red]✗ {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    if table.empty:
+        console.print("[yellow]Insufficient game history to evaluate projections.[/yellow]")
+        return
+
+    summary = backtest_summary(table)
+
+    if json_out:
+        import json as _json
+        console.print_json(_json.dumps({"games": table.to_dict(orient="records"), "summary": summary}))
+        return
+
+    # Game-by-game table
+    import pandas as pd
+
+    display = table.copy()
+    t = Table(title=f"Projection vs Actual — {name} / {stat}", show_lines=False,
+              header_style="bold cyan")
+    for col in display.columns:
+        t.add_column(str(col), overflow="fold")
+    for _, row in display.iterrows():
+        cells = []
+        for col, val in row.items():
+            text = "" if val is None else str(val)
+            style = ""
+            if col == "result":
+                style = "green" if val == "Over" else ("red" if val == "Under" else "dim")
+            elif col == "error":
+                try:
+                    style = "green" if float(val) > 0 else "red"
+                except (TypeError, ValueError):
+                    pass
+            cells.append(Text(text, style=style))
+        t.add_row(*cells)
+    console.print(t)
+
+    # Summary panel
+    bias_sign = "+" if (summary["bias"] or 0) > 0 else ""
+    dir_acc = summary.get("directional_accuracy")
+    body = (
+        f"[bold]Games evaluated:[/bold]  {summary['n_games']} [dim](sportsbook lines only)[/dim]\n"
+        f"[bold]MAE:[/bold]             {summary['mae']}\n"
+        f"[bold]RMSE:[/bold]            {summary['rmse']}\n"
+        f"[bold]Bias:[/bold]            {bias_sign}{summary['bias']}  "
+        f"[dim](+ = model under-predicted)[/dim]\n"
+        f"[bold]Directional acc:[/bold] {f'{dir_acc:.1%}' if dir_acc is not None else '—'}  "
+        f"[dim](call matched result vs sportsbook line)[/dim]\n"
+        f"[bold]Median error:[/bold]    {bias_sign}{summary['median_error']}"
+    )
+    console.print(Panel(body, title="Accuracy summary", border_style="cyan"))
 
 
 @app.command(name="ingest-odds")
