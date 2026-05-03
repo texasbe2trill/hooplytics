@@ -22,6 +22,7 @@
 [**Live Lines**](#-live-lines-made-analytical) ·
 [**Dashboard**](#-app-preview) ·
 [**CLI**](#-cli-walkthrough) ·
+[**Use from Claude (MCP)**](#-use-from-claude-mcp) ·
 [**Modeling**](#-analytics-approach) ·
 [**Roadmap**](#-roadmap)
 
@@ -430,6 +431,7 @@ A player intelligence workbench is built to make data easier to *explore, explai
 | 📦 **Prebuilt RACE bundles** | Multiple ready-to-use bundles ship in `bundles/` (e.g. `race_fast.joblib`, `race_playoffs.joblib`). The Streamlit app auto-loads one on launch and lets you switch between them from the sidebar — zero cold-start training required |
 | 🔬 **Diagnostics** | RMSE / MAE / R², predicted-vs-actual panels, residual views, feature importance, and per-stat health summaries |
 | ⚡ **CLI workflows** | Single-player projection, prop comparison, scenario inputs, live line board, roster persistence, and prebuilt-bundle training |
+| 🤖 **MCP server** | Use the full Hooplytics engine directly from Claude Desktop. Nine tools cover projections, prop analysis, scenario scoring, live line boards, scout reports, slate briefs, and roster management — see [HOOPLYTICS_MCP_SETUP.md](HOOPLYTICS_MCP_SETUP.md) |
 | 📓 **Notebook workflow** | Rich exploratory narrative with tables, charts, code, and reproducible analysis in one place |
 
 ---
@@ -501,6 +503,24 @@ hooplytics-build-calibration build --season 2024-25 --season 2025-26 --verbose
 ```
 
 > 🔑 `hooplytics lines` and live-enabled `prop` / `decisions` need `ODDS_API_KEY` (from `.env` or your shell). All commands support `--help`, and most reporting commands support `--json` for scripting.
+
+---
+
+## 🤖 Use from Claude (MCP)
+
+Hooplytics ships a [Model Context Protocol](https://modelcontextprotocol.io/) server that exposes the full projection + analytics engine to Claude Desktop (and any MCP-compatible client). Once connected, Claude can answer questions like *"project Anthony Edwards' next game and tell me which stat has the biggest edge"* or *"give me tonight's slate brief — which players have the loudest mispricings?"* by calling Hooplytics tools directly.
+
+**What you get inside Claude:**
+
+- **Next-game projections** across all 8 RACE models, plus single-stat MORE/LESS calls vs sportsbook lines.
+- **Live line board** sorted by projection gap, with book counts and consensus medians.
+- **Scenario scoring** for hypothetical box scores ("what if he plays 36 minutes and shoots 55%?").
+- **AI Scout reports** and **AI Slate Briefs** — the same prose engine the Streamlit dashboard uses, grounded in projection data.
+- **Player analytics** (game logs, season vs recent averages, volatility, trend deltas) and **roster management** (add / remove / list / reset).
+
+**Setup:** see [HOOPLYTICS_MCP_SETUP.md](HOOPLYTICS_MCP_SETUP.md) for the Claude Desktop config block, prerequisites, and example prompts. Local stdio mode works out of the box; SSE mode is supported for remote clients.
+
+> ℹ️ **Roster sharing.** The MCP server reads and writes the same `~/.hooplytics/roster.json` the CLI uses, so adding a player via Claude shows up in `hooplytics roster list` and vice versa. The Streamlit dashboard keeps its own session-only roster and does not sync with either.
 
 ---
 
