@@ -2,6 +2,10 @@
 __pycache__/
 .ipynb_checkpoints/
 data/cache/
+# Committed odds bundle (data/odds/) is intentionally NOT ignored — it ships
+# with the repo so Streamlit Cloud can run backtests without a local cache.
+# Regenerate with: python scripts/build_odds_bundle.py
+
 .hooplytics_cache/
 *.pyc
 *.egg-info/

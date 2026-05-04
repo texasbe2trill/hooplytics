@@ -687,6 +687,18 @@ def _load_cached_historical_odds_impl(hist_dir_str: str, _fingerprint: tuple) ->
 _HIST_ODDS_CACHE: dict[tuple, pd.DataFrame] = {}
 
 
+def _bundled_odds_path() -> Path:
+    """Return the path to the committed historical-odds parquet bundle.
+
+    The bundle lives at ``data/odds/historical_props.parquet`` relative to the
+    repository root (two levels up from this file).  It is generated locally
+    with ``hooplytics-build-odds-bundle`` and committed so that Streamlit Cloud
+    and other environments without a local odds cache can still run backtests
+    and role-shift validation.
+    """
+    return Path(__file__).parent.parent / "data" / "odds" / "historical_props.parquet"
+
+
 def load_cached_historical_odds(
     cache_dir: Path | None = None,
 ) -> pd.DataFrame:
@@ -697,7 +709,13 @@ def load_cached_historical_odds(
     frame is memoized at module level keyed on (file count, latest mtime)
     so repeat calls — common during per-player feature builds on roster
     mutation — return instantly without re-reading hundreds of JSON files.
-    Returns an empty DataFrame if no cache files are found.
+
+    When no JSON cache files are found locally (e.g. on Streamlit Cloud),
+    the function falls back to the committed parquet bundle at
+    ``data/odds/historical_props.parquet`` so that backtests and role-shift
+    validation work without a local odds ingestion step.
+
+    Returns an empty DataFrame if neither source is available.
     """
     hist_dir = Path(cache_dir) if cache_dir else ODDS_HIST_CACHE_DIR
     live_dir = hist_dir.parent
@@ -706,6 +724,16 @@ def load_cached_historical_odds(
     if live_dir.exists() and live_dir != hist_dir:
         files += list(live_dir.glob("nba_player_props_*.json"))
     if not files:
+        # No local JSON cache — fall back to the committed parquet bundle.
+        bundle = _bundled_odds_path()
+        if bundle.exists():
+            try:
+                df = pd.read_parquet(bundle)
+                if "game_date" in df.columns:
+                    df["game_date"] = pd.to_datetime(df["game_date"], errors="coerce").dt.normalize()
+                return df.dropna(subset=["game_date"]).reset_index(drop=True)
+            except Exception:  # noqa: BLE001
+                pass
         return pd.DataFrame(columns=["game_date", "player", "model", "line", "books"])
 
     fingerprint = (
