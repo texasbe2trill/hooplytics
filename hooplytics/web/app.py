@@ -4963,7 +4963,7 @@ def page_projection_vs_actual(roster: dict, api_key: str) -> None:
     player = c1.selectbox("Player", list(roster), key="pva_player")
     stat_options = list(MODEL_SPECS.keys())
     stat = c2.selectbox("Stat", stat_options, key="pva_stat")
-    n_games_requested = c3.selectbox("Games", [10, 15, 20, 30], index=1, key="pva_n_games")
+    n_games_requested = c3.selectbox("Games", [10, 15, 20, 30], index=0, key="pva_n_games")
 
     # Dynamic cache buster — incremented when the user fetches new lines.
     # Also bump manually when code changes the *behaviour* of
@@ -4977,7 +4977,9 @@ def page_projection_vs_actual(roster: dict, api_key: str) -> None:
     # for some players), producing wildly noisy directional accuracy figures
     # like 50% on Brunson's pra last-10. This buster forces a fresh compute
     # against the corrected logic.
-    cache_buster = int(st.session_state.get("pva_cache_buster", 8))
+    # Bump 8 → 9 (2026-05-04): default n_games changed 15 → 10; demo-mode
+    # missing-line notice suppressed when the table has evaluable results.
+    cache_buster = int(st.session_state.get("pva_cache_buster", 9))
 
     table, missing_line_dates = _retro_table(
         player, stat, int(n_games_requested), roster_key,
@@ -4994,9 +4996,14 @@ def page_projection_vs_actual(roster: dict, api_key: str) -> None:
         return
 
     # ── Fetch missing lines ────────────────────────────────────────────────────
+    # In demo mode (Streamlit Cloud / IS_HOSTED_DEMO=1): skip the missing-line
+    # notice entirely when the table already has evaluable games — users can't
+    # fetch anyway and the count is just noise. Only surface it when the table
+    # is empty so there's a reason to explain why nothing is shown.
     if missing_line_dates:
         n_missing = len(missing_line_dates)
-        if api_key and not _is_demo_mode():
+        in_demo = _is_demo_mode()
+        if api_key and not in_demo:
             col_msg, col_btn = st.columns([5, 1])
             col_msg.caption(
                 f"{n_missing} game{'s' if n_missing != 1 else ''} in this window "
@@ -5014,12 +5021,20 @@ def page_projection_vs_actual(roster: dict, api_key: str) -> None:
                 _retro_table.clear()
                 st.session_state["pva_cache_buster"] = cache_buster + 1
                 st.rerun()
-        else:
+        elif not in_demo and table.empty:
+            # No api_key, no results — give a clear hint.
             st.caption(
                 f"{n_missing} game{'s' if n_missing != 1 else ''} in this window "
                 f"{'have' if n_missing != 1 else 'has'} no cached sportsbook line and "
-                f"{'are' if n_missing != 1 else 'is'} excluded."
-                + ("" if _is_demo_mode() else " Add an Odds API key in Settings to fetch historical lines.")
+                f"{'are' if n_missing != 1 else 'is'} excluded. "
+                "Add an Odds API key in Settings to fetch historical lines."
+            )
+        elif in_demo and table.empty:
+            # Demo mode + no evaluable games — explain gracefully.
+            empty_state(
+                "No sportsbook lines available",
+                f"No cached lines found for {player} · {stat} in the current window. "
+                "The bundled odds history covers most of the season — try a different stat or player.",
             )
 
     if table.empty:
