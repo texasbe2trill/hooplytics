@@ -699,23 +699,48 @@ def _bundled_odds_path() -> Path:
     return Path(__file__).parent.parent / "data" / "odds" / "historical_props.parquet"
 
 
+def _load_bundled_odds() -> pd.DataFrame:
+    """Read the committed parquet bundle, or return empty on failure.
+
+    Always normalizes ``game_date`` to a Timestamp so the result can be
+    safely concatenated with the JSON-cache loader output.
+    """
+    bundle = _bundled_odds_path()
+    if not bundle.exists():
+        return pd.DataFrame(columns=["game_date", "player", "model", "line", "books"])
+    try:
+        df = pd.read_parquet(bundle)
+    except Exception:  # noqa: BLE001
+        return pd.DataFrame(columns=["game_date", "player", "model", "line", "books"])
+    if "game_date" in df.columns:
+        df["game_date"] = pd.to_datetime(df["game_date"], errors="coerce").dt.normalize()
+        df = df.dropna(subset=["game_date"])
+    return df.reset_index(drop=True)
+
+
 def load_cached_historical_odds(
     cache_dir: Path | None = None,
 ) -> pd.DataFrame:
     """Load all cached historical player prop lines into one DataFrame.
 
-    Scans ``ODDS_HIST_CACHE_DIR`` (or ``cache_dir``) for
-    ``nba_player_props_*.json`` files and concatenates them. The parsed
-    frame is memoized at module level keyed on (file count, latest mtime)
-    so repeat calls — common during per-player feature builds on roster
-    mutation — return instantly without re-reading hundreds of JSON files.
+    Three sources are merged, with later sources taking precedence on
+    overlapping (game_date, player, model) keys:
 
-    When no JSON cache files are found locally (e.g. on Streamlit Cloud),
-    the function falls back to the committed parquet bundle at
-    ``data/odds/historical_props.parquet`` so that backtests and role-shift
-    validation work without a local odds ingestion step.
+      1. ``data/odds/historical_props.parquet`` — committed bundle that ships
+         with the repo so Streamlit Cloud and other no-cache environments can
+         still run backtests / role-shift validation without a local ingest.
+      2. ``ODDS_HIST_CACHE_DIR`` — JSON files written by ``hooplytics
+         ingest-odds`` (the historical endpoint).
+      3. Live snapshots in ``ODDS_CACHE_DIR`` — written every time the app
+         pulls today's slate. These are the freshest source and override
+         older bundle/historical entries for the same date.
 
-    Returns an empty DataFrame if neither source is available.
+    The merge is critical on Streamlit Cloud: the bundle alone isn't enough
+    once the app writes a single live snapshot to disk, because a naive
+    "fallback only when empty" check would then ignore the bundle entirely.
+
+    The parsed frame is memoized at module level keyed on (file count,
+    latest mtime) so repeat calls return instantly.
     """
     hist_dir = Path(cache_dir) if cache_dir else ODDS_HIST_CACHE_DIR
     live_dir = hist_dir.parent
@@ -723,28 +748,37 @@ def load_cached_historical_odds(
     files = list(hist_dir.glob("nba_player_props_*.json")) if hist_dir.exists() else []
     if live_dir.exists() and live_dir != hist_dir:
         files += list(live_dir.glob("nba_player_props_*.json"))
+
+    bundle_df = _load_bundled_odds()
+
     if not files:
-        # No local JSON cache — fall back to the committed parquet bundle.
-        bundle = _bundled_odds_path()
-        if bundle.exists():
-            try:
-                df = pd.read_parquet(bundle)
-                if "game_date" in df.columns:
-                    df["game_date"] = pd.to_datetime(df["game_date"], errors="coerce").dt.normalize()
-                return df.dropna(subset=["game_date"]).reset_index(drop=True)
-            except Exception:  # noqa: BLE001
-                pass
-        return pd.DataFrame(columns=["game_date", "player", "model", "line", "books"])
+        # No local JSON cache — return the bundle as-is.
+        return bundle_df
 
     fingerprint = (
         str(hist_dir),
         len(files),
         max((f.stat().st_mtime for f in files), default=0.0),
+        bool(not bundle_df.empty),
     )
     cached = _HIST_ODDS_CACHE.get(fingerprint)
     if cached is not None:
         return cached
-    result = _load_cached_historical_odds_impl(str(hist_dir), fingerprint)
+
+    json_df = _load_cached_historical_odds_impl(str(hist_dir), fingerprint)
+
+    # Merge: bundle first (oldest), JSON cache second (overrides on conflict).
+    if bundle_df.empty:
+        result = json_df
+    elif json_df.empty:
+        result = bundle_df
+    else:
+        merged = pd.concat([bundle_df, json_df], ignore_index=True)
+        # Newer entries (later in concat order) win on duplicate keys.
+        result = merged.drop_duplicates(
+            subset=["game_date", "player", "model"], keep="last"
+        ).reset_index(drop=True)
+
     # Keep only the latest fingerprint to avoid unbounded growth as the
     # cache directory churns.
     _HIST_ODDS_CACHE.clear()
