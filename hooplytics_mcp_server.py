@@ -50,6 +50,9 @@ from hooplytics.ai_agent import (
     chat_complete,
     generate_slate_brief,
 )
+from hooplytics.role_shift_detector import RoleShiftDetector, apply_role_shift_guard
+
+_role_shift_detector = RoleShiftDetector()
 
 
 _DEFAULT_ROSTER_PATH = Path.home() / ".hooplytics" / "roster.json"
@@ -172,25 +175,103 @@ mcp = FastMCP(
 def project_player(
     player_name: str,
     last_n: int = 5,
+    features: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """
     Project a player's next-game stats across all 8 Hooplytics RACE models
     (points, rebounds, assists, PRA, 3PM, stl+blk, turnovers, fantasy score).
 
     Returns a dict keyed by stat name with each model's projection, target column,
-    and feature inputs.
+    and feature inputs. If features are provided, the Role Shift Detector runs and
+    annotates suppressed stats in the response.
 
     Args:
         player_name: Full or partial NBA player name (fuzzy-matched).
         last_n: Number of recent games used for the rolling-window features (default 5).
+        features: Optional rolling feature dict for role-shift detection (see check_role_shift).
+            # TODO: wire the feature store so features are auto-populated from the modeling
+            # frame without requiring the caller to pass them explicitly. Currently the caller
+            # must pass ast_l3/ast_l30/ast_std_l10 etc. manually; once the feature store is
+            # accessible here, this argument can be removed and detection becomes automatic.
     """
     store, bundle = _bootstrap()
     proj_df = project_next_game(player_name, bundle=bundle, store=store, last_n=last_n)
-    return {
+    projections = _projection_dict(proj_df)
+
+    response: dict[str, Any] = {
         "player": player_name,
         "last_n": last_n,
-        "projections": _projection_dict(proj_df),
+        "projections": projections,
     }
+
+    # Role-shift guard — only runs when features are explicitly supplied
+    if features:
+        model_outputs = {k: dict(v) for k, v in projections.items()}
+        apply_role_shift_guard(player_name, features, model_outputs, _role_shift_detector)
+        response["role_shift"] = model_outputs.pop("role_shift", {})
+        response["projections"] = model_outputs
+    else:
+        response["role_shift"] = None
+
+    return response
+
+
+@mcp.tool()
+def check_role_shift(
+    player_name: str,
+    features: dict[str, float],
+) -> dict[str, Any]:
+    """
+    Run the Hooplytics Role Shift Detector for a player using their current rolling features.
+
+    Checks 4 signals (assists, points, usage, minutes) against season baselines and flags
+    in-series role transitions that would break RACE directional calls.
+
+    Severity levels:
+        SUPPRESS — |z| >= 2.0σ on any signal; affected prop calls should be voided.
+        WARN     — |z| >= 1.5σ; confidence reduced by 20%, use last_n=3.
+        NONE     — No significant role shift detected.
+
+    Args:
+        player_name: Full NBA player name.
+        features: Dict of rolling feature values. Recognised keys:
+            ast_l3, ast_l30, ast_std_l10   (assists signal)
+            pts_l3, pts_l30, pts_dev_s     (points signal)
+            fga_l10, fga_l30               (usage signal, 10% ≈ 1σ)
+            min_l3, min_l30                (minutes signal, 10% ≈ 1σ)
+            Any subset is accepted; missing signals are skipped.
+
+    Returns a dict with all signal details plus a plain-English 'prose' summary.
+    """
+    result = _role_shift_detector.check(player_name, features)
+    payload = result.to_dict()
+
+    if not result.shift_detected:
+        prose = (
+            f"No role shift detected for {player_name}. "
+            f"All rolling signals are within normal bounds — RACE calls are valid."
+        )
+    elif result.severity.value == "SUPPRESS":
+        shift_names = ", ".join(s.value for s in result.shift_types)
+        sup = ", ".join(result.suppressed_stats)
+        max_z = max((abs(s.z_score) for s in result.signals), default=0.0)
+        prose = (
+            f"ROLE SHIFT SUPPRESSION for {player_name}. "
+            f"Signal: {shift_names} (peak σ={max_z:.2f}). "
+            f"Affected props ({sup}) have been voided — the model's baseline no longer "
+            f"reflects the player's current on-court role. "
+            f"Use last_n={result.recommended_last_n} when the role stabilises."
+        )
+    else:
+        shift_names = ", ".join(s.value for s in result.shift_types)
+        prose = (
+            f"Role shift WARNING for {player_name}: {shift_names}. "
+            f"Confidence reduced by {result.confidence_penalty:.0%}. "
+            f"Consider using last_n={result.recommended_last_n} for tighter recency weighting."
+        )
+
+    payload["prose"] = prose
+    return payload
 
 
 @mcp.tool()
@@ -200,11 +281,16 @@ def analyze_prop(
     line: float | None = None,
     last_n: int = 5,
     confidence_margin: float = 0.10,
+    features: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """
     Compare a player's model projection against a sportsbook line for a single stat.
     Returns the projected value, MORE/LESS call, edge gap, historical hit-rate,
     and model confidence metadata.
+
+    If features are supplied, the Role Shift Detector runs automatically. A SUPPRESS
+    result converts the call to NO_CALL and adds a call_reason explanation. A WARN
+    result attaches a confidence_penalty of 0.20.
 
     Args:
         player_name: Full or partial NBA player name.
@@ -212,6 +298,7 @@ def analyze_prop(
         line: The sportsbook line threshold. If omitted, auto-fetched from The Odds API.
         last_n: Recent-game window for rolling features.
         confidence_margin: Minimum edge (fraction of line) required to signal MORE/LESS.
+        features: Optional rolling feature dict for role-shift detection (see check_role_shift).
     """
     if stat not in MODEL_SPECS:
         return {
@@ -229,6 +316,22 @@ def analyze_prop(
         last_n=last_n,
         confidence_margin=confidence_margin,
     )
+
+    # Role-shift guard
+    if features:
+        shift = _role_shift_detector.check(player_name, features)
+        result["role_shift"] = shift.to_dict()
+        if shift.shift_detected:
+            if shift.severity.value == "SUPPRESS" and stat in shift.suppressed_stats:
+                result["call"] = "NO_CALL"
+                result["call_valid"] = False
+                result["call_reason"] = (
+                    f"Role shift detected ({', '.join(s.value for s in shift.shift_types)}). "
+                    f"Stat '{stat}' is in the suppressed list — call voided."
+                )
+            elif shift.severity.value == "WARN":
+                result["confidence_penalty"] = shift.confidence_penalty
+
     return result
 
 

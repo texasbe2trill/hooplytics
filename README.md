@@ -86,6 +86,7 @@ python3 -m venv .venv && source .venv/bin/activate && pip install -e .
 | :--- | :--- |
 | 🎛️ &nbsp; Open the dashboard | `hooplytics-web` |
 | 🎯 &nbsp; Project a player's next game | `hooplytics project "Jalen Brunson"` |
+| 🔄 &nbsp; Detect a role / usage shift | `hooplytics role-shift "Jalen Brunson"` |
 | 📈 &nbsp; Compare a projection vs. a live line | `hooplytics prop "Shai Gilgeous-Alexander" points` |
 | 📊 &nbsp; See the live line board | `hooplytics lines --refresh` |
 | 📑 &nbsp; Generate a printable scouting report | Open the dashboard → **Roster Report** → *Generate PDF* |
@@ -184,6 +185,9 @@ Streamlit for visuals, CLI for speed, notebook for reproducibility.
 
 #### 🔍 No black boxes
 Feature importance, residuals, calibration plots, and per-stat health summaries are first-class citizens.
+
+#### 🔄 Role shift detection, built in
+The **RoleShiftDetector** watches for sudden changes in assists, scoring, usage, and minutes across every player projection. When a signal fires, it surfaces a WARN or SUPPRESS flag — and the model respects it automatically.
 
 #### 🛡️ Pregame-safe by design
 Rolling features are computed from prior games only — no leakage, no surprises.
@@ -426,12 +430,13 @@ A player intelligence workbench is built to make data easier to *explore, explai
 | 📡 **Live line context** | Auto-fetched lines from The Odds API across CLI and dashboard, with session-only BYO-key support in the web app |
 | 🎯 **Edge board** | Slate-wide projection-vs-line gap analysis, signed edges, MORE/LESS calls, and book counts — feeds the dashboard, the AI scout, and the PDF report |
 | 👤 **Player analysis** | Recent form, rolling trends, distributions, player profiles, season averages, and recent-window comparisons |
+| 🔄 **Role Shift Detection** | **RoleShiftDetector** monitors 4 signals (assists σ, scoring σ, usage FGA%, minutes%) against per-signal thresholds. WARN flags add a confidence note; SUPPRESS flags flip projections to **NO_CALL** for the affected stats. Suppression map is empirically validated via a full backtest attribution cross-table (403 games, +0.064 overall directional-accuracy lift). Visible in the sidebar **Role Alerts** widget, the `role-shift` CLI command, and the `check_role_shift` MCP tool. |
 | 🧠 **Modeling stack** | RACE blend (Ridge + kNN + Random Forest pipelines) across eight target stats, role and context features |
 | 🎚️ **Market-anchored calibration** | Two-layer calibration applied at inference (Huber per-market `actual ≈ a + b·line` + per-player residual mean clipped to ±20%) blended with the model via per-market weights — corrects systematic bias without retraining. Built with `hooplytics-build-calibration` and shipped as `bundles/calibration_v1.json` |
 | 📦 **Prebuilt RACE bundles** | Multiple ready-to-use bundles ship in `bundles/` (e.g. `race_fast.joblib`, `race_playoffs.joblib`). The Streamlit app auto-loads one on launch and lets you switch between them from the sidebar — zero cold-start training required |
 | 🔬 **Diagnostics** | RMSE / MAE / R², predicted-vs-actual panels, residual views, feature importance, and per-stat health summaries |
 | ⚡ **CLI workflows** | Single-player projection, prop comparison, scenario inputs, live line board, roster persistence, and prebuilt-bundle training |
-| 🤖 **MCP server** | Use the full Hooplytics engine directly from Claude Desktop. Nine tools cover projections, prop analysis, scenario scoring, live line boards, scout reports, slate briefs, and roster management — see [HOOPLYTICS_MCP_SETUP.md](HOOPLYTICS_MCP_SETUP.md) |
+| 🤖 **MCP server** | Use the full Hooplytics engine directly from Claude Desktop. Ten tools cover projections, prop analysis, role shift detection, scenario scoring, live line boards, scout reports, slate briefs, and roster management — see [HOOPLYTICS_MCP_SETUP.md](HOOPLYTICS_MCP_SETUP.md) |
 | 📓 **Notebook workflow** | Rich exploratory narrative with tables, charts, code, and reproducible analysis in one place |
 
 ---
@@ -459,6 +464,7 @@ Hooplytics ships with a Typer-based CLI that renders to **Rich** tables and pane
 | Command | Purpose |
 | :--- | :--- |
 | `hooplytics project` | Project a player's next game across all 8 models |
+| `hooplytics role-shift` | Detect assist / scoring / usage / minutes role shifts with WARN / SUPPRESS severity |
 | `hooplytics prop` | Compare a player projection against a posted line for a single stat |
 | `hooplytics decisions` | 8-stat projection summary with model-vs-line gap analysis |
 | `hooplytics scenario` | Score a hypothetical box-score JSON payload |
@@ -475,6 +481,10 @@ Hooplytics ships with a Typer-based CLI that renders to **Rich** tables and pane
 ```bash
 # Next-game projection across all 8 models
 hooplytics project "Victor Wembanyama"
+
+# Role shift check — prints WARN/SUPPRESS panel; exits 0 (NONE), 1 (WARN), 2 (SUPPRESS)
+hooplytics role-shift "Jalen Brunson"
+hooplytics role-shift "Donovan Mitchell" --json   # machine-readable output
 
 # Single-stat comparison — line auto-fetched from The Odds API
 hooplytics prop "Shai Gilgeous-Alexander" points
@@ -513,6 +523,7 @@ Hooplytics ships a [Model Context Protocol](https://modelcontextprotocol.io/) se
 **What you get inside Claude:**
 
 - **Next-game projections** across all 8 RACE models, plus single-stat MORE/LESS calls vs sportsbook lines.
+- **Role shift detection** (`check_role_shift`) — ask Claude "is there a role shift concern for Jalen Brunson?" and get a full signal breakdown with WARN / SUPPRESS severity and per-stat NO_CALL flags.
 - **Live line board** sorted by projection gap, with book counts and consensus medians.
 - **Scenario scoring** for hypothetical box scores ("what if he plays 36 minutes and shoots 55%?").
 - **AI Scout reports** and **AI Slate Briefs** — the same prose engine the Streamlit dashboard uses, grounded in projection data.
@@ -727,7 +738,7 @@ hooplytics/
 │   ├── race_playoffs.joblib      # Playoff-tuned RACE bundle (selectable in sidebar)
 │   └── calibration_v1.json       # Market-anchored calibration artifact (auto-applied by predict)
 ├── hooplytics/
-│   ├── cli.py                    # Typer CLI entry point
+│   ├── cli.py                    # Typer CLI entry point (includes `role-shift` command)
 │   ├── constants.py
 │   ├── data.py                   # Game log ingestion + caching
 │   ├── fantasy.py
@@ -736,6 +747,11 @@ hooplytics/
 │   ├── features_role.py          # Role / usage features
 │   ├── models.py                 # 8-stat RACE model training
 │   ├── odds.py                   # The Odds API client
+│   ├── backtest.py               # Retro-projection accuracy backtest (pregame-safe)
+│   ├── role_shift_detector.py    # RoleShiftDetector: 4-signal WARN/SUPPRESS engine
+│   ├── role_shift_validate.py    # Empirical backtest validator (directional accuracy by severity)
+│   ├── role_shift_attribute.py   # Attribution cross-table: (signal × stat) directional-accuracy lift
+│   ├── role_shift_sweep.py       # Threshold sweep utility for signal calibration
 │   ├── ai_agent.py               # Provider-agnostic AI dispatcher (OpenAI ↔ Claude)
 │   ├── openai_agent.py           # OpenAI transport: chat, slate brief, edge explainer, PDF prose
 │   ├── anthropic_agent.py        # Anthropic Claude transport (mirrors openai_agent's API)
@@ -749,6 +765,7 @@ hooplytics/
 │       ├── app.py                # Streamlit multi-page app
 │       ├── charts.py
 │       ├── launcher.py           # `hooplytics-web` entry point
+│       ├── role_shift_widget.py  # Role Alerts sidebar widget (WARN/SUPPRESS chips + signal cards)
 │       └── styles.py
 └── tests/
 ```
@@ -766,9 +783,9 @@ hooplytics/
 
 #### 📦 Data & analytics
 - 🏷️ **Player archetype clustering** — auto-tag players ("primary creator", "stretch big", "off-ball wing") from role + shooting embeddings, surfaced in the grounding payload so AI prose can reason about role-shape directly.
-- 🔁 **Backtesting framework** — replay the edge board logic against a historical date and score what the would-be calls actually did. Pairs naturally with the calibration QA workflow.
 - 👥 **Multi-roster profiles** — save and switch between named rosters from the sidebar (DFS lineup, season-long fantasy, futures slate) without losing each one's bundle / model state.
 - 📡 Richer book-level line telemetry inside the Streamlit app — per-book vig, line movement, and fastest-mover attribution.
+- 🔄 **Retrain RACE bundles on enriched odds data** — role shift detection lifts directional accuracy by +0.064 overall; the next step is retraining the core RACE models with cached sportsbook lines as features so the base projection absorbs market information before the suppression layer runs.
 
 #### 🎨 UX & polish
 - 🎬 Fresh Streamlit dashboard screenshots and rendered demos for the Roster Report, Performance Analytics, and Hooplytics Scout pages.

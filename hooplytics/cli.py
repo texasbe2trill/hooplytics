@@ -1,13 +1,14 @@
 """Hooplytics CLI — Typer + Rich.
 
 Commands:
-    project   — project a player's next game from recent form
-    prop      — single MORE/LESS prop call (auto-fetches line)
-    decisions — full 8-stat decision table
-    scenario  — predict from a hypothetical box-score JSON
-    lines     — today's live lines + edge-sorted decisions
-    roster    — manage your persisted roster
-    train     — pre-warm the model cache
+    project    — project a player's next game from recent form
+    prop       — single MORE/LESS prop call (auto-fetches line)
+    decisions  — full 8-stat decision table
+    scenario   — predict from a hypothetical box-score JSON
+    lines      — today's live lines + edge-sorted decisions
+    role-shift — check for in-series player role transitions
+    roster     — manage your persisted roster
+    train      — pre-warm the model cache
 """
 from __future__ import annotations
 
@@ -38,6 +39,9 @@ from . import (
     retro_projection_table,
 )
 from .constants import MODEL_SPECS
+from .role_shift_detector import RoleShiftDetector, Severity
+
+_detector = RoleShiftDetector()
 
 app = typer.Typer(
     add_completion=False,
@@ -125,6 +129,78 @@ def _df_to_table(df, *, title: str | None = None) -> Table:
     return table
 
 
+# ── Role-shift rendering helpers ────────────────────────────────────────────
+
+def _render_shift_panel_cli(result) -> None:
+    """Print a Rich panel above the projection table when a shift is detected."""
+    from rich.panel import Panel
+
+    sev = result.severity
+    if sev == Severity.SUPPRESS:
+        border = "red"
+        title = "[bold red]🔴 ROLE SHIFT — SUPPRESS[/bold red]"
+    else:
+        border = "yellow"
+        title = "[bold yellow]⚠ ROLE SHIFT — WARN[/bold yellow]"
+
+    shift_names = ", ".join(s.value for s in result.shift_types)
+    lines = [
+        f"[bold]Shift type:[/bold]  {shift_names}",
+        f"[bold]Severity:[/bold]    {sev.value}",
+    ]
+    if result.suppressed_stats:
+        sup = ", ".join(result.suppressed_stats)
+        lines.append(f"[bold]NO_CALL stats:[/bold] {sup}")
+    if sev == Severity.WARN:
+        lines.append(f"[bold]Confidence:[/bold]  -{result.confidence_penalty:.0%}")
+    lines.append(f"[bold]Recommended last_n:[/bold] {result.recommended_last_n}")
+
+    # Signal rows
+    lines.append("")
+    lines.append("[bold]Signals[/bold]")
+    for sig in result.signals:
+        action_str = (
+            "[red]SUPPRESS[/red]" if sig.action == "SUPPRESS"
+            else "[yellow]WARN[/yellow]" if sig.action == "WARN"
+            else "[green]OK[/green]"
+        )
+        lines.append(
+            f"  {sig.stat:<12} L3={sig.recent:>6.1f}  L30={sig.baseline:>5.1f}"
+            f"  σ={sig.z_score:>+6.2f}  → {action_str}"
+        )
+
+    console.print(Panel("\n".join(lines), title=title, border_style=border))
+
+
+def _df_to_table_with_suppression(df, suppressed: set[str], title: str | None = None) -> Table:
+    """Like _df_to_table but annotates rows for suppressed stats with NO_CALL."""
+    table = Table(title=title, show_lines=False, header_style="bold cyan")
+    for col in df.columns:
+        table.add_column(str(col), overflow="fold")
+    for _, row in df.iterrows():
+        stat_name = str(row.get("model", ""))
+        is_suppressed = stat_name in suppressed
+        cells = []
+        for col, val in row.items():
+            text = "" if val is None else str(val)
+            style = ""
+            if is_suppressed and col in ("decision", "call", "model"):
+                style = "bold red"
+                if col in ("decision", "call"):
+                    text = "NO_CALL"
+            elif col in ("decision", "call"):
+                style = "bold green" if "MORE" in text else "bold red"
+            elif col == "edge":
+                try:
+                    f = float(val)
+                    style = "green" if f > 0 else "red"
+                except (TypeError, ValueError):
+                    pass
+            cells.append(Text(text, style=style))
+        table.add_row(*cells)
+    return table
+
+
 # ── Commands ─────────────────────────────────────────────────────────────────
 @app.command()
 def project(
@@ -134,6 +210,7 @@ def project(
     json_out: bool = typer.Option(False, "--json", help="Emit JSON instead of a table."),
 ) -> None:
     """Project a player's next game across all 8 models."""
+    import pandas as pd
     store, bundle, roster = _bootstrap()
     name = _resolve_player(store, player)
     player_data = store.load_player_data(roster) if name in roster else None
@@ -142,10 +219,155 @@ def project(
         name, bundle=bundle, store=store,
         last_n=last_n, seasons=seasons, modeling_df=modeling_df,
     )
+
+    # Role-shift guard — extract features from the latest modeling row
+    shift_result = None
+    if modeling_df is not None and not modeling_df.empty:
+        player_rows = modeling_df[modeling_df["player"] == name] if "player" in modeling_df.columns else modeling_df
+        if not player_rows.empty:
+            if "game_date" in player_rows.columns:
+                player_rows = player_rows.sort_values("game_date")
+            latest = player_rows.iloc[-1]
+            _feature_keys = [
+                "ast_l3", "ast_l30", "ast_std_l10",
+                "pts_l3", "pts_l30", "pts_dev_s",
+                "fga_l10", "fga_l30",
+                "min_l3", "min_l30",
+            ]
+            features: dict[str, float] = {}
+            for k in _feature_keys:
+                val = latest.get(k) if hasattr(latest, "get") else (latest[k] if k in latest.index else None)
+                if val is not None:
+                    try:
+                        features[k] = float(val)
+                    except (TypeError, ValueError):
+                        pass
+            if features:
+                shift_result = _detector.check(name, features)
+
     if json_out:
-        console.print_json(df.to_json(orient="records"))
+        out = json.loads(df.to_json(orient="records"))
+        if shift_result:
+            for row in out:
+                stat = row.get("model", "")
+                if shift_result.severity == Severity.SUPPRESS and stat in shift_result.suppressed_stats:
+                    row["call"] = "NO_CALL"
+            out_wrapper = {"projections": out, "role_shift": shift_result.to_dict()}
+        else:
+            out_wrapper = {"projections": out, "role_shift": None}
+        console.print_json(json.dumps(out_wrapper))
         return
-    console.print(_df_to_table(df, title=f"Projection — {name} (last {last_n})"))
+
+    # Print role-shift panel above projection table if shift detected
+    if shift_result and shift_result.shift_detected:
+        _render_shift_panel_cli(shift_result)
+
+    # Build projection table, annotating suppressed stats with NO_CALL
+    suppressed: set[str] = set()
+    if shift_result and shift_result.severity == Severity.SUPPRESS:
+        suppressed = set(shift_result.suppressed_stats)
+
+    table = _df_to_table_with_suppression(df, suppressed=suppressed,
+                                          title=f"Projection — {name} (last {last_n})")
+    console.print(table)
+
+
+@app.command(name="role-shift")
+def role_shift(
+    player: str = typer.Argument(..., help="Player name (fuzzy match OK)."),
+    last_n: int = typer.Option(5, "--last-n", "-n", help="Rolling window size (unused in detection but sets context)."),
+    json_out: bool = typer.Option(False, "--json", help="Emit raw JSON instead of a Rich table."),
+) -> None:
+    """Check for in-series role transitions that would break RACE directional calls.
+
+    Exit codes:
+        0 — No shift detected
+        1 — WARN (|z| >= 1.5σ, confidence -20%)
+        2 — SUPPRESS (|z| >= 2.0σ, props voided)
+    """
+    store, bundle, roster = _bootstrap()
+    name = _resolve_player(store, player)
+
+    player_data = store.load_player_data(roster) if name in roster else None
+    modeling_df = store.modeling_frame(player_data) if player_data is not None else None
+
+    features: dict[str, float] = {}
+    if modeling_df is not None and not modeling_df.empty:
+        player_rows = (
+            modeling_df[modeling_df["player"] == name]
+            if "player" in modeling_df.columns
+            else modeling_df
+        )
+        if not player_rows.empty:
+            if "game_date" in player_rows.columns:
+                player_rows = player_rows.sort_values("game_date")
+            latest = player_rows.iloc[-1]
+            _feature_keys = [
+                "ast_l3", "ast_l30", "ast_std_l10",
+                "pts_l3", "pts_l30", "pts_dev_s",
+                "fga_l10", "fga_l30",
+                "min_l3", "min_l30",
+            ]
+            for k in _feature_keys:
+                val = latest.get(k) if hasattr(latest, "get") else (latest[k] if k in latest.index else None)
+                if val is not None:
+                    try:
+                        features[k] = float(val)
+                    except (TypeError, ValueError):
+                        pass
+
+    result = _detector.check(name, features)
+
+    if json_out:
+        console.print_json(json.dumps(result.to_dict()))
+        raise typer.Exit(0 if result.severity == Severity.NONE
+                         else 1 if result.severity == Severity.WARN
+                         else 2)
+
+    if not result.shift_detected:
+        console.print(
+            Panel(
+                f"[green]✓ No role shift detected for [bold]{name}[/bold].[/green]\n"
+                "All rolling signals are within normal bounds — RACE calls are valid.",
+                title="Role Shift Check",
+                border_style="green",
+            )
+        )
+        raise typer.Exit(0)
+
+    _render_shift_panel_cli(result)
+
+    # Signal table
+    sig_table = Table(title="Signal details", show_lines=False, header_style="bold cyan")
+    sig_table.add_column("Stat", style="bold")
+    sig_table.add_column("L3", justify="right")
+    sig_table.add_column("L30", justify="right")
+    sig_table.add_column("σ", justify="right")
+    sig_table.add_column("Action")
+
+    for sig in result.signals:
+        action_text = Text(sig.action)
+        if sig.action == "SUPPRESS":
+            action_text.stylize("bold red")
+        elif sig.action == "WARN":
+            action_text.stylize("bold yellow")
+        else:
+            action_text.stylize("green")
+        sig_table.add_row(
+            sig.stat,
+            f"{sig.recent:.1f}",
+            f"{sig.baseline:.1f}",
+            f"{sig.z_score:+.2f}",
+            action_text,
+        )
+    console.print(sig_table)
+
+    exit_code = (
+        2 if result.severity == Severity.SUPPRESS
+        else 1 if result.severity == Severity.WARN
+        else 0
+    )
+    raise typer.Exit(exit_code)
 
 
 @app.command()

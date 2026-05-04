@@ -30,12 +30,9 @@ METRICS: dict[str, str] = {
 
 # ── Default starter roster ───────────────────────────────────────────────────
 DEFAULT_ROSTER: dict[str, dict[str, float]] = {
-    "LeBron James":            {"points": 21.5, "fantasy_score": 41.5, "pra": 34.0, "threepm": 1.5, "assists": 7.0},
-    "Kevin Durant":            {"points": 26.0, "fantasy_score": 42.0, "pra": 36.0, "threepm": 2.5, "assists": 4.5},
-    "Victor Wembanyama":       {"points": 25.0, "fantasy_score": 53.0, "pra": 39.5, "threepm": 1.5, "assists": 3.0},
-    "Shai Gilgeous-Alexander": {"points": 31.0, "fantasy_score": 50.0, "pra": 41.0, "threepm": 2.0, "assists": 6.5},
-    "Chet Holmgren":           {"points": 18.0, "fantasy_score": 38.0, "pra": 30.0, "threepm": 1.5, "assists": 2.5},
-    "Ausar Thompson":          {"points": 14.5, "fantasy_score": 34.0, "pra": 26.0, "threepm": 0.5, "assists": 3.5},
+    "Jalen Brunson":    {"points": 26.0, "fantasy_score": 44.0, "pra": 35.0, "threepm": 2.5, "assists": 6.5},
+    "Donovan Mitchell": {"points": 24.0, "fantasy_score": 42.0, "pra": 33.0, "threepm": 3.0, "assists": 4.5},
+    "James Harden":     {"points": 22.0, "fantasy_score": 45.0, "pra": 36.0, "threepm": 3.0, "assists": 8.5},
 }
 
 # Veteran anchor cohort used to stabilize model training.

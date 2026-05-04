@@ -97,6 +97,14 @@ from hooplytics.report_performance import (
     player_performance_summary,
 )
 from hooplytics.web import charts
+from hooplytics.web.role_shift_widget import (
+    extract_features_from_games,
+    render_sidebar_role_shift_summary,
+)
+from hooplytics.role_shift_detector import RoleShiftDetector, RoleShiftResult, Severity
+
+_role_shift_detector = RoleShiftDetector()
+
 from hooplytics.web.styles import (
     chip,
     disclaimer,
@@ -4958,8 +4966,18 @@ def page_projection_vs_actual(roster: dict, api_key: str) -> None:
     n_games_requested = c3.selectbox("Games", [10, 15, 20, 30], index=1, key="pva_n_games")
 
     # Dynamic cache buster — incremented when the user fetches new lines.
-    # Also bump manually when code adds new columns to retro_projection_table.
-    cache_buster = int(st.session_state.get("pva_cache_buster", 7))
+    # Also bump manually when code changes the *behaviour* of
+    # retro_projection_table without changing its signature (Streamlit caches
+    # on signature only).
+    #
+    # Bump 7 → 8 (2026-05-04): retro_projection_table semantics changed —
+    # n_games now means "the last N evaluable games" instead of "the last N
+    # calendar positions, then drop ones without cached lines". Old cache
+    # entries returned silently-tiny game lists (e.g. n=10 returned 2 games
+    # for some players), producing wildly noisy directional accuracy figures
+    # like 50% on Brunson's pra last-10. This buster forces a fresh compute
+    # against the corrected logic.
+    cache_buster = int(st.session_state.get("pva_cache_buster", 8))
 
     table, missing_line_dates = _retro_table(
         player, stat, int(n_games_requested), roster_key,
@@ -5074,9 +5092,37 @@ PAGES = {
 }
 
 
+def _compute_roster_shift_results(roster: dict) -> dict[str, RoleShiftResult]:
+    """Run role-shift detection for every rostered player from the modeling frame."""
+    results: dict[str, RoleShiftResult] = {}
+    modeling_df = _modeling_frame(_roster_key())
+    if modeling_df.empty:
+        return results
+    for player in roster:
+        if "player" not in modeling_df.columns:
+            break
+        games = modeling_df[modeling_df["player"] == player]
+        if "game_date" in games.columns:
+            games = games.sort_values("game_date")
+        features = extract_features_from_games(games)
+        results[player] = _role_shift_detector.check(player, features)
+    return results
+
+
 def main() -> None:
     _init_state()
     page, api_key, _openai_api_key = _render_sidebar()
+
+    # Sidebar role-shift summary (SUPPRESS/WARN players highlighted)
+    roster = st.session_state.roster
+    if roster:
+        try:
+            shift_results = _compute_roster_shift_results(roster)
+            with st.sidebar:
+                render_sidebar_role_shift_summary(shift_results)
+        except Exception:
+            pass  # never block the main render for a sidebar widget failure
+
     PAGES[page](st.session_state.roster, api_key)
 
 

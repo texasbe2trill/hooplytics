@@ -129,8 +129,13 @@ def retro_projection_table(
     player_odds = _load_player_odds(player, stat)
 
     # The earliest evaluable position requires min_prior_games rows before it.
+    # We walk ALL positions (not just the last n_games of them) so that
+    # historical games with cached odds aren't silently dropped when they fall
+    # outside an arbitrary calendar window. The n_games trim is applied AFTER
+    # the cached-line filter so "n_games=15" means "the 15 most-recent
+    # evaluable games", not "the 15 most-recent calendar positions, of which
+    # most have no cached line and silently disappear."
     eval_positions = list(range(min_prior_games, n_total))
-    eval_positions = eval_positions[-n_games:]
 
     records: list[dict] = []
     missing_line_dates: list[str] = []  # game dates skipped due to no cached sportsbook line
@@ -193,8 +198,21 @@ def retro_projection_table(
         })
 
     df = pd.DataFrame(records)
+    # Trim to the most recent n_games of *evaluable* rows (after cached-line
+    # filter). The DataFrame is already in chronological order because we
+    # iterated eval_positions ascending, so .tail() takes the latest games.
+    if not df.empty and len(df) > n_games:
+        df = df.tail(n_games).reset_index(drop=True)
     # Store skipped dates so callers (e.g. Streamlit) can offer to fetch them.
-    df.attrs["missing_line_dates"] = missing_line_dates
+    # Keep dates that are within the trimmed window — anything older is simply
+    # outside what the user asked to see.
+    if df.empty or "game_date" not in df.columns:
+        df.attrs["missing_line_dates"] = missing_line_dates
+    else:
+        oldest_shown = df["game_date"].min()
+        df.attrs["missing_line_dates"] = [
+            d for d in missing_line_dates if d >= oldest_shown
+        ]
     return df
 
 
