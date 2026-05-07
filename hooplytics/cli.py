@@ -583,8 +583,21 @@ def compare(
 
 @app.command(name="ingest-odds")
 def ingest_odds(
-    start: str = typer.Option(..., "--start", help="Start date ISO, e.g. 2023-10-01"),
-    end: str = typer.Option(..., "--end", help="End date ISO (exclusive), e.g. 2024-06-30"),
+    start: Optional[str] = typer.Option(
+        None, "--start", help="Start date ISO, e.g. 2023-10-01 (omit when using --file)"
+    ),
+    end: Optional[str] = typer.Option(
+        None, "--end", help="End date ISO (exclusive), e.g. 2024-06-30 (omit when using --file)"
+    ),
+    file: Optional[Path] = typer.Option(
+        None,
+        "--file",
+        help=(
+            "Import historical lines from a parquet bundle instead of fetching "
+            "from The Odds API. Splits rows by game_date and writes per-date "
+            "JSON files into the local cache."
+        ),
+    ),
     force: bool = typer.Option(False, "--force", help="Re-fetch already-cached dates."),
     markets: Optional[str] = typer.Option(
         None,
@@ -596,16 +609,53 @@ def ingest_odds(
         ),
     ),
 ) -> None:
-    """Ingest historical player prop lines from The Odds API into the local cache.
+    """Ingest historical player prop lines into the local cache.
 
-    Example: hooplytics ingest-odds --start 2023-10-01 --end 2024-04-15
+    Two modes:
 
-    NOTE: Requires a paid Odds API plan. Costs ~10 credits per market per event
-    (default 4 markets × 1 region × 10x historical multiplier = 40 cr/event).
-    Use ``--markets points,rebounds`` to halve the cost.
+    \b
+      • API:    hooplytics ingest-odds --start 2023-10-01 --end 2024-04-15
+      • Parquet: hooplytics ingest-odds --file data/odds/historical_props.parquet
+
+    NOTE: API mode requires a paid Odds API plan. Costs ~10 credits per market
+    per event (default 4 markets × 1 region × 10x historical multiplier =
+    40 cr/event). Use ``--markets points,rebounds`` to halve the cost.
+
+    Parquet mode reads ``game_date, player, model, line`` (plus optional
+    ``books``, ``line_std``, ``over_price``, ``under_price``) from a parquet
+    file and writes per-date JSON files identical to those produced by API
+    mode, so downstream tools (compare-projections, role-shift validate,
+    etc.) pick them up without any further setup.
     """
     import datetime
     from .constants import ODDS_MARKETS, ODDS_PLAYER_PROPS_CUTOFF
+    from .odds import ingest_odds_from_parquet
+
+    if file is not None:
+        if start or end or markets or force:
+            err_console.print(
+                "[red]--file cannot be combined with --start/--end/--markets/--force.[/red]"
+            )
+            raise typer.Exit(1)
+        try:
+            result = ingest_odds_from_parquet(file, verbose=True)
+        except (FileNotFoundError, ValueError) as exc:
+            err_console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1)
+
+        n_rows = len(result)
+        n_dates = result["game_date"].nunique() if not result.empty else 0
+        console.print(
+            f"[green]✓ Imported {n_rows} player-prop lines across {n_dates} date(s) "
+            f"from {file}.[/green]"
+        )
+        return
+
+    if not start or not end:
+        err_console.print(
+            "[red]--start and --end are required when --file is not provided.[/red]"
+        )
+        raise typer.Exit(1)
 
     api_key = load_api_key()
     if not api_key:

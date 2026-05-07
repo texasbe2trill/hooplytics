@@ -533,6 +533,95 @@ def ingest_historical_odds(
     return pd.concat(frames, ignore_index=True)
 
 
+def ingest_odds_from_parquet(
+    parquet_path: Path | str,
+    *,
+    cache_dir: Path | None = None,
+    verbose: bool = False,
+) -> pd.DataFrame:
+    """Import historical player prop lines from a parquet bundle into the
+    per-date JSON cache that ``load_cached_historical_odds`` reads.
+
+    The parquet must carry at least ``game_date``, ``player``, ``model`` and
+    ``line`` columns; ``books``, ``line_std``, ``over_price`` and
+    ``under_price`` are preserved when present. Rows are split by
+    ``game_date`` and written as ``nba_player_props_<YYYY-MM-DD>.json`` into
+    ``cache_dir`` (default: ``ODDS_HIST_CACHE_DIR``). When a date already has
+    a cached file, parquet rows win on duplicate ``(player, model)`` keys
+    while any other existing rows are preserved.
+
+    Returns the combined frame that was written.
+    """
+    src = Path(parquet_path)
+    if not src.exists():
+        raise FileNotFoundError(f"Parquet file not found: {src}")
+
+    try:
+        df = pd.read_parquet(src)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"Could not read parquet at {src}: {exc}") from exc
+
+    required = {"game_date", "player", "model", "line"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"Parquet missing required column(s): {sorted(missing)}. "
+            f"Expected at least {sorted(required)}."
+        )
+
+    if df.empty:
+        return df
+
+    df = df.copy()
+    df["game_date"] = pd.to_datetime(df["game_date"], errors="coerce").dt.normalize()
+    df = df.dropna(subset=["game_date"])
+    if df.empty:
+        return df
+
+    target_dir = Path(cache_dir) if cache_dir else ODDS_HIST_CACHE_DIR
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    written: list[pd.DataFrame] = []
+    for date_ts, group in df.groupby("game_date", sort=True):
+        date_str = date_ts.strftime("%Y-%m-%d")
+        cache_path = target_dir / f"nba_player_props_{date_str}.json"
+        new_rows = group.copy()
+        new_rows["game_date"] = date_str
+
+        if cache_path.exists():
+            try:
+                existing = pd.read_json(cache_path, orient="records")
+            except Exception:  # noqa: BLE001
+                existing = pd.DataFrame()
+            if not existing.empty:
+                combined = pd.concat([existing, new_rows], ignore_index=True)
+                combined = combined.drop_duplicates(
+                    subset=["player", "model"], keep="last"
+                ).reset_index(drop=True)
+            else:
+                combined = new_rows
+        else:
+            combined = new_rows
+
+        try:
+            combined.to_json(cache_path, orient="records")
+        except Exception as exc:  # noqa: BLE001
+            if verbose:
+                print(f"  [warn] failed to write {cache_path}: {exc}")
+            continue
+        if verbose:
+            print(f"  wrote {cache_path.name} ({len(combined)} rows)")
+        written.append(combined)
+
+    # Invalidate the in-process loader memo so subsequent reads pick up the
+    # newly-written files instead of returning a stale frame.
+    _HIST_ODDS_CACHE.clear()
+
+    if not written:
+        return pd.DataFrame(columns=["game_date", "player", "model", "line", "books"])
+    return pd.concat(written, ignore_index=True)
+
+
 def _live_props_filename_to_date(name: str) -> str | None:
     """Pull the ``YYYY-MM-DD`` segment from a live-cache filename."""
     m = re.search(r"nba_player_props_(\d{4}-\d{2}-\d{2})\.json$", name)

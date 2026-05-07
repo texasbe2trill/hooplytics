@@ -39,7 +39,13 @@ from .features_role import build_role_features
 from .fantasy import fantasy
 from .features_market import build_market_features
 from .models import ModelBundle, TARGET_FEATURE_GROUPS, ensure_models, train_models
-from .odds import fetch_live_player_lines, ingest_historical_odds, load_api_key, load_cached_historical_odds
+from .odds import (
+    fetch_live_player_lines,
+    ingest_historical_odds,
+    ingest_odds_from_parquet,
+    load_api_key,
+    load_cached_historical_odds,
+)
 from .predict import (
     custom_prop,
     fantasy_decisions,
@@ -78,6 +84,7 @@ __all__ = [
     "fantasy_decisions",
     "fetch_live_player_lines",
     "ingest_historical_odds",
+    "ingest_odds_from_parquet",
     "load_api_key",
     "load_cached_historical_odds",
     "nba_seasons",
